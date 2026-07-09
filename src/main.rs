@@ -118,6 +118,10 @@ struct CheckArgs {
     #[arg(long, env = "VETRO_API_URL")]
     api_url: Option<String>,
 
+    /// Write the report to a file instead of stdout (for CI artifacts).
+    #[arg(long, value_name = "FILE")]
+    output: Option<std::path::PathBuf>,
+
     /// Only print the summary line.
     #[arg(short, long)]
     quiet: bool,
@@ -263,7 +267,10 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         }
     };
 
-    output::render(&resp, args.format, args.quiet);
+    if let Err(e) = output::render(&resp, args.format, &files, args.quiet, args.output.as_deref()) {
+        eprintln!("error: could not write output: {e}");
+        return ExitCode::from(exit::USAGE);
+    }
 
     // Nudge toward an upgrade as the monthly CLI allowance runs low (stderr, so
     // it never pollutes --format json on stdout). null = unmetered plan.
