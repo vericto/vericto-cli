@@ -1,0 +1,34 @@
+[package]
+name = "vetro-cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Vetro CLI — validate SQL against your workspace's security rules before it runs"
+license = "Elastic-2.0"
+repository = "https://github.com/donkan168/vetro-cli"
+
+# The installed command is `vetro`, not `vetro-cli`.
+[[bin]]
+name = "vetro"
+path = "src/main.rs"
+
+[dependencies]
+# CLI parsing with derive.
+clap = { version = "4.5", features = ["derive", "env"] }
+# HTTP client (rustls to avoid a system OpenSSL dependency in CI images).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Colored human output; honors NO_COLOR automatically.
+anstream = "0.6"
+anstyle = "1"
+# Config file (~/.config/vetro/config.toml) parsing + serialization.
+toml = "0.8"
+# Cross-platform config directory resolution.
+dirs = "5"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
