@@ -64,6 +64,10 @@ pub struct CheckResponse {
     pub queries: Vec<QueryResult>,
     /// Server-computed: 1 iff at least one query was BLOCKED.
     pub exit_code: i32,
+    /// Remaining CLI checks this month for the plan; null = unmetered
+    /// (team/enterprise). Absent on older backends.
+    #[serde(default)]
+    pub ci_checks_remaining: Option<i64>,
 }
 
 /// Errors the client surfaces, mapped to CLI exit codes by the caller.
@@ -131,11 +135,46 @@ pub async fn check(
     }
 }
 
-/// Pulls a human message out of a JSON error body (`{"error": "..."}`),
-/// falling back to the raw body.
+/// Pulls a human message out of a JSON error body, falling back to the raw
+/// body. The backend uses a nested envelope `{"error": {"code","message"}}`;
+/// older/other responses may use a flat `{"error": "..."}`. Handle both.
 fn extract_message(body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-        .unwrap_or_else(|| body.trim().to_string())
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(err) = v.get("error") {
+            // Nested: { error: { code, message } }
+            if let Some(msg) = err.get("message").and_then(|m| m.as_str()) {
+                return msg.to_string();
+            }
+            // Flat: { error: "..." }
+            if let Some(msg) = err.as_str() {
+                return msg.to_string();
+            }
+        }
+        // Some handlers return { message: "..." } at the top level.
+        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+            return msg.to_string();
+        }
+    }
+    body.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_message;
+
+    #[test]
+    fn extracts_nested_envelope() {
+        let body = r#"{"error":{"code":"UNAUTHORIZED","message":"API key inválida."}}"#;
+        assert_eq!(extract_message(body), "API key inválida.");
+    }
+
+    #[test]
+    fn extracts_flat_error() {
+        assert_eq!(extract_message(r#"{"error":"boom"}"#), "boom");
+    }
+
+    #[test]
+    fn falls_back_to_raw_body() {
+        assert_eq!(extract_message("plain text error"), "plain text error");
+    }
 }
