@@ -1,6 +1,8 @@
 # vetro-cli — Design (v0)
 
-> Status: **v0.1 scaffold implemented** (`vetro check`).
+> Status: **v0.1 (MVP) implemented** — `check`, `login`, `logout`, `doctor`,
+> config file + env/flag resolution, exit codes. Verified end-to-end against the
+> local backend stack.
 > Decisions locked: **thin-client of the SaaS**, **new repo `vetro-cli`**, **Rust**,
 > **HTTP/JSON transport** (gRPC evaluated and rejected — see §3), **whole-file
 > submission** (no client-side statement splitting — see §5 / §12.3).
@@ -36,7 +38,9 @@ The CLI consumes the existing batch endpoint — no backend work required for v0
 
 - **Endpoint:** `POST /api/v1/ci/check-key`  (backend `routes/ci.ts`)
 - **Auth:** API key `vtro_...` via `X-API-Key` (or `Authorization: Bearer`).
-  Requires the **`ci_dryrun:execute`** scope; **gated to TEAM+** plans.
+  Requires the **`ci_dryrun:execute`** scope. **Available on every plan**, metered
+  by a monthly CLI allowance (`monthly_ci_check_count` vs `PLAN_CI_LIMIT`: free
+  1000, builder 10000, team/enterprise unmetered) — see §12.1.
 - **Request:**
   ```json
   {
@@ -120,15 +124,15 @@ vetro version              Print version.
 
 ## 5. Input handling
 
-- **Files / globs:** `vetro check migrations/*.sql` — each file is read and split
-  into statements (naive `;` split client-side; the server's engine does the real
-  multi-statement parse). Each statement becomes a `{line, sql}` item so the
-  report points at the offending line.
-- **stdin:** `git diff --cached --name-only | ...` patterns, or
-  `vetro check - < migration.sql` for pre-commit hooks.
-- **Batching:** the endpoint accepts ≤500 queries per call. The CLI chunks larger
-  inputs into multiple calls and aggregates the summary. **Chunking is logged** so
-  a truncation is never silent.
+- **Files:** `vetro check migrations/*.sql` — the shell expands the glob; each
+  file is read **whole** and sent as one `{line: N, sql: <file>}` item (no
+  client-side `;` splitting — see §12.3). One item per file, indexed by argument
+  position. Empty inputs are skipped.
+- **stdin:** `vetro check - < migration.sql`, or `git show :file.sql | vetro
+  check -` for pre-commit hooks.
+- **Batching (v0.2):** the endpoint accepts ≤500 queries per call. v0.1 sends one
+  item per file in a single call; explicit chunking/aggregation for very large
+  file sets is a v0.2 refinement (and will be logged, never silently truncated).
 
 ## 6. Config & auth
 
@@ -196,8 +200,9 @@ block. (`--monitor` forces `0` for findings but not for codes 2–4.)
 
 ## 11. Phasing
 
-- **v0.1 (MVP):** `check` (files + stdin), `--dialect`, `--format text|json`,
-  `--monitor`, `--fail-on`, exit codes, `login`/`logout`, `doctor`, config+env.
+- **v0.1 (MVP) — DONE:** `check` (files + stdin), `--dialect`, `--format
+  text|json`, `--monitor`, `--fail-on`, exit codes, `login`/`logout`, `doctor`,
+  config file + env + flags.
 - **v0.2:** globbing + chunking polish, `--format sarif`, GitHub Action,
   `vetro init` (hook + workflow scaffolding).
 - **v0.3:** watch/dev ergonomics; consider caching the ruleset version in
@@ -205,11 +210,13 @@ block. (`--monitor` forces `0` for findings but not for codes 2–4.)
 
 ## 12. Open questions (need product decisions)
 
-1. **Plan gating.** `/ci/check-key` is TEAM+ only, so the CLI is effectively a
-   paid feature with no free tier. Intentional? If free/builder users should get
-   *something*, options: (a) a lower-tier endpoint with built-in rules only, or
-   (b) revisit the local-first mode (offline, no account) for the free path. This
-   is the biggest strategic call and blocks nothing technical, but shapes reach.
+1. **Plan gating — RESOLVED.** The CLI is available on **every plan**, not just
+   TEAM+. `/ci/check-key` is now metered by a separate monthly allowance
+   (`workspaces.monthly_ci_check_count` vs `PLAN_CI_LIMIT`: free 1000, builder
+   10000, team/enterprise unmetered) instead of a hard plan floor, so the free
+   tier gets the CLI without cannibalizing the runtime-query budget that protects
+   the production database. The response carries `ci_checks_remaining`; the CLI
+   warns as it runs low and `doctor` reports it.
 2. **Which dialect by default when files mix engines?** v0 assumes one `--dialect`
    per run. A repo with both PG and MySQL migrations needs either per-file
    detection or separate invocations. Propose: per-invocation for v0, document it.
