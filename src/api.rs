@@ -15,6 +15,22 @@ pub struct QueryInput {
     pub sql: String,
 }
 
+/// CI run provenance (§2.1). Attached best-effort to every request so the audit
+/// record can be traced to a commit/branch/pipeline. Additive to the backend
+/// contract — older backends ignore the unknown field. Empty fields are omitted.
+#[derive(Debug, Default, Serialize)]
+pub struct Provenance {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    pub ci_provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_run_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
 /// Request body for `POST /api/v1/ci/check-key`.
 #[derive(Debug, Serialize)]
 pub struct CheckRequest {
@@ -25,6 +41,10 @@ pub struct CheckRequest {
     /// The backend can render text/json; we always request json and format
     /// locally, so this stays "json".
     pub output_format: String,
+    /// CI provenance (§2.1); omitted entirely when detection produced nothing
+    /// useful (e.g. no git, no CI env).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
 }
 
 /// Per-query verdict in the response.
