@@ -44,11 +44,43 @@ cargo install --path .
 
 ```
 vetro check [files...]   Evaluate SQL files (or '-' for stdin). The core command.
+vetro baseline [files]   Record current findings to .vetro-baseline.json.
 vetro login              Store an API key (and optional URL/dialect) in config.
 vetro logout             Remove the stored API key.
 vetro doctor             Verify config, connectivity, auth, and plan quota.
 vetro init               Scaffold a CI workflow (+ pre-commit hook with --hook).
 ```
+
+## Baseline & suppression
+
+Adopting the CLI on a repo with pre-existing unsafe SQL shouldn't turn the build
+red on day one. Record the current findings, then only *new* ones fail:
+
+```bash
+vetro baseline migrations/*.sql          # writes .vetro-baseline.json
+vetro check migrations/*.sql --baseline .vetro-baseline.json
+```
+
+Suppress a single finding inline (a **reason is required**, so it stays
+accountable):
+
+```sql
+DELETE FROM users; -- vetro:ignore[VETRO-001] one-off backfill, tracked in JIRA-42
+```
+
+## Project config (`.vetro.toml`)
+
+Commit repo-wide defaults so pipelines don't repeat flags. Credentials are never
+allowed here (use `vetro login` / env). Flags and env still override it.
+
+```toml
+# .vetro.toml
+default_dialect = "postgres"
+fail_on = "flag"
+baseline = ".vetro-baseline.json"
+```
+
+Resolution order (first wins): flags → env → `.vetro.toml` → `~/.config/vetro/config.toml`.
 
 ## Scaffolding CI (`vetro init`)
 
@@ -101,16 +133,25 @@ vetro check schema.sql --monitor
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `[files...]` | — | SQL files; `-` reads stdin (required) |
+| `[files...]` | — | SQL files; `-` reads stdin. Optional with `--changed`/`--since` |
+| `--changed` | off | Check only `*.sql` changed vs the CI merge base |
+| `--since <ref>` | — | Explicit base ref for changed-file selection |
 | `--dialect` | `postgres` | `postgres` \| `mysql` \| `oracle` \| `mssql` |
-| `--format` | `text` | `text` \| `json` |
+| `--format` | `text` | `text` \| `json` \| `sarif` \| `gitlab-codequality` \| `gitlab-sast` |
+| `--output <file>` | stdout | Write the report to a file (CI artifacts) |
+| `--baseline <file>` | — | Ignore findings recorded in the baseline |
 | `--monitor` | off | Report findings but exit 0 (dry-run) |
 | `--fail-on` | `block` | `block` \| `flag` \| `any` — what causes exit 1 |
+| `--timeout <secs>` | `30` | Per-request timeout (`$VETRO_TIMEOUT`) |
+| `--concurrency <n>` | `4` | Max in-flight chunk requests, capped at 8 (`$VETRO_CONCURRENCY`) |
+| `--ca-bundle <path>` | — | Extra CA PEM to trust (`$VETRO_CA_BUNDLE`, then `$SSL_CERT_FILE`) |
+| `--allow-degraded <reason>` | off | Exit 0 (not 4) if the backend is unreachable; reason required |
 | `--api-key` | `$VETRO_API_KEY` / config | Vetro API key (`vtro_...`) |
 | `--api-url` | `https://api.vetro.dev` | Backend URL (`$VETRO_API_URL` / config) |
 | `--quiet` / `-q` | off | Only print the summary line |
 
-`--dialect` falls back to the config's `default_dialect`, then `postgres`.
+`--dialect`, `--fail-on` and `--baseline` fall back to `.vetro.toml`, then their
+defaults.
 
 ### Configuration
 
