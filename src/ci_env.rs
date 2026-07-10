@@ -188,3 +188,75 @@ fn run_url(provider: Provider) -> Option<String> {
         Provider::Local => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_as_str_values() {
+        assert_eq!(Provider::GitHub.as_str(), "github");
+        assert_eq!(Provider::GitLab.as_str(), "gitlab");
+        assert_eq!(Provider::Local.as_str(), "local");
+    }
+
+    // Env-var-driven detection is exercised in one serial test to avoid races
+    // with other tests that read the process environment.
+    #[test]
+    fn detect_and_provenance_from_env() {
+        // Snapshot the vars we touch, so we can restore them.
+        let keys = [
+            "GITHUB_ACTIONS",
+            "GITLAB_CI",
+            "GITHUB_REF",
+            "GITHUB_ACTOR",
+            "GITHUB_SERVER_URL",
+            "GITHUB_REPOSITORY",
+            "GITHUB_RUN_ID",
+            "CI_JOB_URL",
+            "CI_COMMIT_REF_NAME",
+            "GITLAB_USER_LOGIN",
+        ];
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+
+        // No CI vars → Local.
+        assert_eq!(Provider::detect(), Provider::Local);
+
+        // GitHub.
+        std::env::set_var("GITHUB_ACTIONS", "true");
+        std::env::set_var("GITHUB_SERVER_URL", "https://github.com");
+        std::env::set_var("GITHUB_REPOSITORY", "org/repo");
+        std::env::set_var("GITHUB_RUN_ID", "42");
+        std::env::set_var("GITHUB_ACTOR", "octocat");
+        assert_eq!(Provider::detect(), Provider::GitHub);
+        assert_eq!(
+            run_url(Provider::GitHub).as_deref(),
+            Some("https://github.com/org/repo/actions/runs/42")
+        );
+        assert_eq!(actor(Provider::GitHub).as_deref(), Some("octocat"));
+
+        // GitLab (takes precedence check: remove GH marker first).
+        std::env::remove_var("GITHUB_ACTIONS");
+        std::env::set_var("GITLAB_CI", "true");
+        std::env::set_var("CI_JOB_URL", "https://gitlab.com/org/repo/-/jobs/9");
+        std::env::set_var("GITLAB_USER_LOGIN", "gluser");
+        assert_eq!(Provider::detect(), Provider::GitLab);
+        assert_eq!(
+            run_url(Provider::GitLab).as_deref(),
+            Some("https://gitlab.com/org/repo/-/jobs/9")
+        );
+        assert_eq!(actor(Provider::GitLab).as_deref(), Some("gluser"));
+
+        // Restore.
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}

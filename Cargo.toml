@@ -28,6 +28,13 @@ toml = "0.8"
 # Cross-platform config directory resolution.
 dirs = "5"
 
+[dev-dependencies]
+# HTTP mocking for the API-client tests (in-process wiremock server).
+wiremock = "0.6"
+# Spawn the built binary in integration tests (exercises the run_* commands).
+assert_cmd = "2"
+tempfile = "3"
+
 [profile.release]
 strip = true
 lto = true

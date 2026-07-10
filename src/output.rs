@@ -386,3 +386,206 @@ fn status_style(status: &str) -> (&'static str, Style) {
         _ => ("✓", Style::new().fg_color(Some(AnsiColor::Green.into()))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::Summary;
+
+    fn q(status: &str, rule: Option<&str>, sev: Option<&str>) -> QueryResult {
+        QueryResult {
+            line: 1,
+            sql_preview: "DELETE FROM t".into(),
+            status: status.into(),
+            action: None,
+            rule_code: rule.map(String::from),
+            ast_node_path: Some("DeleteStmt > WhereClause = NULL".into()),
+            severity: sev.map(String::from),
+            suggested_fix: Some("add WHERE".into()),
+        }
+    }
+
+    fn resp(queries: Vec<QueryResult>) -> CheckResponse {
+        CheckResponse {
+            summary: Summary {
+                total: queries.len() as u32,
+                blocked: 1,
+                allowed: 0,
+                flagged: 0,
+                monitored: 0,
+                parse_errors: 0,
+                ruleset_version: "v1".into(),
+            },
+            queries,
+            exit_code: 1,
+            ci_checks_remaining: None,
+            telemetry_query_mode: None,
+        }
+    }
+
+    #[test]
+    fn file_for_maps_line_to_path_and_stdin() {
+        let files = vec!["a.sql".to_string(), "-".to_string()];
+        assert_eq!(file_for(&files, 1), "a.sql");
+        assert_eq!(file_for(&files, 2), "<stdin>"); // "-" → stdin
+        assert_eq!(file_for(&files, 9), "<stdin>"); // out of range
+    }
+
+    #[test]
+    fn is_finding_excludes_allowed() {
+        assert!(!is_finding(&q("ALLOWED", None, None)));
+        assert!(is_finding(&q(
+            "BLOCKED",
+            Some("VETRO-001"),
+            Some("critical")
+        )));
+    }
+
+    #[test]
+    fn sarif_level_from_status_and_severity() {
+        assert_eq!(sarif_level(&q("BLOCKED", None, None)), "error");
+        assert_eq!(sarif_level(&q("PARSE_ERROR", None, None)), "warning");
+        assert_eq!(sarif_level(&q("FLAGGED", None, Some("high"))), "error");
+        assert_eq!(sarif_level(&q("FLAGGED", None, Some("medium"))), "warning");
+        assert_eq!(sarif_level(&q("MONITORED", None, Some("low"))), "note");
+    }
+
+    #[test]
+    fn gitlab_severities_map() {
+        assert_eq!(gitlab_cq_severity(&q("BLOCKED", None, None)), "blocker");
+        assert_eq!(
+            gitlab_cq_severity(&q("FLAGGED", None, Some("critical"))),
+            "critical"
+        );
+        assert_eq!(
+            gitlab_cq_severity(&q("FLAGGED", None, Some("medium"))),
+            "minor"
+        );
+        assert_eq!(gitlab_sast_severity(&q("BLOCKED", None, None)), "Critical");
+        assert_eq!(
+            gitlab_sast_severity(&q("FLAGGED", None, Some("low"))),
+            "Low"
+        );
+        assert_eq!(gitlab_sast_severity(&q("FLAGGED", None, None)), "Unknown");
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_rule_sensitive() {
+        let a = fingerprint(&q("BLOCKED", Some("VETRO-001"), None), "m.sql");
+        let b = fingerprint(&q("BLOCKED", Some("VETRO-001"), None), "m.sql");
+        let c = fingerprint(&q("BLOCKED", Some("VETRO-010"), None), "m.sql");
+        assert_eq!(a, b); // deterministic
+        assert_ne!(a, c); // different rule → different fp
+    }
+
+    #[test]
+    fn finding_message_includes_rule_severity_path() {
+        let m = finding_message(&q("BLOCKED", Some("VETRO-001"), Some("critical")));
+        assert!(m.contains("VETRO-001"));
+        assert!(m.contains("BLOCKED"));
+        assert!(m.contains("critical"));
+        assert!(m.contains("fix:"));
+    }
+
+    #[test]
+    fn render_json_roundtrips() {
+        let out = render_json(&resp(vec![q(
+            "BLOCKED",
+            Some("VETRO-001"),
+            Some("critical"),
+        )]));
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["summary"]["blocked"], 1);
+        assert_eq!(v["queries"][0]["status"], "BLOCKED");
+        assert_eq!(v["exit_code"], 1);
+    }
+
+    #[test]
+    fn render_sarif_has_results_and_rules() {
+        let files = vec!["m.sql".to_string()];
+        let out = render_sarif(
+            &resp(vec![q("BLOCKED", Some("VETRO-001"), Some("critical"))]),
+            &files,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["version"], "2.1.0");
+        assert_eq!(v["runs"][0]["results"][0]["ruleId"], "VETRO-001");
+        assert_eq!(v["runs"][0]["results"][0]["level"], "error");
+        assert_eq!(
+            v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+                ["uri"],
+            "m.sql"
+        );
+    }
+
+    #[test]
+    fn render_gitlab_codequality_shape() {
+        let files = vec!["m.sql".to_string()];
+        let out =
+            render_gitlab_codequality(&resp(vec![q("BLOCKED", Some("VETRO-001"), None)]), &files);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v[0]["check_name"], "VETRO-001");
+        assert_eq!(v[0]["severity"], "blocker");
+        assert_eq!(v[0]["location"]["path"], "m.sql");
+        assert!(v[0]["fingerprint"].as_str().unwrap().len() == 16);
+    }
+
+    #[test]
+    fn render_gitlab_sast_shape() {
+        let files = vec!["m.sql".to_string()];
+        let out = render_gitlab_sast(&resp(vec![q("BLOCKED", Some("VETRO-001"), None)]), &files);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["scan"]["scanner"]["id"], "vetro");
+        assert_eq!(v["vulnerabilities"][0]["severity"], "Critical");
+        assert_eq!(v["vulnerabilities"][0]["location"]["file"], "m.sql");
+    }
+
+    #[test]
+    fn render_text_plain_lists_findings_and_summary() {
+        let files = vec!["m.sql".to_string()];
+        let out = render_text_plain(
+            &resp(vec![q("BLOCKED", Some("VETRO-001"), Some("critical"))]),
+            &files,
+            false,
+        );
+        assert!(out.contains("m.sql"));
+        assert!(out.contains("VETRO-001"));
+        assert!(out.contains("blocked"));
+        // quiet mode: only the summary line, no per-finding lines.
+        let quiet = render_text_plain(
+            &resp(vec![q("BLOCKED", Some("VETRO-001"), None)]),
+            &files,
+            true,
+        );
+        assert!(!quiet.contains("VETRO-001"));
+        assert!(quiet.contains("blocked"));
+    }
+
+    #[test]
+    fn render_to_file_writes_json() {
+        let files = vec!["m.sql".to_string()];
+        let dir = std::env::temp_dir().join(format!("vetro-out-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.json");
+        render(
+            &resp(vec![q("BLOCKED", Some("VETRO-001"), None)]),
+            Format::Json,
+            &files,
+            false,
+            Some(&path),
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("\"blocked\": 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_style_marks() {
+        assert_eq!(status_style("BLOCKED").0, "✖");
+        assert_eq!(status_style("FLAGGED").0, "!");
+        assert_eq!(status_style("MONITORED").0, "•");
+        assert_eq!(status_style("PARSE_ERROR").0, "?");
+        assert_eq!(status_style("ALLOWED").0, "✓");
+    }
+}

@@ -184,3 +184,73 @@ echo "$staged" | xargs vetro check --dialect {dialect}
 "#
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_workflow_has_key_pieces() {
+        let w = github_workflow("mysql");
+        assert!(w.contains("name: Vetro SQL check"));
+        assert!(w.contains("--dialect mysql"));
+        assert!(w.contains("--format sarif"));
+        assert!(w.contains("upload-sarif"));
+        assert!(w.contains("secrets.VETRO_API_KEY")); // clap escaping produced a single ${{ }}
+    }
+
+    #[test]
+    fn gitlab_job_has_codequality_report() {
+        let j = gitlab_job("postgres");
+        assert!(j.contains("gitlab-codequality"));
+        assert!(j.contains("artifacts:"));
+        assert!(j.contains("codequality:"));
+        assert!(j.contains("merge_request_event"));
+    }
+
+    #[test]
+    fn precommit_hook_is_shell_and_dialect_aware() {
+        let h = precommit_hook("oracle");
+        assert!(h.starts_with("#!/bin/sh"));
+        assert!(h.contains("--diff-filter=d"));
+        assert!(h.contains("--dialect oracle"));
+        assert!(h.contains("command -v vetro")); // no-op when vetro absent
+    }
+
+    #[test]
+    fn write_file_creates_skips_and_forces() {
+        let dir = std::env::temp_dir().join(format!("vetro-scaffold-{}", std::process::id()));
+        let path = dir.join("nested/out.yml");
+        // First write creates.
+        match write_file(&path, "hello", false, false).unwrap() {
+            Written::Created(p) => assert_eq!(p, path),
+            Written::Skipped(_) => panic!("expected Created"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        // Second write without force skips (content unchanged).
+        match write_file(&path, "changed", false, false).unwrap() {
+            Written::Skipped(_) => {}
+            Written::Created(_) => panic!("expected Skipped"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        // With force it overwrites.
+        matches!(
+            write_file(&path, "changed", true, false).unwrap(),
+            Written::Created(_)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "changed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_sets_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("vetro-scaffold-x-{}", std::process::id()));
+        let path = dir.join("hook");
+        write_file(&path, "#!/bin/sh\n", false, true).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

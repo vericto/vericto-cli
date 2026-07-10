@@ -632,4 +632,204 @@ mod tests {
         let base2 = BACKOFF_BASE * 4;
         assert!(d2 >= base2 && d2 < base2 + jitter_cap);
     }
+
+    // ── HTTP-client tests against an in-process mock server ──────────────────
+
+    use super::{check_all, config, version, ApiError, CheckParams, QueryInput, Transport};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn transport() -> Transport {
+        Transport {
+            timeout: Duration::from_secs(5),
+            ca_bundle: None,
+        }
+    }
+
+    fn ok_body(total: u32, blocked: u32, remaining: i64, mode: &str) -> serde_json::Value {
+        serde_json::json!({
+            "summary": {
+                "total": total, "blocked": blocked, "allowed": total - blocked,
+                "flagged": 0, "monitored": 0, "parse_errors": 0,
+                "ruleset_version": "v1"
+            },
+            "queries": (0..total).map(|i| serde_json::json!({
+                "line": i + 1,
+                "sql_preview": "x",
+                "status": if i < blocked { "BLOCKED" } else { "ALLOWED" },
+            })).collect::<Vec<_>>(),
+            "exit_code": if blocked > 0 { 1 } else { 0 },
+            "ci_checks_remaining": remaining,
+            "telemetry_query_mode": mode,
+        })
+    }
+
+    fn params<'a>(server_uri: &'a str, key: &'a str) -> CheckParams<'a> {
+        CheckParams {
+            api_url: server_uri,
+            api_key: key,
+            dialect: "postgres",
+            file_name: None,
+            provenance: None,
+            transport: transport(),
+            concurrency: 4,
+        }
+    }
+
+    #[tokio::test]
+    async fn version_parses_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "api_version": "1.2.0", "min_cli_version": "0.1.0"
+            })))
+            .mount(&server)
+            .await;
+        let info = version(&server.uri(), &transport()).await.unwrap();
+        assert_eq!(info.api_version.as_deref(), Some("1.2.0"));
+        assert_eq!(info.min_cli_version.as_deref(), Some("0.1.0"));
+    }
+
+    #[tokio::test]
+    async fn version_404_is_backend_error() {
+        let server = MockServer::start().await;
+        // No mock for /version → 404.
+        let err = version(&server.uri(), &transport()).await.unwrap_err();
+        assert!(matches!(err, ApiError::Backend { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn config_sends_api_key_and_parses_mode() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/config"))
+            .and(header("x-api-key", "vtro_test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "telemetry_query_mode": "sanitized",
+                "plan": "team",
+                "ci_checks_remaining": null,
+                "ruleset_version": "v1"
+            })))
+            .mount(&server)
+            .await;
+        let cfg = config(&server.uri(), "vtro_test", &transport())
+            .await
+            .unwrap();
+        assert_eq!(cfg.telemetry_query_mode.as_deref(), Some("sanitized"));
+        assert_eq!(cfg.plan.as_deref(), Some("team"));
+    }
+
+    #[tokio::test]
+    async fn config_401_is_auth_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/config"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": { "code": "UNAUTHORIZED", "message": "bad key" }
+            })))
+            .mount(&server)
+            .await;
+        let err = config(&server.uri(), "vtro_bad", &transport())
+            .await
+            .unwrap_err();
+        match err {
+            ApiError::Auth(m) => assert_eq!(m, "bad key"),
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_all_single_chunk_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(2, 1, 998, "raw")))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let queries = vec![
+            QueryInput {
+                line: 1,
+                sql: "DELETE FROM t".into(),
+            },
+            QueryInput {
+                line: 2,
+                sql: "SELECT 1".into(),
+            },
+        ];
+        let resp = check_all(params(&uri, "vtro_k"), queries).await.unwrap();
+        assert_eq!(resp.summary.total, 2);
+        assert_eq!(resp.summary.blocked, 1);
+        assert_eq!(resp.exit_code, 1);
+    }
+
+    #[tokio::test]
+    async fn check_all_retries_then_succeeds_on_503() {
+        let server = MockServer::start().await;
+        // First response 503 (retryable), then 200.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(1, 0, 999, "raw")))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let queries = vec![QueryInput {
+            line: 1,
+            sql: "SELECT 1".into(),
+        }];
+        let resp = check_all(params(&uri, "vtro_k"), queries).await.unwrap();
+        assert_eq!(resp.summary.total, 1);
+    }
+
+    #[tokio::test]
+    async fn check_all_auth_error_not_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": { "message": "forbidden" }
+            })))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let queries = vec![QueryInput {
+            line: 1,
+            sql: "SELECT 1".into(),
+        }];
+        let err = check_all(params(&uri, "vtro_k"), queries)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Auth(_)));
+    }
+
+    #[tokio::test]
+    async fn check_all_chunks_and_merges() {
+        let server = MockServer::start().await;
+        // Each call returns a 1-query response; with 600 queries we expect 2
+        // chunks, merged to total 2 here (the mock returns a fixed body per call).
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(1, 1, 500, "raw")))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let queries: Vec<QueryInput> = (0..600)
+            .map(|i| QueryInput {
+                line: i + 1,
+                sql: "DELETE FROM t".into(),
+            })
+            .collect();
+        let resp = check_all(params(&uri, "vtro_k"), queries).await.unwrap();
+        // 2 chunks × (total 1, blocked 1) merged.
+        assert_eq!(resp.summary.total, 2);
+        assert_eq!(resp.summary.blocked, 2);
+        assert_eq!(resp.exit_code, 1);
+    }
 }
