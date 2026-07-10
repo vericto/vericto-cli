@@ -225,9 +225,10 @@ struct CheckArgs {
     #[arg(long)]
     monitor: bool,
 
-    /// Which severity of finding causes a non-zero exit.
-    #[arg(long, value_enum, default_value_t = FailOn::Block)]
-    fail_on: FailOn,
+    /// Which severity of finding causes a non-zero exit. Falls back to
+    /// .vetro.toml's fail_on, then "block".
+    #[arg(long, value_enum)]
+    fail_on: Option<FailOn>,
 
     /// Vetro API key (or set VETRO_API_KEY, or `vetro login`).
     #[arg(long, env = "VETRO_API_KEY", hide_env_values = true)]
@@ -261,7 +262,7 @@ struct CheckArgs {
 }
 
 /// What counts as a failure for the exit code.
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum FailOn {
     /// Only BLOCKED findings fail the run (default).
     Block,
@@ -269,6 +270,22 @@ enum FailOn {
     Flag,
     /// Any finding (BLOCKED / FLAGGED / MONITORED) fails the run.
     Any,
+}
+
+/// Resolves the effective `--fail-on`: the flag wins; else `.vetro.toml`'s
+/// `fail_on` (parsed leniently); else the default `Block`. An unrecognized
+/// value in the file is ignored (falls through to default) with no hard error,
+/// since a typo there shouldn't wedge every run — it just doesn't take effect.
+fn resolve_fail_on(flag: Option<FailOn>, project: Option<&str>) -> FailOn {
+    if let Some(f) = flag {
+        return f;
+    }
+    match project.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("block") => FailOn::Block,
+        Some("flag") => FailOn::Flag,
+        Some("any") => FailOn::Any,
+        _ => FailOn::Block,
+    }
 }
 
 #[tokio::main]
@@ -297,6 +314,15 @@ fn load_config() -> Config {
 
 async fn run_check(args: CheckArgs) -> ExitCode {
     let file = load_config();
+    // Project config (.vetro.toml): PR-reviewable defaults; rejected if it
+    // carries secrets/allow_degraded. A malformed file is a hard error.
+    let project = match config::load_project() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
     let resolved = config::resolve(
         args.api_url.as_deref().unwrap_or(config::DEFAULT_API_URL),
         args.api_url.is_none(),
@@ -308,12 +334,20 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         return ExitCode::from(exit::AUTH);
     };
     let api_url = resolved.api_url;
-    // dialect precedence: flag > config default_dialect > "postgres".
+    // dialect precedence: flag > .vetro.toml > user config default > "postgres".
     let dialect = args
         .dialect
         .clone()
+        .or_else(|| project.default_dialect.clone())
         .or_else(|| file.default_dialect.clone())
         .unwrap_or_else(|| "postgres".to_string());
+    // fail_on precedence: flag > .vetro.toml > default (block).
+    let fail_on = resolve_fail_on(args.fail_on, project.fail_on.as_deref());
+    // baseline precedence: flag > .vetro.toml.
+    let baseline_path = args
+        .baseline
+        .clone()
+        .or_else(|| project.baseline.as_ref().map(std::path::PathBuf::from));
 
     // Resolve the file list: explicit args, or the git diff when --changed/--since.
     let files = match resolve_files(&args.files, args.changed, &args.since) {
@@ -427,14 +461,14 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     // Suppression (§10): a finding does not fail the run if it is baselined or
     // carries an inline `-- vetro:ignore[RULE] reason`. Reporting still shows it;
     // only the exit code is affected.
-    let suppressed = suppressed_fingerprints(&resp, &files, args.baseline.as_deref());
+    let suppressed = suppressed_fingerprints(&resp, &files, baseline_path.as_deref());
     let suppressed = match suppressed {
         Ok(s) => s,
         Err(code) => return code,
     };
     let fails = resp.queries.iter().any(|q| {
         let fp = output::fingerprint(q, &output::file_for(&files, q.line));
-        !suppressed.contains(&fp) && finding_fails(q, args.fail_on)
+        !suppressed.contains(&fp) && finding_fails(q, fail_on)
     });
     if fails {
         ExitCode::from(exit::FINDING)

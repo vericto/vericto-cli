@@ -1,10 +1,11 @@
 //! Persisted config and credential resolution.
 //!
-//! The CLI resolves `api_url`, `api_key` and `default_dialect` from three
-//! sources, first match wins (see DESIGN §6):
+//! The CLI resolves settings from several sources, first match wins (DESIGN §6):
 //!   1. command-line flags
 //!   2. environment (`VETRO_API_KEY`, `VETRO_API_URL`)
-//!   3. config file `~/.config/vetro/config.toml` (written by `vetro login`)
+//!   3. project config `.vetro.toml` at the repo root — behavior defaults only,
+//!      never credentials (§6.3, `ProjectConfig`)
+//!   4. user config file `~/.config/vetro/config.toml` (written by `vetro login`)
 //!
 //! The config file holds the API key, so it is written with `0600` permissions
 //! and never logged.
@@ -104,6 +105,58 @@ fn write_private(path: &std::path::Path, contents: &str) -> io::Result<()> {
     #[cfg(not(unix))]
     {
         std::fs::write(path, contents)
+    }
+}
+
+/// Project-level config from `.vetro.toml` at the repo root (§6.3). Committed
+/// and PR-reviewable, so it holds *defaults for behavior* — never credentials.
+/// Flags and env still override these.
+#[derive(Debug, Default, Deserialize)]
+pub struct ProjectConfig {
+    #[serde(default)]
+    pub default_dialect: Option<String>,
+    #[serde(default)]
+    pub fail_on: Option<String>,
+    #[serde(default)]
+    pub baseline: Option<String>,
+    // Trap fields: present only to detect and reject secrets/decisions that must
+    // not live in a committed file (see load_project's validation).
+    #[serde(default)]
+    pub api_key: Option<toml::Value>,
+    #[serde(default)]
+    pub allow_degraded: Option<toml::Value>,
+}
+
+/// Loads `.vetro.toml` from the current directory (repo root). Missing file →
+/// default. A file that carries `api_key` or `allow_degraded` is rejected: those
+/// are a secret and a per-run safety decision respectively, neither of which
+/// belongs in a committed, PR-reviewable file (§6.3).
+pub fn load_project() -> io::Result<ProjectConfig> {
+    let path = std::path::Path::new(".vetro.toml");
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let cfg: ProjectConfig = toml::from_str(&text).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid .vetro.toml: {e}"),
+                )
+            })?;
+            if cfg.api_key.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    ".vetro.toml must not contain api_key — use `vetro login`, VETRO_API_KEY, or --api-key.",
+                ));
+            }
+            if cfg.allow_degraded.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    ".vetro.toml must not set allow_degraded — pass --allow-degraded per run so the bypass is visible in the pipeline.",
+                ));
+            }
+            Ok(cfg)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(ProjectConfig::default()),
+        Err(e) => Err(e),
     }
 }
 
