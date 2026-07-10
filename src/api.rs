@@ -88,6 +88,20 @@ pub struct CheckResponse {
     /// (team/enterprise). Absent on older backends.
     #[serde(default)]
     pub ci_checks_remaining: Option<i64>,
+    /// Workspace telemetry query mode ('raw' | 'sanitized'), §6.2. Absent on
+    /// older backends → treated as 'raw'.
+    #[serde(default)]
+    pub telemetry_query_mode: Option<String>,
+}
+
+/// Response of `GET /api/v1/version` (§9). Absent fields tolerate older
+/// backends that predate this endpoint (the call itself would 404 there).
+#[derive(Debug, Deserialize)]
+pub struct VersionInfo {
+    #[serde(default)]
+    pub api_version: Option<String>,
+    #[serde(default)]
+    pub min_cli_version: Option<String>,
 }
 
 /// Errors the client surfaces, mapped to CLI exit codes by the caller.
@@ -153,6 +167,32 @@ pub async fn check(
     let client = build_client(timeout)?;
     let url = format!("{}/api/v1/ci/check-key", api_url.trim_end_matches('/'));
     check_with_client(&client, &url, api_key, req).await
+}
+
+/// Fetches `GET /api/v1/version` (§9). No auth. Used by `doctor` to check
+/// backend compatibility. A `404`/older backend without this endpoint surfaces
+/// as `Backend { status: 404, .. }` so the caller can treat it as "unknown".
+pub async fn version(api_url: &str, timeout: Duration) -> Result<VersionInfo, ApiError> {
+    let client = build_client(timeout)?;
+    let url = format!("{}/api/v1/version", api_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(ApiError::Backend {
+            status: status.as_u16(),
+            message: "version endpoint unavailable".to_string(),
+        });
+    }
+    resp.json::<VersionInfo>()
+        .await
+        .map_err(|e| ApiError::Backend {
+            status: status.as_u16(),
+            message: format!("invalid version body: {e}"),
+        })
 }
 
 /// The retry loop against a shared client + resolved URL.
@@ -339,6 +379,8 @@ fn merge_responses(mut parts: Vec<CheckResponse>) -> CheckResponse {
     let mut exit_code = 0;
     // ci_checks_remaining: report the smallest (most conservative) seen.
     let mut remaining: Option<i64> = None;
+    // Workspace-level, identical across chunks — keep the first non-empty.
+    let telemetry_query_mode = parts.iter().find_map(|p| p.telemetry_query_mode.clone());
     for p in parts {
         summary.total += p.summary.total;
         summary.blocked += p.summary.blocked;
@@ -357,6 +399,7 @@ fn merge_responses(mut parts: Vec<CheckResponse>) -> CheckResponse {
         queries,
         exit_code,
         ci_checks_remaining: remaining,
+        telemetry_query_mode,
     }
 }
 
