@@ -7,6 +7,7 @@ mod api;
 mod ci_env;
 mod config;
 mod output;
+mod sanitize;
 mod scaffold;
 
 use std::io::{Read, Write};
@@ -14,7 +15,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use api::{ApiError, CheckRequest, CheckResponse, QueryInput};
+use api::{ApiError, CheckResponse, QueryInput};
 use config::Config;
 use output::Format;
 
@@ -26,6 +27,53 @@ mod exit {
     pub const USAGE: u8 = 2; // bad args / unreadable file
     pub const AUTH: u8 = 3; // missing/invalid key, plan not entitled
     pub const BACKEND: u8 = 4; // unreachable / 5xx / bad response
+}
+
+/// The minimum backend API version this CLI is known to be compatible with
+/// (§9). `doctor` warns on a minor skew and fails on a major mismatch.
+const MIN_BACKEND_API_VERSION: &str = "1.0.0";
+
+/// Parses "MAJOR.MINOR.PATCH" (leading/trailing junk tolerated) into
+/// `(major, minor)`. Returns None if it can't read at least a major.
+fn parse_major_minor(v: &str) -> Option<(u32, u32)> {
+    let core = v.trim().trim_start_matches('v');
+    let mut it = core.split('.');
+    let major = it.next()?.parse::<u32>().ok()?;
+    let minor = it.next().and_then(|s| {
+        // stop at any non-digit (e.g. "0-rc1")
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse::<u32>().ok()
+    });
+    Some((major, minor.unwrap_or(0)))
+}
+
+/// Compatibility verdict between the backend's reported API version and the
+/// minimum this CLI requires.
+enum Compat {
+    Ok,
+    /// Same major, backend minor < our required minor — usable, warn.
+    MinorSkew,
+    /// Major differs — hard incompatibility.
+    MajorMismatch,
+    /// Couldn't parse one of the versions — don't block on it.
+    Unknown,
+}
+
+/// Compares the backend `api_version` against `MIN_BACKEND_API_VERSION`.
+fn backend_compat(api_version: &str) -> Compat {
+    let (Some((b_major, b_minor)), Some((min_major, min_minor))) = (
+        parse_major_minor(api_version),
+        parse_major_minor(MIN_BACKEND_API_VERSION),
+    ) else {
+        return Compat::Unknown;
+    };
+    if b_major != min_major {
+        Compat::MajorMismatch
+    } else if b_minor < min_minor {
+        Compat::MinorSkew
+    } else {
+        Compat::Ok
+    }
 }
 
 #[derive(Parser)]
@@ -297,6 +345,32 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     };
 
     let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
+
+    // Pre-flight (§6.2): learn the workspace's telemetry query mode BEFORE
+    // sending any SQL. When 'sanitized', normalize literals client-side so raw
+    // values never leave the machine. Best-effort: if the config endpoint is
+    // unavailable (older backend) we proceed unsanitized rather than block —
+    // the check itself is the security gate.
+    match api::config(&api_url, &api_key, timeout).await {
+        Ok(cfg) if cfg.telemetry_query_mode.as_deref() == Some("sanitized") => {
+            for q in &mut queries {
+                q.sql = sanitize::sanitize(&q.sql, &dialect);
+            }
+            eprintln!("note: workspace is in sanitized mode — literals normalized before sending.");
+        }
+        Ok(_) => {}
+        Err(ApiError::Auth(e)) => {
+            // A bad key surfaces here first — clearer than failing mid-check.
+            eprintln!("error: {}", ApiError::Auth(e));
+            return ExitCode::from(exit::AUTH);
+        }
+        Err(_) => {
+            // Older backend without /ci/config, or a transient blip: proceed.
+            // If the workspace truly requires sanitization this is a gap, so warn.
+            eprintln!("note: could not read workspace config; proceeding without client-side sanitization.");
+        }
+    }
+
     // Concurrency for chunked runs: default 4, capped at 8 to stay a well-behaved
     // client against the shared CI quota (§5/§12.1).
     let concurrency = args.concurrency.unwrap_or(4).clamp(1, 8);
@@ -512,7 +586,8 @@ fn run_init(args: InitArgs) -> ExitCode {
 
 /// `vetro doctor` — validate config, connectivity, auth and plan entitlement so
 /// problems surface here rather than as a cryptic failure mid-pipeline. It
-/// probes by sending one trivial, always-safe query through the real endpoint.
+/// checks backend compatibility (`/version`) and reads the workspace config
+/// (`/ci/config`) — the latter validates auth WITHOUT spending a CLI check.
 async fn run_doctor(args: DoctorArgs) -> ExitCode {
     let file = load_config();
     let resolved = config::resolve(
@@ -529,36 +604,69 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
     println!("api url:     {}", resolved.api_url);
     println!("api key:     {}", resolved.key_source.label());
 
+    let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
+
+    // Backend compatibility (§9): unauthenticated, so it doubles as the first
+    // reachability check. A major mismatch is fatal (the CLI may mis-parse
+    // responses); a minor skew only warns; an older backend without /version is
+    // treated as unknown and not blocked.
+    println!("\ncli version: {}", env!("CARGO_PKG_VERSION"));
+    match api::version(&resolved.api_url, timeout).await {
+        Ok(info) => match info.api_version.as_deref() {
+            Some(api_version) => {
+                print!("backend api: {api_version}");
+                if let Some(min) = &info.min_cli_version {
+                    print!(" (min cli {min})");
+                }
+                println!();
+                match backend_compat(api_version) {
+                    Compat::Ok => {}
+                    Compat::MinorSkew => println!(
+                        "  ⚠ backend api {api_version} is older than this CLI expects \
+                         (>= {MIN_BACKEND_API_VERSION}); some features may be unavailable."
+                    ),
+                    Compat::MajorMismatch => {
+                        println!(
+                            "\n✖ incompatible backend: api {api_version} vs CLI requires \
+                             {MIN_BACKEND_API_VERSION} (major mismatch). Upgrade the CLI or backend."
+                        );
+                        return ExitCode::from(exit::BACKEND);
+                    }
+                    Compat::Unknown => {}
+                }
+            }
+            None => println!("backend api: (version endpoint returned no api_version)"),
+        },
+        // Older backend without /version, or a transient error — don't block;
+        // the auth probe below is the real connectivity/auth gate.
+        Err(_) => println!("backend api: (version endpoint unavailable — older backend?)"),
+    }
+
     let Some(api_key) = resolved.api_key else {
         println!("\n✖ no API key. Run `vetro login`, pass --api-key, or set VETRO_API_KEY.");
         return ExitCode::from(exit::AUTH);
     };
 
-    // A trivial, always-ALLOWED probe: exercises connectivity + auth + quota
-    // without tripping any rule or consuming a meaningful amount of allowance.
-    let req = CheckRequest {
-        queries: vec![QueryInput {
-            line: 1,
-            sql: "SELECT 1 LIMIT 1".to_string(),
-        }],
-        dialect: file
-            .default_dialect
-            .clone()
-            .unwrap_or_else(|| "postgres".to_string()),
-        file_name: None,
-        output_format: "json".to_string(),
-        provenance: None,
-    };
-
-    let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
-    match api::check(&resolved.api_url, &api_key, &req, timeout).await {
-        Ok(resp) => {
+    // Validate auth + read the workspace config WITHOUT spending a CLI check
+    // (read-only endpoint). Reports plan, quota, ruleset and the query mode.
+    match api::config(&resolved.api_url, &api_key, timeout).await {
+        Ok(cfg) => {
             println!("\n✓ reachable and authenticated");
-            println!("  ruleset: {}", resp.summary.ruleset_version);
-            match resp.ci_checks_remaining {
+            if let Some(plan) = &cfg.plan {
+                println!("  plan: {plan}");
+            }
+            if let Some(rs) = &cfg.ruleset_version {
+                println!("  ruleset: {rs}");
+            }
+            match cfg.ci_checks_remaining {
                 Some(n) => println!("  CLI checks remaining this month: {n}"),
                 None => println!("  CLI checks: unmetered (team/enterprise)"),
             }
+            // §6.2: report the effective query mode so the dev isn't guessing.
+            println!(
+                "  query mode: {}",
+                cfg.telemetry_query_mode.as_deref().unwrap_or("raw")
+            );
             ExitCode::from(exit::OK)
         }
         Err(e @ ApiError::Auth(_)) => {
@@ -643,6 +751,25 @@ mod tests {
     use super::*;
     use crate::api::{QueryResult, Summary};
 
+    #[test]
+    fn parse_major_minor_variants() {
+        assert_eq!(parse_major_minor("1.2.3"), Some((1, 2)));
+        assert_eq!(parse_major_minor("v2.0.0"), Some((2, 0)));
+        assert_eq!(parse_major_minor("1"), Some((1, 0)));
+        assert_eq!(parse_major_minor("3.4-rc1"), Some((3, 4)));
+        assert_eq!(parse_major_minor("nope"), None);
+    }
+
+    #[test]
+    fn backend_compat_matrix() {
+        // MIN_BACKEND_API_VERSION is "1.0.0".
+        assert!(matches!(backend_compat("1.0.0"), Compat::Ok));
+        assert!(matches!(backend_compat("1.3.0"), Compat::Ok)); // newer minor is fine
+        assert!(matches!(backend_compat("2.0.0"), Compat::MajorMismatch));
+        assert!(matches!(backend_compat("0.9.0"), Compat::MajorMismatch));
+        assert!(matches!(backend_compat("garbage"), Compat::Unknown));
+    }
+
     fn resp_with(statuses: &[&str]) -> CheckResponse {
         CheckResponse {
             summary: Summary {
@@ -670,6 +797,7 @@ mod tests {
                 .collect(),
             exit_code: 0,
             ci_checks_remaining: None,
+            telemetry_query_mode: None,
         }
     }
 
