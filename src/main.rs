@@ -4,6 +4,7 @@
 //! verdict as a process exit code, for pre-commit hooks and CI/CD gates.
 
 mod api;
+mod baseline;
 mod ci_env;
 mod config;
 mod output;
@@ -99,6 +100,42 @@ enum Command {
     Doctor(DoctorArgs),
     /// Scaffold CI workflow + pre-commit hook (§10).
     Init(InitArgs),
+    /// Record current findings to a baseline file (§10).
+    Baseline(BaselineArgs),
+}
+
+#[derive(Parser)]
+struct BaselineArgs {
+    /// SQL files to baseline. Use '-' for stdin. Supports --changed/--since.
+    files: Vec<String>,
+
+    /// Baseline only files changed vs the CI merge base (§10).
+    #[arg(long)]
+    changed: bool,
+
+    /// Explicit base ref for changed-file selection.
+    #[arg(long, value_name = "REF")]
+    since: Option<String>,
+
+    /// SQL dialect. Falls back to config default, then "postgres".
+    #[arg(long)]
+    dialect: Option<String>,
+
+    /// Where to write the baseline.
+    #[arg(long, default_value = ".vetro-baseline.json")]
+    out: std::path::PathBuf,
+
+    /// Vetro API key (or set VETRO_API_KEY, or `vetro login`).
+    #[arg(long, env = "VETRO_API_KEY", hide_env_values = true)]
+    api_key: Option<String>,
+
+    /// Vetro API base URL (or set VETRO_API_URL, or `vetro login`).
+    #[arg(long, env = "VETRO_API_URL")]
+    api_url: Option<String>,
+
+    /// Per-request timeout in seconds.
+    #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
+    timeout: Option<u64>,
 }
 
 #[derive(Parser)]
@@ -204,6 +241,11 @@ struct CheckArgs {
     #[arg(long, value_name = "FILE")]
     output: Option<std::path::PathBuf>,
 
+    /// Ignore findings recorded in this baseline file; only new findings can
+    /// fail the run (§10).
+    #[arg(long, value_name = "FILE")]
+    baseline: Option<std::path::PathBuf>,
+
     /// Per-request timeout in seconds.
     #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
@@ -238,6 +280,7 @@ async fn main() -> ExitCode {
         Command::Logout => run_logout(),
         Command::Doctor(args) => run_doctor(args).await,
         Command::Init(args) => run_init(args),
+        Command::Baseline(args) => run_baseline(args).await,
     }
 }
 
@@ -273,66 +316,22 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         .unwrap_or_else(|| "postgres".to_string());
 
     // Resolve the file list: explicit args, or the git diff when --changed/--since.
-    let use_changed = args.changed || args.since.is_some();
-    let files: Vec<String> = if use_changed {
-        if !args.files.is_empty() {
-            eprintln!("error: pass files OR --changed/--since, not both.");
+    let files = match resolve_files(&args.files, args.changed, &args.since) {
+        FileResolution::Files(f) => f,
+        FileResolution::EmptyDiff(msg) => {
+            println!("{msg}");
+            return ExitCode::from(exit::OK);
+        }
+        FileResolution::Usage(msg) => {
+            eprintln!("error: {msg}");
             return ExitCode::from(exit::USAGE);
         }
-        let provider = ci_env::Provider::detect();
-        let base = match args
-            .since
-            .clone()
-            .or_else(|| ci_env::detected_base_ref(provider))
-        {
-            Some(b) => b,
-            None => {
-                eprintln!(
-                    "error: could not determine a base ref for --changed. Pass --since <ref> \
-                     (e.g. --since origin/main)."
-                );
-                return ExitCode::from(exit::USAGE);
-            }
-        };
-        match ci_env::changed_sql_files(&base) {
-            Ok(list) if list.is_empty() => {
-                // An empty diff is a pass, never an error (§10).
-                println!("No changed .sql files vs {base} — nothing to check.");
-                return ExitCode::from(exit::OK);
-            }
-            Ok(list) => list,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::from(exit::USAGE);
-            }
-        }
-    } else {
-        if args.files.is_empty() {
-            eprintln!("error: no files given. Pass SQL files, '-' for stdin, or --changed.");
-            return ExitCode::from(exit::USAGE);
-        }
-        args.files.clone()
     };
 
-    // Read each file (or stdin) as a whole; the engine parses multi-statement
-    // SQL server-side, so we don't split here. One query item per file.
-    let mut queries = Vec::new();
-    for (i, path) in files.iter().enumerate() {
-        let sql = match read_source(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("error: cannot read '{path}': {e}");
-                return ExitCode::from(exit::USAGE);
-            }
-        };
-        if sql.trim().is_empty() {
-            continue;
-        }
-        queries.push(QueryInput {
-            line: (i + 1) as u32,
-            sql,
-        });
-    }
+    let mut queries = match collect_queries(&files) {
+        Some(q) => q,
+        None => return ExitCode::from(exit::USAGE),
+    };
     if queries.is_empty() {
         eprintln!("error: no SQL to check (all inputs were empty).");
         return ExitCode::from(exit::USAGE);
@@ -424,10 +423,169 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         // codes still apply — those already returned above).
         return ExitCode::from(exit::OK);
     }
-    if has_failure(&resp, args.fail_on) {
+
+    // Suppression (§10): a finding does not fail the run if it is baselined or
+    // carries an inline `-- vetro:ignore[RULE] reason`. Reporting still shows it;
+    // only the exit code is affected.
+    let suppressed = suppressed_fingerprints(&resp, &files, args.baseline.as_deref());
+    let suppressed = match suppressed {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let fails = resp.queries.iter().any(|q| {
+        let fp = output::fingerprint(q, &output::file_for(&files, q.line));
+        !suppressed.contains(&fp) && finding_fails(q, args.fail_on)
+    });
+    if fails {
         ExitCode::from(exit::FINDING)
     } else {
         ExitCode::from(exit::OK)
+    }
+}
+
+/// Collects the set of finding fingerprints that should NOT fail the run:
+/// baselined entries (from `--baseline`) plus inline `-- vetro:ignore` matches.
+/// Prints what it suppressed (and any baseline drift) to stderr. Returns an
+/// ExitCode on a hard error (unreadable baseline).
+fn suppressed_fingerprints(
+    resp: &CheckResponse,
+    files: &[String],
+    baseline_path: Option<&std::path::Path>,
+) -> Result<std::collections::HashSet<String>, ExitCode> {
+    use std::collections::HashSet;
+    let mut suppressed: HashSet<String> = HashSet::new();
+
+    // 1) Baseline file.
+    if let Some(path) = baseline_path {
+        let bl = match baseline::Baseline::load(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return Err(ExitCode::from(exit::USAGE));
+            }
+        };
+        let set = bl.set();
+        let mut n = 0;
+        for q in resp.queries.iter().filter(|q| q.status != "ALLOWED") {
+            if baseline::is_baselined(q, files, &set) {
+                suppressed.insert(output::fingerprint(q, &output::file_for(files, q.line)));
+                n += 1;
+            }
+        }
+        if n > 0 {
+            eprintln!(
+                "note: {n} finding(s) suppressed by baseline {}.",
+                path.display()
+            );
+        }
+        let drift = baseline::drifted(&bl, resp, files);
+        if !drift.is_empty() {
+            eprintln!(
+                "note: {} baseline entr(y/ies) no longer match — consider re-running `vetro baseline`.",
+                drift.len()
+            );
+        }
+    }
+
+    // 2) Inline `-- vetro:ignore[RULE] reason` in the source file.
+    for q in resp.queries.iter().filter(|q| q.status != "ALLOWED") {
+        let Some(rule) = q.rule_code.as_deref() else {
+            continue;
+        };
+        let path = output::file_for(files, q.line);
+        if path == "<stdin>" {
+            continue; // can't re-read stdin
+        }
+        if let Ok(sql) = std::fs::read_to_string(&path) {
+            if let Some(reason) = baseline::inline_suppression(&sql, rule) {
+                suppressed.insert(output::fingerprint(q, &path));
+                eprintln!("note: {path}: {rule} suppressed inline — {reason}");
+            }
+        }
+    }
+
+    Ok(suppressed)
+}
+
+/// `vetro baseline` — run a check and record the current findings to a baseline
+/// file (§10), so a later `check --baseline` only fails on *new* findings.
+async fn run_baseline(args: BaselineArgs) -> ExitCode {
+    let file = load_config();
+    let resolved = config::resolve(
+        args.api_url.as_deref().unwrap_or(config::DEFAULT_API_URL),
+        args.api_url.is_none(),
+        args.api_key.as_deref(),
+        &file,
+    );
+    let Some(api_key) = resolved.api_key else {
+        eprintln!("error: no API key. Pass --api-key, set VETRO_API_KEY, or run `vetro login`.");
+        return ExitCode::from(exit::AUTH);
+    };
+    let dialect = args
+        .dialect
+        .clone()
+        .or_else(|| file.default_dialect.clone())
+        .unwrap_or_else(|| "postgres".to_string());
+
+    let files = match resolve_files(&args.files, args.changed, &args.since) {
+        FileResolution::Files(f) => f,
+        FileResolution::EmptyDiff(msg) => {
+            println!("{msg}");
+            return ExitCode::from(exit::OK);
+        }
+        FileResolution::Usage(msg) => {
+            eprintln!("error: {msg}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let queries = match collect_queries(&files) {
+        Some(q) if !q.is_empty() => q,
+        Some(_) => {
+            eprintln!("error: no SQL to baseline (all inputs were empty).");
+            return ExitCode::from(exit::USAGE);
+        }
+        None => return ExitCode::from(exit::USAGE),
+    };
+
+    let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
+    let resp = match api::check_all(
+        api::CheckParams {
+            api_url: &resolved.api_url,
+            api_key: &api_key,
+            dialect: &dialect,
+            file_name: None,
+            provenance: build_provenance(),
+            timeout,
+            concurrency: 4,
+        },
+        queries,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return match e {
+                ApiError::Auth(_) => ExitCode::from(exit::AUTH),
+                _ => ExitCode::from(exit::BACKEND),
+            };
+        }
+    };
+
+    let bl = baseline::Baseline::from_response(&resp, &files);
+    match bl.save(&args.out) {
+        Ok(()) => {
+            println!(
+                "Wrote {} finding(s) to {}.",
+                bl.entries.len(),
+                args.out.display()
+            );
+            ExitCode::from(exit::OK)
+        }
+        Err(e) => {
+            eprintln!("error: could not write baseline: {e}");
+            ExitCode::from(exit::USAGE)
+        }
     }
 }
 
@@ -726,6 +884,76 @@ fn build_provenance() -> Option<api::Provenance> {
     })
 }
 
+/// Outcome of resolving which files to check (shared by `check`/`baseline`).
+enum FileResolution {
+    /// The resolved list of file paths (or "-" for stdin).
+    Files(Vec<String>),
+    /// A `--changed` run with an empty diff — a pass, print `msg` and exit 0.
+    EmptyDiff(String),
+    /// A usage problem — `msg` already suitable for stderr; exit 2.
+    Usage(String),
+}
+
+/// Resolves the file list from explicit args or the git diff (`--changed` /
+/// `--since`). Shared so `check` and `baseline` behave identically.
+fn resolve_files(files: &[String], changed: bool, since: &Option<String>) -> FileResolution {
+    let use_changed = changed || since.is_some();
+    if use_changed {
+        if !files.is_empty() {
+            return FileResolution::Usage("pass files OR --changed/--since, not both.".to_string());
+        }
+        let provider = ci_env::Provider::detect();
+        let Some(base) = since
+            .clone()
+            .or_else(|| ci_env::detected_base_ref(provider))
+        else {
+            return FileResolution::Usage(
+                "could not determine a base ref for --changed. Pass --since <ref> \
+                 (e.g. --since origin/main)."
+                    .to_string(),
+            );
+        };
+        match ci_env::changed_sql_files(&base) {
+            Ok(list) if list.is_empty() => FileResolution::EmptyDiff(format!(
+                "No changed .sql files vs {base} — nothing to check."
+            )),
+            Ok(list) => FileResolution::Files(list),
+            Err(e) => FileResolution::Usage(e),
+        }
+    } else if files.is_empty() {
+        FileResolution::Usage(
+            "no files given. Pass SQL files, '-' for stdin, or --changed.".to_string(),
+        )
+    } else {
+        FileResolution::Files(files.to_vec())
+    }
+}
+
+/// Reads each file (or stdin) whole into one query item per file, indexed by
+/// position (1-based `line`). Returns None if a file can't be read (message
+/// already printed) — the caller maps that to exit 2. Empty inputs are skipped;
+/// an all-empty set yields an empty Vec (the caller decides what that means).
+fn collect_queries(files: &[String]) -> Option<Vec<QueryInput>> {
+    let mut queries = Vec::new();
+    for (i, path) in files.iter().enumerate() {
+        let sql = match read_source(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read '{path}': {e}");
+                return None;
+            }
+        };
+        if sql.trim().is_empty() {
+            continue;
+        }
+        queries.push(QueryInput {
+            line: (i + 1) as u32,
+            sql,
+        });
+    }
+    Some(queries)
+}
+
 /// Reads a file path, or stdin when `path` is "-".
 fn read_source(path: &str) -> std::io::Result<String> {
     if path == "-" {
@@ -737,13 +965,20 @@ fn read_source(path: &str) -> std::io::Result<String> {
     }
 }
 
-/// Whether the response contains a finding at/above the `--fail-on` threshold.
-fn has_failure(resp: &CheckResponse, fail_on: FailOn) -> bool {
-    resp.queries.iter().any(|q| match fail_on {
+/// Whether a single finding is at/above the `--fail-on` threshold.
+fn finding_fails(q: &api::QueryResult, fail_on: FailOn) -> bool {
+    match fail_on {
         FailOn::Block => q.status == "BLOCKED",
         FailOn::Flag => q.status == "BLOCKED" || q.status == "FLAGGED",
         FailOn::Any => matches!(q.status.as_str(), "BLOCKED" | "FLAGGED" | "MONITORED"),
-    })
+    }
+}
+
+/// Whether the response contains any finding at/above the threshold (ignores
+/// suppression — used in unit tests).
+#[cfg(test)]
+fn has_failure(resp: &CheckResponse, fail_on: FailOn) -> bool {
+    resp.queries.iter().any(|q| finding_fails(q, fail_on))
 }
 
 #[cfg(test)]

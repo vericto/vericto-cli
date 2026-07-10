@@ -35,7 +35,7 @@ fn is_finding(q: &QueryResult) -> bool {
 /// Maps `q.line` (the 1-based argument index the request used) back to the
 /// source file path. stdin ("-") renders as "<stdin>"; an out-of-range index
 /// (shouldn't happen) falls back to a synthetic name so output stays valid.
-fn file_for(files: &[String], line: u32) -> String {
+pub(crate) fn file_for(files: &[String], line: u32) -> String {
     let idx = line.saturating_sub(1) as usize;
     match files.get(idx).map(String::as_str) {
         Some("-") | None => "<stdin>".to_string(),
@@ -217,7 +217,9 @@ fn gitlab_cq_severity(q: &QueryResult) -> &'static str {
 
 /// A stable per-finding fingerprint (rule + file + ast path — NOT line number,
 /// so edits elsewhere in the file don't shift it). FNV-1a hex, dependency-free.
-fn fingerprint(q: &QueryResult, file: &str) -> String {
+/// Shared with the baseline module so a report's fingerprints match what
+/// `vetro baseline` recorded.
+pub(crate) fn fingerprint(q: &QueryResult, file: &str) -> String {
     let rule = q.rule_code.as_deref().unwrap_or("");
     let path = q.ast_node_path.as_deref().unwrap_or("");
     let seed = format!("{rule}|{file}|{path}");
