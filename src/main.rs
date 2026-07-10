@@ -136,6 +136,11 @@ struct BaselineArgs {
     /// Per-request timeout in seconds.
     #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
+
+    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VETRO_CA_BUNDLE,
+    /// then SSL_CERT_FILE.
+    #[arg(long, env = "VETRO_CA_BUNDLE", value_name = "PATH")]
+    ca_bundle: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser)]
@@ -194,6 +199,11 @@ struct DoctorArgs {
     /// Per-request timeout in seconds.
     #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
+
+    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VETRO_CA_BUNDLE,
+    /// then SSL_CERT_FILE.
+    #[arg(long, env = "VETRO_CA_BUNDLE", value_name = "PATH")]
+    ca_bundle: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser)]
@@ -256,6 +266,11 @@ struct CheckArgs {
     #[arg(long, env = "VETRO_CONCURRENCY", value_name = "N")]
     concurrency: Option<usize>,
 
+    /// Extra CA bundle (PEM) to trust, for corporate TLS-inspecting proxies
+    /// (§6.4). Falls back to VETRO_CA_BUNDLE, then SSL_CERT_FILE.
+    #[arg(long, env = "VETRO_CA_BUNDLE", value_name = "PATH")]
+    ca_bundle: Option<std::path::PathBuf>,
+
     /// Only print the summary line.
     #[arg(short, long)]
     quiet: bool,
@@ -270,6 +285,20 @@ enum FailOn {
     Flag,
     /// Any finding (BLOCKED / FLAGGED / MONITORED) fails the run.
     Any,
+}
+
+/// Builds the transport (timeout + CA trust). The CA bundle comes from the flag
+/// (which already folds in `VETRO_CA_BUNDLE` via clap), else `SSL_CERT_FILE` —
+/// the convention curl/Go and most CLIs already honor (§6.4).
+fn resolve_transport(
+    timeout_secs: Option<u64>,
+    ca_bundle: Option<std::path::PathBuf>,
+) -> api::Transport {
+    let ca = ca_bundle.or_else(|| std::env::var_os("SSL_CERT_FILE").map(std::path::PathBuf::from));
+    api::Transport {
+        timeout: std::time::Duration::from_secs(timeout_secs.unwrap_or(api::DEFAULT_TIMEOUT_SECS)),
+        ca_bundle: ca,
+    }
 }
 
 /// Resolves the effective `--fail-on`: the flag wins; else `.vetro.toml`'s
@@ -377,14 +406,14 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         None
     };
 
-    let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
+    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
 
     // Pre-flight (§6.2): learn the workspace's telemetry query mode BEFORE
     // sending any SQL. When 'sanitized', normalize literals client-side so raw
     // values never leave the machine. Best-effort: if the config endpoint is
     // unavailable (older backend) we proceed unsanitized rather than block —
     // the check itself is the security gate.
-    match api::config(&api_url, &api_key, timeout).await {
+    match api::config(&api_url, &api_key, &transport).await {
         Ok(cfg) if cfg.telemetry_query_mode.as_deref() == Some("sanitized") => {
             for q in &mut queries {
                 q.sql = sanitize::sanitize(&q.sql, &dialect);
@@ -414,7 +443,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
             dialect: &dialect,
             file_name,
             provenance: build_provenance(),
-            timeout,
+            transport: transport.clone(),
             concurrency,
         },
         queries,
@@ -581,7 +610,7 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
         None => return ExitCode::from(exit::USAGE),
     };
 
-    let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
+    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
     let resp = match api::check_all(
         api::CheckParams {
             api_url: &resolved.api_url,
@@ -589,7 +618,7 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
             dialect: &dialect,
             file_name: None,
             provenance: build_provenance(),
-            timeout,
+            transport,
             concurrency: 4,
         },
         queries,
@@ -796,14 +825,14 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
     println!("api url:     {}", resolved.api_url);
     println!("api key:     {}", resolved.key_source.label());
 
-    let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
+    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
 
     // Backend compatibility (§9): unauthenticated, so it doubles as the first
     // reachability check. A major mismatch is fatal (the CLI may mis-parse
     // responses); a minor skew only warns; an older backend without /version is
     // treated as unknown and not blocked.
     println!("\ncli version: {}", env!("CARGO_PKG_VERSION"));
-    match api::version(&resolved.api_url, timeout).await {
+    match api::version(&resolved.api_url, &transport).await {
         Ok(info) => match info.api_version.as_deref() {
             Some(api_version) => {
                 print!("backend api: {api_version}");
@@ -841,7 +870,7 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
 
     // Validate auth + read the workspace config WITHOUT spending a CLI check
     // (read-only endpoint). Reports plan, quota, ruleset and the query mode.
-    match api::config(&resolved.api_url, &api_key, timeout).await {
+    match api::config(&resolved.api_url, &api_key, &transport).await {
         Ok(cfg) => {
             println!("\n✓ reachable and authenticated");
             if let Some(plan) = &cfg.plan {

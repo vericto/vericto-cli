@@ -162,11 +162,44 @@ const BACKOFF_BASE: Duration = Duration::from_millis(500);
 /// Max queries per request the backend accepts (§5); larger inputs are chunked.
 pub const MAX_QUERIES_PER_CALL: usize = 500;
 
+/// Transport options shared by every request builder: the per-request timeout
+/// and an optional extra CA bundle (§6.4) for corporate TLS-inspecting proxies.
+#[derive(Debug, Clone, Default)]
+pub struct Transport {
+    pub timeout: Duration,
+    /// Path to an additional PEM bundle to trust, on top of the bundled roots.
+    /// Resolved by the caller from `--ca-bundle` / `VETRO_CA_BUNDLE` /
+    /// `SSL_CERT_FILE`.
+    pub ca_bundle: Option<std::path::PathBuf>,
+}
+
 /// Builds the HTTP client used for every request. Honors `HTTP(S)_PROXY` /
 /// `NO_PROXY` (reqwest default). One client is shared across concurrent chunks.
-fn build_client(timeout: Duration) -> Result<reqwest::Client, ApiError> {
-    reqwest::Client::builder()
-        .timeout(timeout)
+/// When `ca_bundle` is set, every PEM certificate in it is added to the trust
+/// store on top of the bundled Mozilla roots (§6.4).
+fn build_client(t: &Transport) -> Result<reqwest::Client, ApiError> {
+    let mut builder = reqwest::Client::builder().timeout(t.timeout);
+
+    if let Some(path) = &t.ca_bundle {
+        let pem = std::fs::read(path).map_err(|e| {
+            ApiError::Transport(format!("cannot read CA bundle {}: {e}", path.display()))
+        })?;
+        // A bundle may hold multiple concatenated PEM certs; add each.
+        let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| {
+            ApiError::Transport(format!("invalid CA bundle {}: {e}", path.display()))
+        })?;
+        if certs.is_empty() {
+            return Err(ApiError::Transport(format!(
+                "no PEM certificates found in CA bundle {}",
+                path.display()
+            )));
+        }
+        for cert in certs {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+
+    builder
         .build()
         .map_err(|e| ApiError::Transport(e.to_string()))
 }
@@ -174,8 +207,8 @@ fn build_client(timeout: Duration) -> Result<reqwest::Client, ApiError> {
 /// Fetches `GET /api/v1/version` (§9). No auth. Used by `doctor` to check
 /// backend compatibility. A `404`/older backend without this endpoint surfaces
 /// as `Backend { status: 404, .. }` so the caller can treat it as "unknown".
-pub async fn version(api_url: &str, timeout: Duration) -> Result<VersionInfo, ApiError> {
-    let client = build_client(timeout)?;
+pub async fn version(api_url: &str, transport: &Transport) -> Result<VersionInfo, ApiError> {
+    let client = build_client(transport)?;
     let url = format!("{}/api/v1/version", api_url.trim_end_matches('/'));
     let resp = client
         .get(&url)
@@ -204,9 +237,9 @@ pub async fn version(api_url: &str, timeout: Duration) -> Result<VersionInfo, Ap
 pub async fn config(
     api_url: &str,
     api_key: &str,
-    timeout: Duration,
+    transport: &Transport,
 ) -> Result<WorkspaceConfig, ApiError> {
-    let client = build_client(timeout)?;
+    let client = build_client(transport)?;
     let url = format!("{}/api/v1/ci/config", api_url.trim_end_matches('/'));
     let resp = client
         .get(&url)
@@ -283,7 +316,7 @@ pub struct CheckParams<'a> {
     pub dialect: &'a str,
     pub file_name: Option<String>,
     pub provenance: Option<Provenance>,
-    pub timeout: Duration,
+    pub transport: Transport,
     /// Max in-flight chunk requests (the caller clamps this to a sane cap).
     pub concurrency: usize,
 }
@@ -306,10 +339,10 @@ pub async fn check_all(
         dialect,
         file_name,
         provenance,
-        timeout,
+        transport,
         concurrency,
     } = p;
-    let client = build_client(timeout)?;
+    let client = build_client(&transport)?;
     let url = format!("{}/api/v1/ci/check-key", api_url.trim_end_matches('/'));
 
     // Single chunk: no fan-out, no cloning of the shared fields.
