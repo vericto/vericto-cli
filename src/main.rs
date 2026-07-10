@@ -7,6 +7,7 @@ mod api;
 mod ci_env;
 mod config;
 mod output;
+mod sanitize;
 mod scaffold;
 
 use std::io::{Read, Write};
@@ -14,7 +15,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use api::{ApiError, CheckRequest, CheckResponse, QueryInput};
+use api::{ApiError, CheckResponse, QueryInput};
 use config::Config;
 use output::Format;
 
@@ -344,6 +345,32 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     };
 
     let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
+
+    // Pre-flight (§6.2): learn the workspace's telemetry query mode BEFORE
+    // sending any SQL. When 'sanitized', normalize literals client-side so raw
+    // values never leave the machine. Best-effort: if the config endpoint is
+    // unavailable (older backend) we proceed unsanitized rather than block —
+    // the check itself is the security gate.
+    match api::config(&api_url, &api_key, timeout).await {
+        Ok(cfg) if cfg.telemetry_query_mode.as_deref() == Some("sanitized") => {
+            for q in &mut queries {
+                q.sql = sanitize::sanitize(&q.sql, &dialect);
+            }
+            eprintln!("note: workspace is in sanitized mode — literals normalized before sending.");
+        }
+        Ok(_) => {}
+        Err(ApiError::Auth(e)) => {
+            // A bad key surfaces here first — clearer than failing mid-check.
+            eprintln!("error: {}", ApiError::Auth(e));
+            return ExitCode::from(exit::AUTH);
+        }
+        Err(_) => {
+            // Older backend without /ci/config, or a transient blip: proceed.
+            // If the workspace truly requires sanitization this is a gap, so warn.
+            eprintln!("note: could not read workspace config; proceeding without client-side sanitization.");
+        }
+    }
+
     // Concurrency for chunked runs: default 4, capped at 8 to stay a well-behaved
     // client against the shared CI quota (§5/§12.1).
     let concurrency = args.concurrency.unwrap_or(4).clamp(1, 8);
@@ -559,7 +586,8 @@ fn run_init(args: InitArgs) -> ExitCode {
 
 /// `vetro doctor` — validate config, connectivity, auth and plan entitlement so
 /// problems surface here rather than as a cryptic failure mid-pipeline. It
-/// probes by sending one trivial, always-safe query through the real endpoint.
+/// checks backend compatibility (`/version`) and reads the workspace config
+/// (`/ci/config`) — the latter validates auth WITHOUT spending a CLI check.
 async fn run_doctor(args: DoctorArgs) -> ExitCode {
     let file = load_config();
     let resolved = config::resolve(
@@ -619,34 +647,25 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
         return ExitCode::from(exit::AUTH);
     };
 
-    // A trivial, always-ALLOWED probe: exercises connectivity + auth + quota
-    // without tripping any rule or consuming a meaningful amount of allowance.
-    let req = CheckRequest {
-        queries: vec![QueryInput {
-            line: 1,
-            sql: "SELECT 1 LIMIT 1".to_string(),
-        }],
-        dialect: file
-            .default_dialect
-            .clone()
-            .unwrap_or_else(|| "postgres".to_string()),
-        file_name: None,
-        output_format: "json".to_string(),
-        provenance: None,
-    };
-
-    match api::check(&resolved.api_url, &api_key, &req, timeout).await {
-        Ok(resp) => {
+    // Validate auth + read the workspace config WITHOUT spending a CLI check
+    // (read-only endpoint). Reports plan, quota, ruleset and the query mode.
+    match api::config(&resolved.api_url, &api_key, timeout).await {
+        Ok(cfg) => {
             println!("\n✓ reachable and authenticated");
-            println!("  ruleset: {}", resp.summary.ruleset_version);
-            match resp.ci_checks_remaining {
+            if let Some(plan) = &cfg.plan {
+                println!("  plan: {plan}");
+            }
+            if let Some(rs) = &cfg.ruleset_version {
+                println!("  ruleset: {rs}");
+            }
+            match cfg.ci_checks_remaining {
                 Some(n) => println!("  CLI checks remaining this month: {n}"),
                 None => println!("  CLI checks: unmetered (team/enterprise)"),
             }
             // §6.2: report the effective query mode so the dev isn't guessing.
             println!(
                 "  query mode: {}",
-                resp.telemetry_query_mode.as_deref().unwrap_or("raw")
+                cfg.telemetry_query_mode.as_deref().unwrap_or("raw")
             );
             ExitCode::from(exit::OK)
         }

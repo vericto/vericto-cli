@@ -104,6 +104,26 @@ pub struct VersionInfo {
     pub min_cli_version: Option<String>,
 }
 
+/// Response of `GET /api/v1/ci/config` — the pre-flight workspace config the CLI
+/// fetches before sending SQL (§6.2). All fields tolerate an older backend that
+/// lacks the endpoint (the call 404s and the caller degrades gracefully).
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceConfig {
+    /// 'raw' | 'sanitized'. When 'sanitized', the CLI normalizes literals
+    /// client-side before sending so raw values never leave the machine.
+    #[serde(default)]
+    pub telemetry_query_mode: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub ci_checks_remaining: Option<i64>,
+    #[serde(default)]
+    pub ruleset_version: Option<String>,
+    // Note: the backend also returns api_version/min_cli_version here, but the
+    // CLI's compatibility check uses the dedicated GET /version (§9), so we
+    // don't duplicate those fields on this struct.
+}
+
 /// Errors the client surfaces, mapped to CLI exit codes by the caller.
 #[derive(Debug)]
 pub enum ApiError {
@@ -151,24 +171,6 @@ fn build_client(timeout: Duration) -> Result<reqwest::Client, ApiError> {
         .map_err(|e| ApiError::Transport(e.to_string()))
 }
 
-/// Calls `POST /api/v1/ci/check-key` once (with retries). Convenience wrapper
-/// that builds its own client — used by `doctor` and the single-chunk path.
-///
-/// Transient failures — connection reset/timeout and `429`/`5xx` responses — are
-/// retried up to `MAX_RETRIES` times with exponential backoff + jitter; a `429`
-/// honors `Retry-After`. Auth (`401`/`403`) and other `4xx` are returned
-/// immediately (they won't succeed on repeat).
-pub async fn check(
-    api_url: &str,
-    api_key: &str,
-    req: &CheckRequest,
-    timeout: Duration,
-) -> Result<CheckResponse, ApiError> {
-    let client = build_client(timeout)?;
-    let url = format!("{}/api/v1/ci/check-key", api_url.trim_end_matches('/'));
-    check_with_client(&client, &url, api_key, req).await
-}
-
 /// Fetches `GET /api/v1/version` (§9). No auth. Used by `doctor` to check
 /// backend compatibility. A `404`/older backend without this endpoint surfaces
 /// as `Backend { status: 404, .. }` so the caller can treat it as "unknown".
@@ -195,7 +197,51 @@ pub async fn version(api_url: &str, timeout: Duration) -> Result<VersionInfo, Ap
         })
 }
 
-/// The retry loop against a shared client + resolved URL.
+/// Fetches `GET /api/v1/ci/config` (§6.2) with the API key — the pre-flight
+/// workspace config, read BEFORE any SQL is sent. Maps 401/403 to `Auth` and
+/// other non-2xx (incl. an older backend's 404) to `Backend` so the caller can
+/// degrade gracefully.
+pub async fn config(
+    api_url: &str,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<WorkspaceConfig, ApiError> {
+    let client = build_client(timeout)?;
+    let url = format!("{}/api/v1/ci/config", api_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() {
+        return resp
+            .json::<WorkspaceConfig>()
+            .await
+            .map_err(|e| ApiError::Backend {
+                status: status.as_u16(),
+                message: format!("invalid config body: {e}"),
+            });
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        Err(ApiError::Auth(extract_message(&body)))
+    } else {
+        Err(ApiError::Backend {
+            status: code,
+            message: extract_message(&body),
+        })
+    }
+}
+
+/// One check against a shared client + resolved URL, with the retry loop.
+///
+/// Transient failures — connection reset/timeout and `429`/`5xx` responses — are
+/// retried up to `MAX_RETRIES` times with exponential backoff + jitter; a `429`
+/// honors `Retry-After`. Auth (`401`/`403`) and other `4xx` are returned
+/// immediately (they won't succeed on repeat).
 async fn check_with_client(
     client: &reqwest::Client,
     url: &str,
