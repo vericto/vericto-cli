@@ -131,8 +131,14 @@ pub enum ApiError {
     Auth(String),
     /// Any other non-2xx from the backend.
     Backend { status: u16, message: String },
-    /// Transport failure (DNS, connection, timeout).
+    /// Transport failure (DNS, connection, timeout) — the request never got a
+    /// response. This is the only error `--allow-degraded` may bypass (§6.5).
     Transport(String),
+    /// A chunked run where some chunks completed but another failed after
+    /// retries. Fail-closed (§5): NOT bypassable by `--allow-degraded`, because
+    /// part of the batch WAS evaluated — "some queries checked, some weren't" is
+    /// materially different from "the gate was never reachable".
+    PartialFailure(String),
 }
 
 impl std::fmt::Display for ApiError {
@@ -143,6 +149,7 @@ impl std::fmt::Display for ApiError {
                 write!(f, "backend error ({status}): {message}")
             }
             ApiError::Transport(m) => write!(f, "could not reach the Vetro API: {m}"),
+            ApiError::PartialFailure(m) => write!(f, "{m}"),
         }
     }
 }
@@ -422,7 +429,7 @@ pub async fn check_all(
         } else {
             format!("chunk {}/{}", idx + 1, total_chunks)
         };
-        return Err(ApiError::Transport(format!(
+        return Err(ApiError::PartialFailure(format!(
             "{which} failed, failing the run closed: {e}"
         )));
     }

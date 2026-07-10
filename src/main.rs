@@ -271,6 +271,12 @@ struct CheckArgs {
     #[arg(long, env = "VETRO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 
+    /// Break-glass (§6.5): if the backend is unreachable from the first request,
+    /// exit 0 instead of 4. Requires a reason. Never bypasses a real finding or
+    /// a partially-completed run.
+    #[arg(long, env = "VETRO_ALLOW_DEGRADED", value_name = "REASON")]
+    allow_degraded: Option<String>,
+
     /// Only print the summary line.
     #[arg(short, long)]
     quiet: bool,
@@ -452,10 +458,32 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     {
         Ok(r) => r,
         Err(e) => {
+            // §6.5 break-glass: ONLY a from-the-first-request unreachable
+            // (Transport) may be waved through, and only with a reason. A real
+            // backend error, an auth failure, or a partially-completed chunked
+            // run (PartialFailure) always fails closed.
+            if let ApiError::Transport(_) = e {
+                if let Some(reason) = args.allow_degraded.as_deref() {
+                    let reason = reason.trim();
+                    if reason.is_empty() {
+                        eprintln!("error: --allow-degraded requires a reason.");
+                        return ExitCode::from(exit::USAGE);
+                    }
+                    eprintln!("error: {e}");
+                    eprintln!(
+                        "⚠ DEGRADED: backend unreachable; proceeding due to --allow-degraded \
+                         (reason: {reason}). The SQL was NOT checked. This bypass should be \
+                         reconciled server-side on the next successful run."
+                    );
+                    return ExitCode::from(exit::OK);
+                }
+            }
             eprintln!("error: {e}");
             return match e {
                 ApiError::Auth(_) => ExitCode::from(exit::AUTH),
-                ApiError::Backend { .. } | ApiError::Transport(_) => ExitCode::from(exit::BACKEND),
+                ApiError::Backend { .. } | ApiError::Transport(_) | ApiError::PartialFailure(_) => {
+                    ExitCode::from(exit::BACKEND)
+                }
             };
         }
     };
