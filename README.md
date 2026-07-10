@@ -11,10 +11,34 @@ enterprise unmetered). See [DESIGN.md](DESIGN.md) for the full design.
 
 ## Install
 
+Releases are built with [`cargo-dist`](https://opensource.axo.dev/cargo-dist/):
+signed, cross-compiled binaries on GitHub Releases feed every channel.
+
 ```bash
-# from source (until prebuilt binaries are published)
+# Phase 1 — shell installer (Linux/macOS)
+curl -fsSL https://github.com/donkan168/vetro-cli/releases/latest/download/vetro-installer.sh | sh
+
+# Phase 1 — Docker (CI runners that prefer an image step)
+docker run --rm -e VETRO_API_KEY ghcr.io/donkan168/vetro-cli check migrations/*.sql
+
+# Or download a prebuilt binary directly:
+#   https://github.com/donkan168/vetro-cli/releases
+```
+
+```bash
+# Phase 2 — package managers
+npm install -g @vetro/cli            # or: npx @vetro/cli check ...  (great in CI)
+brew install donkan168/vetro/vetro   # macOS / Linux
+scoop install vetro                  # Windows
+```
+
+```bash
+# From source (until the above channels are published)
 cargo install --path .
 ```
+
+> The CLI is a network-only thin client — it always evaluates against your live
+> Vetro workspace. There is no offline/local mode.
 
 ## Commands
 
@@ -23,7 +47,26 @@ vetro check [files...]   Evaluate SQL files (or '-' for stdin). The core command
 vetro login              Store an API key (and optional URL/dialect) in config.
 vetro logout             Remove the stored API key.
 vetro doctor             Verify config, connectivity, auth, and plan quota.
+vetro init               Scaffold a CI workflow (+ pre-commit hook with --hook).
 ```
+
+## Scaffolding CI (`vetro init`)
+
+`vetro init` detects your CI provider from the git remote and writes a ready-to-run
+config; nothing is overwritten without `--force`.
+
+```bash
+vetro init                 # auto-detect GitHub/GitLab
+vetro init --hook          # also install a git pre-commit hook for staged SQL
+vetro init --target gitlab --dialect mysql
+```
+
+- **GitHub** → `.github/workflows/vetro.yml` (runs `vetro check --changed`, uploads
+  SARIF to Code Scanning). Add `VETRO_API_KEY` as a repo secret.
+- **GitLab** → `.vetro/gitlab-ci.yml` (Code Quality report on MRs). `include:` it
+  from your `.gitlab-ci.yml` and add `VETRO_API_KEY` as a masked CI/CD variable.
+- **`--hook`** → `.git/hooks/pre-commit` checking staged `*.sql` (bypass with
+  `git commit --no-verify`).
 
 ## Getting started
 
@@ -100,23 +143,35 @@ Distinct non-zero codes let CI distinguish a real block from an outage.
 
 ## CI/CD
 
-**GitHub Actions:**
+GitHub and GitLab are both first-class: findings render inline on PRs/MRs, not
+just as an exit code. See DESIGN §10 for the full integration design.
+
+**GitHub Actions** (SARIF → Code Scanning annotations — v0.2):
 ```yaml
-- run: cargo install --path .    # or download a released binary
-- run: vetro check migrations/*.sql --dialect postgres
+- run: vetro check --changed --format sarif --output vetro.sarif
   env:
     VETRO_API_KEY: ${{ secrets.VETRO_API_KEY }}
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: vetro.sarif
 ```
 
-**GitLab CI:**
+**GitLab CI** (Code Quality report → MR annotations — v0.2):
 ```yaml
 vetro-check:
-  script: vetro check migrations/*.sql --dialect postgres
+  script: vetro check --changed --format gitlab-codequality --output gl-code-quality.json
   variables:
     VETRO_API_KEY: $VETRO_API_KEY
+  artifacts:
+    reports:
+      codequality: gl-code-quality.json
   rules:
     - changes: [ "migrations/**/*.sql" ]
 ```
+
+> `--changed`, `--format sarif|gitlab-*`, and `--output` are v0.2 (designed in
+> DESIGN §10, not yet shipped). For v0.1, run `vetro check migrations/*.sql` and
+> gate on the exit code.
 
 ## Known limitations (v0.1)
 
