@@ -7,6 +7,7 @@ mod api;
 mod ci_env;
 mod config;
 mod output;
+mod scaffold;
 
 use std::io::{Read, Write};
 use std::process::ExitCode;
@@ -48,6 +49,35 @@ enum Command {
     Logout,
     /// Verify config, connectivity, auth, and plan entitlement.
     Doctor(DoctorArgs),
+    /// Scaffold CI workflow + pre-commit hook (§10).
+    Init(InitArgs),
+}
+
+#[derive(Parser)]
+struct InitArgs {
+    /// Which CI provider to scaffold for. Auto-detected from the git remote when
+    /// omitted.
+    #[arg(long, value_enum)]
+    target: Option<InitTarget>,
+
+    /// Also write a git pre-commit hook that checks staged SQL.
+    #[arg(long)]
+    hook: bool,
+
+    /// SQL dialect to bake into the generated templates.
+    #[arg(long, default_value = "postgres")]
+    dialect: String,
+
+    /// Overwrite existing files instead of skipping them.
+    #[arg(long)]
+    force: bool,
+}
+
+/// CI provider choices for `vetro init --target`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum InitTarget {
+    Github,
+    Gitlab,
 }
 
 #[derive(Parser)]
@@ -159,6 +189,7 @@ async fn main() -> ExitCode {
         Command::Login(args) => run_login(args),
         Command::Logout => run_logout(),
         Command::Doctor(args) => run_doctor(args).await,
+        Command::Init(args) => run_init(args),
     }
 }
 
@@ -392,6 +423,91 @@ fn run_logout() -> ExitCode {
             ExitCode::from(exit::USAGE)
         }
     }
+}
+
+/// `vetro init` — scaffold a CI workflow (GitHub or GitLab) and, with --hook, a
+/// git pre-commit hook. Existing files are skipped unless --force. Returns
+/// usage (2) if the target can't be determined or a write fails.
+fn run_init(args: InitArgs) -> ExitCode {
+    use scaffold::{CiTarget, Written};
+
+    let target = match args.target {
+        Some(InitTarget::Github) => CiTarget::GitHub,
+        Some(InitTarget::Gitlab) => CiTarget::GitLab,
+        None => scaffold::detect_target(),
+    };
+
+    let mut plans: Vec<(std::path::PathBuf, String, bool)> = Vec::new();
+    match target {
+        CiTarget::GitHub => plans.push((
+            std::path::PathBuf::from(".github/workflows/vetro.yml"),
+            scaffold::github_workflow(&args.dialect),
+            false,
+        )),
+        CiTarget::GitLab => plans.push((
+            // Never clobber an existing .gitlab-ci.yml — write an include the
+            // user wires in (printed below).
+            std::path::PathBuf::from(".vetro/gitlab-ci.yml"),
+            scaffold::gitlab_job(&args.dialect),
+            false,
+        )),
+        CiTarget::Unknown => {
+            eprintln!(
+                "error: could not detect a CI provider (no github.com/gitlab remote, \
+                 no .github/ or .gitlab-ci.yml). Pass --target github|gitlab."
+            );
+            return ExitCode::from(exit::USAGE);
+        }
+    }
+
+    if args.hook {
+        plans.push((
+            std::path::PathBuf::from(".git/hooks/pre-commit"),
+            scaffold::precommit_hook(&args.dialect),
+            true,
+        ));
+    }
+
+    let mut any_created = false;
+    for (path, body, executable) in plans {
+        match scaffold::write_file(&path, &body, args.force, executable) {
+            Ok(Written::Created(p)) => {
+                println!("created {}", p.display());
+                any_created = true;
+            }
+            Ok(Written::Skipped(p)) => {
+                println!("exists, skipped {} (use --force to overwrite)", p.display());
+            }
+            Err(e) => {
+                eprintln!("error: could not write {}: {e}", path.display());
+                return ExitCode::from(exit::USAGE);
+            }
+        }
+    }
+
+    // Provider-specific next steps.
+    match target {
+        CiTarget::GitHub => {
+            println!(
+                "\nNext: add VETRO_API_KEY as a repository secret \
+                 (Settings → Secrets and variables → Actions)."
+            );
+        }
+        CiTarget::GitLab => {
+            println!(
+                "\nNext:\n  1. Add VETRO_API_KEY as a masked CI/CD variable \
+                 (Settings → CI/CD → Variables).\n  \
+                 2. Include the job from your .gitlab-ci.yml:\n       \
+                 include:\n         - local: .vetro/gitlab-ci.yml"
+            );
+        }
+        CiTarget::Unknown => {}
+    }
+    if args.hook {
+        println!("\nThe pre-commit hook runs `vetro check` on staged SQL. Bypass with `git commit --no-verify`.");
+    }
+    let _ = any_created;
+    ExitCode::from(exit::OK)
 }
 
 /// `vetro doctor` — validate config, connectivity, auth and plan entitlement so

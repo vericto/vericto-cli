@@ -47,7 +47,26 @@ vetro check [files...]   Evaluate SQL files (or '-' for stdin). The core command
 vetro login              Store an API key (and optional URL/dialect) in config.
 vetro logout             Remove the stored API key.
 vetro doctor             Verify config, connectivity, auth, and plan quota.
+vetro init               Scaffold a CI workflow (+ pre-commit hook with --hook).
 ```
+
+## Scaffolding CI (`vetro init`)
+
+`vetro init` detects your CI provider from the git remote and writes a ready-to-run
+config; nothing is overwritten without `--force`.
+
+```bash
+vetro init                 # auto-detect GitHub/GitLab
+vetro init --hook          # also install a git pre-commit hook for staged SQL
+vetro init --target gitlab --dialect mysql
+```
+
+- **GitHub** → `.github/workflows/vetro.yml` (runs `vetro check --changed`, uploads
+  SARIF to Code Scanning). Add `VETRO_API_KEY` as a repo secret.
+- **GitLab** → `.vetro/gitlab-ci.yml` (Code Quality report on MRs). `include:` it
+  from your `.gitlab-ci.yml` and add `VETRO_API_KEY` as a masked CI/CD variable.
+- **`--hook`** → `.git/hooks/pre-commit` checking staged `*.sql` (bypass with
+  `git commit --no-verify`).
 
 ## Getting started
 

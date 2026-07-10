@@ -107,7 +107,14 @@ pub fn detected_base_ref(provider: Provider) -> Option<String> {
 pub fn changed_sql_files(base: &str) -> Result<Vec<String>, String> {
     let range = format!("{base}...HEAD");
     let out = Command::new("git")
-        .args(["diff", "--name-only", "--diff-filter=d", &range, "--", "*.sql"])
+        .args([
+            "diff",
+            "--name-only",
+            "--diff-filter=d",
+            &range,
+            "--",
+            "*.sql",
+        ])
         .output()
         .map_err(|e| format!("could not run git: {e}"))?;
     if !out.status.success() {
