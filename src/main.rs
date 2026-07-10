@@ -130,6 +130,11 @@ struct CheckArgs {
     #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
 
+    /// Max in-flight chunk requests when the input exceeds 500 queries
+    /// (capped at 8).
+    #[arg(long, env = "VETRO_CONCURRENCY", value_name = "N")]
+    concurrency: Option<usize>,
+
     /// Only print the summary line.
     #[arg(short, long)]
     quiet: bool,
@@ -260,16 +265,24 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         None
     };
 
-    let req = CheckRequest {
-        queries,
-        dialect,
-        file_name,
-        output_format: "json".to_string(),
-        provenance: build_provenance(),
-    };
-
     let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
-    let resp = match api::check(&api_url, &api_key, &req, timeout).await {
+    // Concurrency for chunked runs: default 4, capped at 8 to stay a well-behaved
+    // client against the shared CI quota (§5/§12.1).
+    let concurrency = args.concurrency.unwrap_or(4).clamp(1, 8);
+    let resp = match api::check_all(
+        api::CheckParams {
+            api_url: &api_url,
+            api_key: &api_key,
+            dialect: &dialect,
+            file_name,
+            provenance: build_provenance(),
+            timeout,
+            concurrency,
+        },
+        queries,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
