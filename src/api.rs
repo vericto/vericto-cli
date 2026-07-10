@@ -113,46 +113,150 @@ impl std::fmt::Display for ApiError {
     }
 }
 
+use std::time::Duration;
+
+/// The default per-request timeout, overridable via `--timeout` / `VETRO_TIMEOUT`.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Max retry attempts for transient failures (so 1 initial try + this many
+/// retries). Applies to connection errors, timeouts, and 429/5xx responses.
+const MAX_RETRIES: u32 = 3;
+
+/// Base backoff before the first retry; doubled each subsequent attempt.
+const BACKOFF_BASE: Duration = Duration::from_millis(500);
+
 /// Calls `POST {api_url}/api/v1/ci/check-key` with the given API key.
+///
+/// Transient failures — connection reset/timeout and `429`/`5xx` responses — are
+/// retried up to `MAX_RETRIES` times with exponential backoff + jitter; a `429`
+/// honors `Retry-After`. Auth (`401`/`403`) and other `4xx` are returned
+/// immediately (they won't succeed on repeat).
 pub async fn check(
     api_url: &str,
     api_key: &str,
     req: &CheckRequest,
+    timeout: Duration,
 ) -> Result<CheckResponse, ApiError> {
     let url = format!("{}/api/v1/ci/check-key", api_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(timeout)
         .build()
         .map_err(|e| ApiError::Transport(e.to_string()))?;
 
-    let resp = client
-        .post(&url)
+    let mut attempt: u32 = 0;
+    loop {
+        match try_once(&client, &url, api_key, req).await {
+            Ok(resp) => return Ok(resp),
+            Err(outcome) => {
+                let retryable = outcome.retry_after_hint.is_some() || outcome.retryable;
+                if retryable && attempt < MAX_RETRIES {
+                    let delay = outcome
+                        .retry_after_hint
+                        .unwrap_or_else(|| backoff_delay(attempt));
+                    eprintln!(
+                        "note: transient failure ({}); retry {}/{} in {}ms",
+                        outcome.err,
+                        attempt + 1,
+                        MAX_RETRIES,
+                        delay.as_millis()
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(outcome.err);
+            }
+        }
+    }
+}
+
+/// The result of one attempt's failure, plus whether it's worth retrying.
+struct Attempt {
+    err: ApiError,
+    retryable: bool,
+    /// Explicit delay from a `429 Retry-After`, when present.
+    retry_after_hint: Option<Duration>,
+}
+
+/// Performs a single request. Ok on 2xx; otherwise classifies the failure.
+async fn try_once(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    req: &CheckRequest,
+) -> Result<CheckResponse, Attempt> {
+    let sent = client
+        .post(url)
         .header("X-API-Key", api_key)
         .json(req)
         .send()
-        .await
-        .map_err(|e| ApiError::Transport(e.to_string()))?;
+        .await;
+
+    let resp = match sent {
+        Ok(r) => r,
+        // Network/DNS/timeout — transient, retry.
+        Err(e) => {
+            return Err(Attempt {
+                err: ApiError::Transport(e.to_string()),
+                retryable: true,
+                retry_after_hint: None,
+            })
+        }
+    };
 
     let status = resp.status();
     if status.is_success() {
-        return resp
-            .json::<CheckResponse>()
-            .await
-            .map_err(|e| ApiError::Backend {
+        return resp.json::<CheckResponse>().await.map_err(|e| Attempt {
+            // A malformed 2xx body is not transient — don't retry.
+            err: ApiError::Backend {
                 status: status.as_u16(),
                 message: format!("invalid response body: {e}"),
-            });
+            },
+            retryable: false,
+            retry_after_hint: None,
+        });
     }
 
-    let body = resp.text().await.unwrap_or_default();
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        Err(ApiError::Auth(extract_message(&body)))
+    let code = status.as_u16();
+    // 429: honor Retry-After (seconds form) before falling back to backoff.
+    let retry_after_hint = if code == 429 {
+        resp.headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
     } else {
-        Err(ApiError::Backend {
-            status: status.as_u16(),
+        None
+    };
+
+    let body = resp.text().await.unwrap_or_default();
+    let err = if code == 401 || code == 403 {
+        ApiError::Auth(extract_message(&body))
+    } else {
+        ApiError::Backend {
+            status: code,
             message: extract_message(&body),
-        })
-    }
+        }
+    };
+    // Retry 429 and 5xx; everything else (other 4xx, auth) is terminal.
+    let retryable = code == 429 || (500..=599).contains(&code);
+    Err(Attempt {
+        err,
+        retryable,
+        retry_after_hint,
+    })
+}
+
+/// Exponential backoff with jitter for retry `attempt` (0-based):
+/// `BACKOFF_BASE * 2^attempt` plus up to ~250ms of jitter. The jitter is
+/// derived from the wall clock (no `rand` dependency).
+fn backoff_delay(attempt: u32) -> Duration {
+    let base = BACKOFF_BASE * 2u32.pow(attempt);
+    let jitter_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.subsec_millis() as u64) % 250)
+        .unwrap_or(0);
+    base + Duration::from_millis(jitter_ms)
 }
 
 /// Pulls a human message out of a JSON error body, falling back to the raw
@@ -180,7 +284,8 @@ fn extract_message(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_message;
+    use super::{backoff_delay, extract_message, BACKOFF_BASE};
+    use std::time::Duration;
 
     #[test]
     fn extracts_nested_envelope() {
@@ -196,5 +301,16 @@ mod tests {
     #[test]
     fn falls_back_to_raw_body() {
         assert_eq!(extract_message("plain text error"), "plain text error");
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_within_jitter() {
+        // attempt 0 ≈ base, attempt 2 ≈ base*4; jitter adds <250ms, so bounds hold.
+        let jitter_cap = Duration::from_millis(250);
+        let d0 = backoff_delay(0);
+        assert!(d0 >= BACKOFF_BASE && d0 < BACKOFF_BASE + jitter_cap);
+        let d2 = backoff_delay(2);
+        let base2 = BACKOFF_BASE * 4;
+        assert!(d2 >= base2 && d2 < base2 + jitter_cap);
     }
 }

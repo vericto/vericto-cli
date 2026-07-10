@@ -75,6 +75,10 @@ struct DoctorArgs {
     /// Vetro API base URL (or set VETRO_API_URL, or `vetro login`).
     #[arg(long, env = "VETRO_API_URL")]
     api_url: Option<String>,
+
+    /// Per-request timeout in seconds.
+    #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
+    timeout: Option<u64>,
 }
 
 #[derive(Parser)]
@@ -121,6 +125,10 @@ struct CheckArgs {
     /// Write the report to a file instead of stdout (for CI artifacts).
     #[arg(long, value_name = "FILE")]
     output: Option<std::path::PathBuf>,
+
+    /// Per-request timeout in seconds.
+    #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
+    timeout: Option<u64>,
 
     /// Only print the summary line.
     #[arg(short, long)]
@@ -188,7 +196,11 @@ async fn run_check(args: CheckArgs) -> ExitCode {
             return ExitCode::from(exit::USAGE);
         }
         let provider = ci_env::Provider::detect();
-        let base = match args.since.clone().or_else(|| ci_env::detected_base_ref(provider)) {
+        let base = match args
+            .since
+            .clone()
+            .or_else(|| ci_env::detected_base_ref(provider))
+        {
             Some(b) => b,
             None => {
                 eprintln!(
@@ -256,7 +268,8 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         provenance: build_provenance(),
     };
 
-    let resp = match api::check(&api_url, &api_key, &req).await {
+    let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
+    let resp = match api::check(&api_url, &api_key, &req, timeout).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -267,7 +280,13 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         }
     };
 
-    if let Err(e) = output::render(&resp, args.format, &files, args.quiet, args.output.as_deref()) {
+    if let Err(e) = output::render(
+        &resp,
+        args.format,
+        &files,
+        args.quiet,
+        args.output.as_deref(),
+    ) {
         eprintln!("error: could not write output: {e}");
         return ExitCode::from(exit::USAGE);
     }
@@ -402,7 +421,8 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
         provenance: None,
     };
 
-    match api::check(&resolved.api_url, &api_key, &req).await {
+    let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(api::DEFAULT_TIMEOUT_SECS));
+    match api::check(&resolved.api_url, &api_key, &req, timeout).await {
         Ok(resp) => {
             println!("\n✓ reachable and authenticated");
             println!("  ruleset: {}", resp.summary.ruleset_version);
