@@ -392,21 +392,23 @@ team is relying on, an unauditable bypass is worse than a documented one.
   exits `0` **but** prints a prominent stderr warning and — critically — writes
   a local "degraded run" record so the bypass leaves an auditable trace instead
   of vanishing.
-  - **Implemented (this revision):** the record is appended as one JSON line to
+  - **Implemented:** the record is appended as one JSON line to
     `.vetro/degraded-runs.jsonl` (`kind`/`version`/`unix_time`/`reason`/`files`/
     `provenance` from §2.1), best-effort (a write failure never turns the
-    break-glass back into a hard failure). The intended workflow is that the
-    pipeline archives this file as a CI artifact, so the gap is visible after
-    the fact.
-  - **Not yet built (honest status):** there is *no* server-side reconciliation
-    endpoint, so the record is **local only** — it is not uploaded or folded
-    into the central audit trail on the next successful check. The original
-    "uploaded and reconciled server-side" design remains 🔜 and depends on a new
-    backend endpoint; until it lands the stderr warning says so explicitly, and
-    the durable trace is whatever the pipeline archives. This is a deliberately
-    conservative gap: in ephemeral CI runners the local file often dies with the
-    runner, so "reconciled server-side" cannot be claimed as working when it
-    isn't. See §14.
+    break-glass back into a hard failure). The pipeline archives this file as a
+    CI artifact, so the gap is visible after the fact — this **is** the durable
+    audit trace, not a temporary stand-in.
+  - **Server-side reconciliation — decided against (won't build).** An earlier
+    design had the record "uploaded and reconciled server-side on the next
+    successful check". We deliberately do **not** build that: in ephemeral CI
+    runners the local file dies with the runner, and the next check runs on a
+    *different* runner that never saw it, so the upload would almost never fire —
+    the mechanism would advertise a guarantee it can't keep. More importantly,
+    the local record archived on the customer's own CI/storage is *better* audit
+    evidence than a best-effort server ingest: it lives in the customer's
+    retention, immutable, tied to the exact run — the same reasoning as signed
+    receipts (§7.1). So the local record + CI artifact is the **final** design
+    for the degraded case, not a fallback pending a backend endpoint. See §14.
 - Requires a **reason**: `--allow-degraded="<why>"` — an empty/missing reason
   is a usage error (exit `2`), not silently accepted. The reason is included in
   the local record.
@@ -528,9 +530,9 @@ published at `GET /api/v1/meta/export-signing-key`. CLI side (new):
 Distinct non-zero codes matter in CI so a network blip isn't confused with a real
 block. (`--monitor` forces `0` for findings but not for codes 2–4. `--allow-degraded`,
 §6.5, forces `0` in place of `4` specifically — and only — for a backend that is
-unreachable from the first request, with a required reason and a server-side
-reconciliation record; a stderr warning still prints so the exit code alone
-doesn't hide it from a human watching the log.)
+unreachable from the first request, with a required reason and a local
+degraded-run record (`.vetro/degraded-runs.jsonl`); a stderr warning still
+prints so the exit code alone doesn't hide it from a human watching the log.)
 
 ## 9. Distribution
 
@@ -707,8 +709,9 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   - Chunking + partial-failure semantics (§5).
 - **Enterprise-readiness — DONE (this revision):** OIDC/workload-identity login
   (§6.1), signed run receipts + `verify-receipt` (§7.1), CI provenance (§2.1),
-  `.vetro.toml` (§6.3), CA trust (§6.4), degraded-mode break-glass (§6.5, with
-  the server-side reconciliation caveat noted there), bounded chunk concurrency
+  `.vetro.toml` (§6.3), CA trust (§6.4), degraded-mode break-glass (§6.5, with a
+  local audit record; server-side reconciliation decided against), bounded chunk
+  concurrency
   (§5), backend compatibility check (§9), `--no-color`, `vetro version`,
   `vetro completions <shell>` (bash/zsh/fish/powershell/elvish).
 - **Distribution (§9) — Level 0 + Phase 1 DONE, Phase 2 npm DONE:** `cargo-dist`
@@ -719,9 +722,10 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   Keyless build attestations are wired but gated off on a private repo (§9
   Notes). **Homebrew + Scoop** remain 🔜 (need an external tap/bucket repo).
 - **Still 🔜:** distribution Homebrew/Scoop; npm registry publish (`NPM_TOKEN`);
-  keyless attestations (repo must be public/org); server-side reconciliation of
-  degraded runs (§6.5); watch/dev ergonomics. (No local-first mode — out of
-  scope, §1.)
+  keyless attestations (repo must be public/org); watch/dev ergonomics.
+- **Decided against (won't build):** server-side reconciliation of degraded runs
+  (§6.5 — the local record + CI artifact is the final design); local-first /
+  offline mode (§1/§13).
 
 ## 12. Open questions (need product decisions)
 
@@ -853,11 +857,12 @@ evaluating this as a *control*, not just a feature:
 1. **Off by default** — nothing changes unless a team opts in per-pipeline.
 2. **Never silent** — a reason is mandatory, a stderr warning always prints,
    and the bypass writes a local `.vetro/degraded-runs.jsonl` record (reason +
-   provenance + timestamp) meant to be archived as a CI artifact. *Server-side*
-   reconciliation into the central audit trail is still 🔜 (§6.5): today the
-   trace is local only, so the honest claim is "leaves an auditable local
-   record", not "reconciled server-side". Closing that gap needs a new backend
-   ingest endpoint.
+   provenance + timestamp) archived as a CI artifact. We deliberately do *not*
+   reconcile this server-side (§6.5): in ephemeral runners the upload would
+   rarely fire, and a record in the customer's own retention is stronger audit
+   evidence than a best-effort server ingest — same reasoning as signed receipts
+   (§7.1). The honest claim is "leaves an auditable local record", and that is
+   the intended final behavior, not a gap.
 3. **Scoped to unreachability, not to findings** — it cannot be used to skip a
    `BLOCKED` verdict that was actually returned; it only overrides exit `4`
    (backend/network), never exit `1` (a real finding). A team cannot use
