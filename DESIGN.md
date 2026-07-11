@@ -16,9 +16,10 @@
 > chunk concurrency (§5), project-level `.vetro.toml` config (§6), system +
 > custom CA trust (§6), and a degraded-mode break-glass with its own exit code
 > (§6/§8) — all implemented. **Distribution (§9)**: cargo-dist Level 0 + Phase 1
-> (GitHub Releases with attested, cross-compiled binaries + `curl | sh` installer
-> + distroless Docker image) ✅ implemented; package managers (Homebrew/Scoop/npm,
-> Phase 2) remain 🔜. Rationale and procurement framing in §14.
+> (GitHub Releases with cross-compiled binaries + SHA-256 checksums + `curl | sh`
+> installer + distroless Docker image) ✅ implemented; keyless build attestations
+> are wired but gated off until the repo is public/org (§9 Notes), and package
+> managers (Homebrew/Scoop/npm, Phase 2) remain 🔜. Rationale in §14.
 
 ## 1. What it is
 
@@ -538,12 +539,12 @@ effort, so we layer them.
 > **Status (this revision): Level 0 + Phase 1 ✅ implemented.** `cargo-dist` is
 > configured (`dist-workspace.toml`) and generates `.github/workflows/release.yml`,
 > which on every version tag cross-compiles all five targets, publishes them to
-> GitHub Releases with SHA-256 checksums, generates the `vetro-cli-installer.sh`
-> `curl | sh` installer, and attaches a **GitHub build attestation** (the keyless
-> signing mechanism below). The image channel is a thin distroless `Dockerfile`
-> (static musl binary) published multi-arch (amd64 + arm64) to GHCR by a separate
-> `.github/workflows/docker.yml` — separate because `dist generate` owns and
-> would overwrite `release.yml` — with a matching image attestation. `dist plan`
+> GitHub Releases with SHA-256 checksums, and generates the `vetro-cli-installer.sh`
+> `curl | sh` installer. (Keyless **build attestations** are wired but currently
+> gated off — see the signing note below.) The image channel is a thin distroless
+> `Dockerfile` (static musl binary) published multi-arch (amd64 + arm64) to GHCR
+> by a separate `.github/workflows/docker.yml` — separate because `dist generate`
+> owns and would overwrite `release.yml`. `dist plan`
 > validates the artifact set. **Phase 2** (Homebrew/Scoop/npm) remains 🔜.
 
 ### Level 0 — the base (everything else depends on it)
@@ -573,22 +574,24 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
 
 ### Notes
 
-- **Signing (concrete mechanism, ✅ — point 5):** "signed" was previously
-  unspecified — for a binary that runs inside CI pipelines holding credentials
-  (§6.1), that's exactly the kind of vagueness a supply-chain security review
-  pushes back on. **Implemented as GitHub build attestations** (`github-attestations`
-  in `dist-workspace.toml`): the generated `release.yml` runs `actions/attest`
-  with `id-token: write`, producing keyless, Sigstore-backed provenance for every
-  release artifact — the same trust model originally sketched as `cosign`
-  (keyless, transparency-logged, no private key to manage), using the mechanism
-  `cargo-dist` 0.32 wires in natively so it stays config, not a hand-rolled
-  script. The attestation ties each artifact to the GitHub Actions OIDC identity
-  that built it, independently verifiable with `gh attestation verify <artifact>
-  --repo donkan168/vetro-cli` (documented in the README; referenceable from
-  `vetro init` templates so consuming pipelines can pin to a verified binary
-  instead of trusting `curl | sh` on faith). SHA-256 checksums
-  (`sha256.sum` + per-artifact `.sha256`) ship alongside for a quick integrity
-  check when attestation tooling isn't present.
+- **Signing (concrete mechanism, point 5 — designed, gated on repo visibility):**
+  "signed" was previously unspecified — for a binary that runs inside CI
+  pipelines holding credentials (§6.1), that's exactly the kind of vagueness a
+  supply-chain security review pushes back on. The mechanism is **GitHub build
+  attestations** (`github-attestations` in `dist-workspace.toml` → `release.yml`
+  runs `actions/attest` with `id-token: write`): keyless, Sigstore-backed
+  provenance for every release artifact — the same trust model originally
+  sketched as `cosign` (keyless, transparency-logged, no private key to manage),
+  wired in natively by `cargo-dist` 0.32 so it stays config, not a hand-rolled
+  script. Verification would be `gh attestation verify <artifact> --repo
+  donkan168/vetro-cli`. **Currently disabled**, though: GitHub artifact
+  attestations are not available for user-owned *private* repos (the first
+  `v0.1.0` release surfaced this — the Attest step fails with "Feature not
+  available for user-owned private repositories"). Until the repo is public or
+  under an org, `github-attestations` is off and releases ship **SHA-256
+  checksums** (`sha256.sum` + per-artifact `.sha256`) for integrity; re-enabling
+  is a one-line config change + `dist generate`. Same story for the Docker image
+  attestation in `docker.yml`.
 - **Versioning:** independent SemVer for the CLI. Every channel's package version
   tracks the CLI's git tag exactly.
 - **Backend compatibility check (✅ — implemented).** The CLI fails clearly on
