@@ -92,6 +92,15 @@ vetro doctor             Verify config, connectivity, auth, and plan quota.
 vetro init               Scaffold a CI workflow (+ pre-commit hook with --hook).
 vetro verify-receipt <f> Verify a signed run receipt offline (no network/account).
 vetro version            Print the CLI version.
+vetro completions <sh>   Print a shell completion script (bash|zsh|fish|powershell|elvish).
+```
+
+Enable completions by writing the script where your shell looks for them, e.g.:
+
+```bash
+vetro completions bash > ~/.local/share/bash-completion/completions/vetro
+vetro completions zsh  > "${fpath[1]}/_vetro"   # zsh
+vetro completions fish > ~/.config/fish/completions/vetro.fish
 ```
 
 ## Baseline & suppression
