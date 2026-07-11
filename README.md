@@ -29,13 +29,21 @@ docker run --rm -e VETRO_API_KEY ghcr.io/donkan168/vetro-cli:latest check migrat
 ```
 
 ```bash
+# Phase 2 — npm (great in CI: runners already have Node)
+npm install -g @vetro/vetro-cli      # or: npx @vetro/vetro-cli check ...
+```
+
+```bash
 # From source
 cargo install --path .
 ```
 
-> **Phase 2 (planned):** package managers — `npm i -g @vetro/cli` / `npx @vetro/cli`,
-> `brew install donkan168/vetro/vetro`, `scoop install vetro`. Not published yet;
-> use the shell installer, Docker image, or `cargo install` for now.
+> **npm:** the release pipeline builds the `@vetro/vetro-cli` package on every
+> tag; publishing to the npm registry requires an `NPM_TOKEN` repo secret (see
+> _Publishing to npm_ below). **Homebrew/Scoop remain planned** —
+> `brew install donkan168/vetro/vetro`, `scoop install vetro` — pending a tap /
+> bucket repo. Until a channel is live, use the shell installer, Docker image,
+> or `cargo install`.
 
 > The CLI is a network-only thin client — it always evaluates against your live
 > Vetro workspace. There is no offline/local mode.
@@ -56,6 +64,22 @@ sha256sum -c vetro-cli-x86_64-unknown-linux-musl.tar.xz.sha256
 > available for user-owned _private_ repositories. Once this repo is public or
 > moves under an org, re-enable them (see `dist-workspace.toml`) and verification
 > becomes `gh attestation verify <artifact> --repo donkan168/vetro-cli`.
+
+### Publishing to npm (maintainers)
+
+The release pipeline builds the `@vetro/vetro-cli` npm package tarball on every
+tag, but does not publish it. To publish `v0.1.0` to the registry:
+
+```bash
+# One-time: create an automation token at npmjs.com and grant the @vetro org
+# publish rights, then either publish manually…
+gh release download v0.1.0 --repo donkan168/vetro-cli --pattern 'vetro-cli-npm-package.tar.gz'
+tar -xf vetro-cli-npm-package.tar.gz
+cd vetro-cli-npm-package && npm publish --access public   # needs `npm login` / NPM_TOKEN
+```
+
+To automate it in CI, add an `NPM_TOKEN` repo secret and a publish step (or
+cargo-dist's `publish-jobs = ["npm"]`) so tags publish the package directly.
 
 ## Commands
 

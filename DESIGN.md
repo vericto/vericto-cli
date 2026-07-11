@@ -19,7 +19,8 @@
 > (GitHub Releases with cross-compiled binaries + SHA-256 checksums + `curl | sh`
 > installer + distroless Docker image) ✅ implemented; keyless build attestations
 > are wired but gated off until the repo is public/org (§9 Notes), and package
-> managers (Homebrew/Scoop/npm, Phase 2) remain 🔜. Rationale in §14.
+> Phase 2 npm ✅ (the `@vetro/vetro-cli` package is built by the pipeline;
+> publishing needs an `NPM_TOKEN`), Homebrew/Scoop remain 🔜. Rationale in §14.
 
 ## 1. What it is
 
@@ -545,7 +546,8 @@ effort, so we layer them.
 > `Dockerfile` (static musl binary) published multi-arch (amd64 + arm64) to GHCR
 > by a separate `.github/workflows/docker.yml` — separate because `dist generate`
 > owns and would overwrite `release.yml`. `dist plan`
-> validates the artifact set. **Phase 2** (Homebrew/Scoop/npm) remains 🔜.
+> validates the artifact set. **Phase 2:** npm ✅ (built by the pipeline as
+> `@vetro/vetro-cli`; publishing needs `NPM_TOKEN`), Homebrew/Scoop 🔜.
 
 ### Level 0 — the base (everything else depends on it)
 
@@ -565,12 +567,22 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
   `cargo-dist` (the installer and release workflow are generated; the Docker
   image is a thin `FROM scratch`/`distroless` wrapper over the static musl
   binary).
-- **Phase 2 (adoption): Homebrew + Scoop + npm.** Cover macOS, Windows, and the
-  Node ecosystem with little effort. `cargo-dist` makes Homebrew/Scoop nearly
-  free; **npm** is the only one with real work — a package whose `postinstall`
-  downloads the matching prebuilt binary from the GitHub release and installs the
-  `vetro` shim (worth it because CI runners overwhelmingly already have Node, so
-  `npx @vetro/cli check` is zero-install).
+- **Phase 2 (adoption): npm ✅, Homebrew + Scoop 🔜.** Cover the Node ecosystem,
+  macOS, and Windows.
+  - **npm — done (this revision):** `cargo-dist`'s `npm` installer
+    (`installers = ["shell", "npm"]`, `npm-scope = "@vetro"`) generates the
+    `@vetro/vetro-cli` package whose `postinstall` downloads the matching
+    prebuilt binary from the GitHub release and installs the `vetro` shim. Worth
+    it because CI runners overwhelmingly already have Node, so
+    `npx @vetro/vetro-cli check` is zero-install. The pipeline *builds* the
+    package tarball on every tag; *publishing* to the registry needs an
+    `NPM_TOKEN` (a `npm publish` step or `dist`'s publish job) — the one manual
+    setup left. (Package name is `@vetro/vetro-cli`, derived from the crate;
+    not `@vetro/cli`.)
+  - **Homebrew + Scoop — 🔜:** `cargo-dist` makes these nearly free but each
+    needs an external repo you own (a Homebrew *tap* and a Scoop *bucket*); add
+    `"homebrew"`/`tap = "..."` and a Scoop bucket to `dist-workspace.toml` once
+    those repos exist.
 
 ### Notes
 
@@ -697,14 +709,17 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   `.vetro.toml` (§6.3), CA trust (§6.4), degraded-mode break-glass (§6.5, with
   the server-side reconciliation caveat noted there), bounded chunk concurrency
   (§5), backend compatibility check (§9), `--no-color`, `vetro version`.
-- **Distribution (§9) — Level 0 + Phase 1 DONE:** `cargo-dist`
-  (`dist-workspace.toml` + generated `release.yml`) publishes attested,
-  cross-compiled binaries to GitHub Releases with a `curl | sh` installer, plus a
-  distroless multi-arch Docker image to GHCR (`docker.yml`). **Phase 2**
-  (Homebrew + Scoop + npm) remains 🔜.
-- **Still 🔜:** distribution Phase 2; server-side reconciliation of degraded runs
-  (§6.5); watch/dev ergonomics; shell completions. (No local-first mode — out of
-  scope, §1.)
+- **Distribution (§9) — Level 0 + Phase 1 DONE, Phase 2 npm DONE:** `cargo-dist`
+  (`dist-workspace.toml` + generated `release.yml`) publishes cross-compiled
+  binaries + SHA-256 checksums to GitHub Releases with a `curl | sh` installer,
+  plus a distroless multi-arch Docker image to GHCR (`docker.yml`), plus the
+  `@vetro/vetro-cli` npm package (built on tag; publishing needs `NPM_TOKEN`).
+  Keyless build attestations are wired but gated off on a private repo (§9
+  Notes). **Homebrew + Scoop** remain 🔜 (need an external tap/bucket repo).
+- **Still 🔜:** distribution Homebrew/Scoop; npm registry publish (`NPM_TOKEN`);
+  keyless attestations (repo must be public/org); server-side reconciliation of
+  degraded runs (§6.5); watch/dev ergonomics; shell completions. (No local-first
+  mode — out of scope, §1.)
 
 ## 12. Open questions (need product decisions)
 
