@@ -14,8 +14,8 @@ enterprise unmetered). See [DESIGN.md](DESIGN.md) for the full design.
 Releases are built with [`cargo-dist`](https://opensource.axo.dev/cargo-dist/):
 cross-compiled binaries for Linux (x86_64/aarch64, static musl), macOS
 (x86_64/aarch64), and Windows (x86_64) are published to GitHub Releases on every
-version tag, each with SHA-256 checksums and a GitHub build attestation (see
-_Verifying a download_ below). Every other channel serves those same binaries.
+version tag, each with SHA-256 checksums (see _Verifying a download_ below).
+Every other channel serves those same binaries.
 
 ```bash
 # Phase 1 — shell installer (Linux/macOS)
@@ -42,23 +42,20 @@ cargo install --path .
 
 ### Verifying a download
 
-Each release binary is signed with a [GitHub build attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations)
-— keyless provenance tied to the GitHub Actions identity that built it, so there
-is no long-lived signing key to trust or manage. Verify a downloaded artifact
-with the `gh` CLI:
+Every release ships SHA-256 checksums — `sha256.sum` (all artifacts) and a
+per-artifact `.sha256` — for an integrity check:
 
 ```bash
-# A downloaded binary artifact
-gh attestation verify vetro-cli-x86_64-unknown-linux-musl.tar.xz \
-  --repo donkan168/vetro-cli
-
-# The container image (multi-arch: linux/amd64 + linux/arm64)
-gh attestation verify oci://ghcr.io/donkan168/vetro-cli:latest \
-  --repo donkan168/vetro-cli
+# Verify a downloaded artifact against the published checksum
+sha256sum -c vetro-cli-x86_64-unknown-linux-musl.tar.xz.sha256
 ```
 
-Checksums (`sha256.sum`, and a per-artifact `.sha256`) are published alongside
-each binary for a quick integrity check when attestation tooling isn't available.
+> **Keyless build attestations** (Sigstore-backed provenance tied to the GitHub
+> Actions identity that built the artifact, §9) are wired into the release
+> pipeline but **currently disabled**: GitHub artifact attestations aren't
+> available for user-owned _private_ repositories. Once this repo is public or
+> moves under an org, re-enable them (see `dist-workspace.toml`) and verification
+> becomes `gh attestation verify <artifact> --repo donkan168/vetro-cli`.
 
 ## Commands
 

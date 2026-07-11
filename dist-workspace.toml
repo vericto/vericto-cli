@@ -13,7 +13,13 @@ installers = ["shell"]
 targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
-# Whether to enable GitHub Attestations
-github-attestations = true
 # Where to host releases
 hosting = "github"
+
+# NOTE: `github-attestations` (keyless build provenance, §9) is intentionally
+# OFF: GitHub artifact attestations are not available for user-owned PRIVATE
+# repos — the release job's Attest step fails with "Feature not available for
+# user-owned private repositories." Re-enable (add `github-attestations = true`
+# and re-run `dist generate`) once this repo is public or moved under an org.
+# Until then, releases ship SHA-256 checksums (`sha256.sum` + per-artifact
+# `.sha256`) for integrity.
