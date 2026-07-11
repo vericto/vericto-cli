@@ -7,7 +7,10 @@ mod api;
 mod baseline;
 mod ci_env;
 mod config;
+mod oidc;
 mod output;
+mod pubkeys;
+mod receipt;
 mod sanitize;
 mod scaffold;
 
@@ -102,6 +105,26 @@ enum Command {
     Init(InitArgs),
     /// Record current findings to a baseline file (§10).
     Baseline(BaselineArgs),
+    /// Verify a signed run receipt offline (§7.1) — no network, no account.
+    VerifyReceipt(VerifyReceiptArgs),
+    /// Print the CLI version (same as `--version`).
+    Version,
+}
+
+#[derive(Parser)]
+struct VerifyReceiptArgs {
+    /// Path to the receipt file written by `vetro check --receipt` (a single
+    /// receipt object, or a JSON array of per-chunk receipts).
+    file: std::path::PathBuf,
+
+    /// Public key PEM to verify against (or a path to a `.pem` file). Overrides
+    /// the bundled key. Fetch it from `GET /api/v1/meta/export-signing-key`.
+    #[arg(long, value_name = "PEM_OR_PATH", env = "VETRO_RECEIPT_PUBLIC_KEY")]
+    public_key: Option<String>,
+
+    /// Print the verified payload (summary + provenance) on success.
+    #[arg(long)]
+    show: bool,
 }
 
 #[derive(Parser)]
@@ -133,6 +156,24 @@ struct BaselineArgs {
     #[arg(long, env = "VETRO_API_URL")]
     api_url: Option<String>,
 
+    /// Authenticate via CI workload-identity (OIDC) instead of a static key
+    /// (§6.1). Auto-enabled when no static key is present and a token is
+    /// available.
+    #[arg(long)]
+    oidc: bool,
+
+    /// Workspace ID to authenticate against for OIDC.
+    #[arg(long, value_name = "ID", env = "VETRO_WORKSPACE_ID")]
+    workspace: Option<String>,
+
+    /// OIDC audience to request in the ID token.
+    #[arg(long, value_name = "AUD")]
+    audience: Option<String>,
+
+    /// Env var holding a pre-minted OIDC ID token (GitLab-style).
+    #[arg(long, value_name = "VAR")]
+    oidc_token_env: Option<String>,
+
     /// Per-request timeout in seconds.
     #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
@@ -157,6 +198,15 @@ struct InitArgs {
     /// SQL dialect to bake into the generated templates.
     #[arg(long, default_value = "postgres")]
     dialect: String,
+
+    /// Scaffold OIDC / workload-identity auth (§6.1) instead of a static
+    /// VETRO_API_KEY secret. Requires --workspace.
+    #[arg(long)]
+    oidc: bool,
+
+    /// Workspace ID to bake into OIDC templates (required with --oidc).
+    #[arg(long, value_name = "ID")]
+    workspace: Option<String>,
 
     /// Overwrite existing files instead of skipping them.
     #[arg(long)]
@@ -184,6 +234,21 @@ struct LoginArgs {
     /// Default SQL dialect to store (used by `check` when --dialect is omitted).
     #[arg(long)]
     dialect: Option<String>,
+
+    /// Configure OIDC / workload-identity login instead of storing a static key
+    /// (§6.1). Stores the workspace_id (and audience) so CI runs authenticate
+    /// with a short-lived, per-run token — no long-lived key on disk. When run
+    /// inside CI with an OIDC token available, also verifies the exchange works.
+    #[arg(long)]
+    oidc: bool,
+
+    /// Workspace ID to authenticate against (required with --oidc).
+    #[arg(long, value_name = "ID")]
+    workspace: Option<String>,
+
+    /// OIDC audience to request (defaults to "vetro").
+    #[arg(long, value_name = "AUD")]
+    audience: Option<String>,
 }
 
 #[derive(Parser)]
@@ -195,6 +260,23 @@ struct DoctorArgs {
     /// Vetro API base URL (or set VETRO_API_URL, or `vetro login`).
     #[arg(long, env = "VETRO_API_URL")]
     api_url: Option<String>,
+
+    /// Test OIDC / workload-identity auth (§6.1) instead of a static key.
+    /// Auto-enabled when no static key is present and a token is available.
+    #[arg(long)]
+    oidc: bool,
+
+    /// Workspace ID to authenticate against for OIDC.
+    #[arg(long, value_name = "ID", env = "VETRO_WORKSPACE_ID")]
+    workspace: Option<String>,
+
+    /// OIDC audience to request in the ID token.
+    #[arg(long, value_name = "AUD")]
+    audience: Option<String>,
+
+    /// Env var holding a pre-minted OIDC ID token (GitLab-style).
+    #[arg(long, value_name = "VAR")]
+    oidc_token_env: Option<String>,
 
     /// Per-request timeout in seconds.
     #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
@@ -222,6 +304,12 @@ struct CheckArgs {
     #[arg(long, value_name = "REF")]
     since: Option<String>,
 
+    /// Read the list of SQL files to check from stdin, one path per line (for
+    /// pipelines that already compute the set, e.g. `git diff --name-only ... |
+    /// vetro check --stdin-file-list`). Mutually exclusive with files/--changed.
+    #[arg(long)]
+    stdin_file_list: bool,
+
     /// SQL dialect of the files. Falls back to the config's default_dialect,
     /// then "postgres".
     #[arg(long)]
@@ -248,9 +336,36 @@ struct CheckArgs {
     #[arg(long, env = "VETRO_API_URL")]
     api_url: Option<String>,
 
+    /// Authenticate via CI workload-identity (OIDC) instead of a static key
+    /// (§6.1). Auto-enabled when no static key is present and a CI OIDC token is
+    /// available; pass this to require it (and error if unavailable).
+    #[arg(long)]
+    oidc: bool,
+
+    /// Workspace ID to authenticate against for OIDC (falls back to .vetro.toml /
+    /// config `workspace_id`). Required for OIDC.
+    #[arg(long, value_name = "ID", env = "VETRO_WORKSPACE_ID")]
+    workspace: Option<String>,
+
+    /// OIDC audience to request in the ID token (must match the workspace trust
+    /// policy). Falls back to config, then "vetro".
+    #[arg(long, value_name = "AUD")]
+    audience: Option<String>,
+
+    /// Env var holding a pre-minted OIDC ID token (GitLab-style). Falls back to
+    /// .vetro.toml `oidc_token_env`, then "VETRO_ID_TOKEN".
+    #[arg(long, value_name = "VAR")]
+    oidc_token_env: Option<String>,
+
     /// Write the report to a file instead of stdout (for CI artifacts).
     #[arg(long, value_name = "FILE")]
     output: Option<std::path::PathBuf>,
+
+    /// Request a signed run receipt (§7.1) and write it to this path — a
+    /// self-contained, offline-verifiable record (see `vetro verify-receipt`).
+    /// A chunked run writes a JSON array of per-chunk receipts.
+    #[arg(long, value_name = "FILE")]
+    receipt: Option<std::path::PathBuf>,
 
     /// Ignore findings recorded in this baseline file; only new findings can
     /// fail the run (§10).
@@ -280,6 +395,11 @@ struct CheckArgs {
     /// Only print the summary line.
     #[arg(short, long)]
     quiet: bool,
+
+    /// Disable ANSI color in text output. Color is also auto-disabled when
+    /// stdout isn't a TTY or when `NO_COLOR` is set (anstream default).
+    #[arg(long)]
+    no_color: bool,
 }
 
 /// What counts as a failure for the exit code.
@@ -307,6 +427,137 @@ fn resolve_transport(
     }
 }
 
+/// The OIDC inputs a command collected from its flags — resolved against config
+/// by `resolve_auth`. Kept separate from the parsed args so `check`, `baseline`
+/// and `doctor` share one resolution path.
+struct OidcOpts {
+    /// `--oidc` was passed: require OIDC (error if a token can't be obtained)
+    /// rather than only using it as an auto-fallback.
+    forced: bool,
+    workspace: Option<String>,
+    audience: Option<String>,
+    token_env: Option<String>,
+}
+
+/// How the effective API key was obtained — for `doctor`/diagnostics.
+enum AuthMode {
+    /// A static `vtro_...` key (flag/env/config).
+    Static(config::KeySource),
+    /// A short-lived key minted via OIDC exchange, with the token's source.
+    Oidc {
+        source: String,
+        policy_id: Option<String>,
+    },
+}
+
+/// Resolves the effective API key: a static key when one is present (unless
+/// `--oidc` forces workload-identity), otherwise a short-lived key minted by
+/// exchanging a CI OIDC token (§6.1). Returns the key plus how it was obtained.
+///
+/// Precedence: an explicit static key (flag/env/config) is used as-is unless
+/// `--oidc` was passed. With `--oidc`, or when no static key exists but a CI
+/// OIDC token is available, the CLI fetches the provider ID token and exchanges
+/// it at `/auth/oidc-exchange`. The minted key lives only in memory.
+async fn resolve_auth(
+    api_url: &str,
+    static_key: Option<String>,
+    static_source: config::KeySource,
+    opts: &OidcOpts,
+    project: &config::ProjectConfig,
+    file: &config::Config,
+    transport: &api::Transport,
+) -> Result<(String, AuthMode), ExitCode> {
+    // A static key wins unless the user explicitly asked for OIDC.
+    if let Some(key) = static_key {
+        if !opts.forced {
+            return Ok((key, AuthMode::Static(static_source)));
+        }
+    }
+
+    let token_env = opts
+        .token_env
+        .clone()
+        .or_else(|| project.oidc_token_env.clone())
+        .unwrap_or_else(|| oidc::DEFAULT_GITLAB_TOKEN_ENV.to_string());
+
+    let Some(avail) = oidc::availability(&token_env) else {
+        if opts.forced {
+            eprintln!(
+                "error: --oidc requested but no OIDC token is available. Run inside GitHub \
+                 Actions (permissions: id-token: write) or GitLab CI with an `id_tokens:` \
+                 entry exported as {token_env}."
+            );
+            return Err(ExitCode::from(exit::AUTH));
+        }
+        // Auto-mode with no token and no static key: nothing to authenticate with.
+        eprintln!(
+            "error: no API key and no OIDC token. Pass --api-key, set VETRO_API_KEY, \
+             run `vetro login`, or run in CI with workload-identity (§6.1)."
+        );
+        return Err(ExitCode::from(exit::AUTH));
+    };
+
+    // Workspace + audience: flag > .vetro.toml > user config > default.
+    let Some(workspace) = opts
+        .workspace
+        .clone()
+        .or_else(|| project.workspace_id.clone())
+        .or_else(|| file.workspace_id.clone())
+    else {
+        eprintln!(
+            "error: OIDC login needs a workspace. Pass --workspace <id>, set \
+             VETRO_WORKSPACE_ID, or add workspace_id to .vetro.toml / `vetro login --oidc`."
+        );
+        return Err(ExitCode::from(exit::AUTH));
+    };
+    let audience = opts
+        .audience
+        .clone()
+        .or_else(|| project.oidc_audience.clone())
+        .or_else(|| file.oidc_audience.clone())
+        .unwrap_or_else(|| config::DEFAULT_OIDC_AUDIENCE.to_string());
+
+    let source = match &avail {
+        oidc::Availability::GitHubEndpoint { .. } => "github-actions".to_string(),
+        oidc::Availability::EnvToken { var, .. } => format!("env:{var}"),
+    };
+
+    let id_token = match oidc::fetch_token(&avail, Some(&audience), transport).await {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: could not obtain an OIDC ID token: {e}");
+            return Err(ExitCode::from(exit::AUTH));
+        }
+    };
+
+    match api::oidc_exchange(api_url, &workspace, &id_token, transport).await {
+        Ok(res) => {
+            eprintln!(
+                "note: authenticated via OIDC ({source}); minted a short-lived key{}.",
+                res.expires_at
+                    .as_deref()
+                    .map(|e| format!(" (expires {e})"))
+                    .unwrap_or_default()
+            );
+            Ok((
+                res.api_key,
+                AuthMode::Oidc {
+                    source,
+                    policy_id: res.policy_id,
+                },
+            ))
+        }
+        Err(e) => {
+            eprintln!("error: OIDC token exchange failed: {e}");
+            let code = match e {
+                ApiError::Auth(_) => exit::AUTH,
+                _ => exit::BACKEND,
+            };
+            Err(ExitCode::from(code))
+        }
+    }
+}
+
 /// Resolves the effective `--fail-on`: the flag wins; else `.vetro.toml`'s
 /// `fail_on` (parsed leniently); else the default `Block`. An unrecognized
 /// value in the file is ignored (falls through to default) with no hard error,
@@ -328,11 +579,16 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Check(args) => run_check(args).await,
-        Command::Login(args) => run_login(args),
+        Command::Login(args) => run_login(args).await,
         Command::Logout => run_logout(),
         Command::Doctor(args) => run_doctor(args).await,
         Command::Init(args) => run_init(args),
         Command::Baseline(args) => run_baseline(args).await,
+        Command::VerifyReceipt(args) => run_verify_receipt(args),
+        Command::Version => {
+            println!("vetro {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::from(exit::OK)
+        }
     }
 }
 
@@ -364,11 +620,29 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         args.api_key.as_deref(),
         &file,
     );
-    let Some(api_key) = resolved.api_key else {
-        eprintln!("error: no API key. Pass --api-key, set VETRO_API_KEY, or run `vetro login`.");
-        return ExitCode::from(exit::AUTH);
+    let api_url = resolved.api_url.clone();
+    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
+    // Auth: a static key, or a short-lived key minted via OIDC (§6.1).
+    let oidc_opts = OidcOpts {
+        forced: args.oidc,
+        workspace: args.workspace.clone(),
+        audience: args.audience.clone(),
+        token_env: args.oidc_token_env.clone(),
     };
-    let api_url = resolved.api_url;
+    let (api_key, _auth_mode) = match resolve_auth(
+        &api_url,
+        resolved.api_key,
+        resolved.key_source,
+        &oidc_opts,
+        &project,
+        &file,
+        &transport,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(code) => return code,
+    };
     // dialect precedence: flag > .vetro.toml > user config default > "postgres".
     let dialect = args
         .dialect
@@ -384,8 +658,9 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         .clone()
         .or_else(|| project.baseline.as_ref().map(std::path::PathBuf::from));
 
-    // Resolve the file list: explicit args, or the git diff when --changed/--since.
-    let files = match resolve_files(&args.files, args.changed, &args.since) {
+    // Resolve the file list: explicit args, the git diff (--changed/--since), or
+    // a newline-delimited list piped in (--stdin-file-list).
+    let files = match resolve_files(&args.files, args.changed, &args.since, args.stdin_file_list) {
         FileResolution::Files(f) => f,
         FileResolution::EmptyDiff(msg) => {
             println!("{msg}");
@@ -411,8 +686,6 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     } else {
         None
     };
-
-    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
 
     // Pre-flight (§6.2): learn the workspace's telemetry query mode BEFORE
     // sending any SQL. When 'sanitized', normalize literals client-side so raw
@@ -451,6 +724,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
             provenance: build_provenance(),
             transport: transport.clone(),
             concurrency,
+            receipt: args.receipt.is_some(),
         },
         queries,
     )
@@ -470,10 +744,20 @@ async fn run_check(args: CheckArgs) -> ExitCode {
                         return ExitCode::from(exit::USAGE);
                     }
                     eprintln!("error: {e}");
+                    // Write a local, append-only degraded-run record (§6.5) so the
+                    // bypass leaves an auditable trace even though the backend was
+                    // unreachable. Best-effort: a write failure must not turn the
+                    // break-glass back into a hard failure.
+                    let record_path = write_degraded_record(reason, &files);
+                    let where_str = record_path
+                        .as_deref()
+                        .map(|p| format!(" Recorded locally at {p}."))
+                        .unwrap_or_default();
                     eprintln!(
                         "⚠ DEGRADED: backend unreachable; proceeding due to --allow-degraded \
-                         (reason: {reason}). The SQL was NOT checked. This bypass should be \
-                         reconciled server-side on the next successful run."
+                         (reason: {reason}). The SQL was NOT checked.{where_str} Archive this \
+                         record as a CI artifact — server-side reconciliation is not yet \
+                         available (see DESIGN §6.5)."
                     );
                     return ExitCode::from(exit::OK);
                 }
@@ -488,15 +772,60 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         }
     };
 
+    // Backend compatibility (§9): the response carries an `X-Vetro-Api-Version`
+    // header. Warn on a minor skew, fail on a major mismatch (the CLI may
+    // mis-parse a future major's response). Absent header (older backend) → skip.
+    if let Some(v) = resp.api_version_header.as_deref() {
+        match backend_compat(v) {
+            Compat::Ok | Compat::Unknown => {}
+            Compat::MinorSkew => eprintln!(
+                "note: backend api {v} is older than this CLI expects (>= {MIN_BACKEND_API_VERSION}); some features may be unavailable."
+            ),
+            Compat::MajorMismatch => {
+                eprintln!(
+                    "error: incompatible backend api {v} (CLI requires {MIN_BACKEND_API_VERSION}, major mismatch). Upgrade the CLI or backend."
+                );
+                return ExitCode::from(exit::BACKEND);
+            }
+        }
+    }
+
     if let Err(e) = output::render(
         &resp,
         args.format,
         &files,
         args.quiet,
         args.output.as_deref(),
+        !args.no_color,
     ) {
         eprintln!("error: could not write output: {e}");
         return ExitCode::from(exit::USAGE);
+    }
+
+    // Signed run receipt (§7.1): write the server-signed evidence to --receipt.
+    // A single-call run writes one object; a chunked run writes an array of
+    // per-chunk receipts. If signing isn't configured server-side the response
+    // carries no receipt — warn (the check still succeeded) rather than fail.
+    if let Some(path) = args.receipt.as_deref() {
+        let receipts = resp.all_receipts();
+        if receipts.is_empty() {
+            eprintln!(
+                "warning: --receipt requested but the backend returned no receipt \
+                 (signing may not be configured on this deployment). No file written."
+            );
+        } else if let Err(e) = write_receipts(path, &receipts) {
+            eprintln!("error: could not write receipt to {}: {e}", path.display());
+            return ExitCode::from(exit::USAGE);
+        } else {
+            let n = receipts.len();
+            eprintln!(
+                "note: wrote {} signed receipt{} to {}. Verify with `vetro verify-receipt {}`.",
+                n,
+                if n == 1 { "" } else { "s" },
+                path.display(),
+                path.display()
+            );
+        }
     }
 
     // Nudge toward an upgrade as the monthly CLI allowance runs low (stderr, so
@@ -602,23 +931,50 @@ fn suppressed_fingerprints(
 /// file (§10), so a later `check --baseline` only fails on *new* findings.
 async fn run_baseline(args: BaselineArgs) -> ExitCode {
     let file = load_config();
+    // Project config (for OIDC workspace/audience defaults, like `check`).
+    let project = match config::load_project() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
     let resolved = config::resolve(
         args.api_url.as_deref().unwrap_or(config::DEFAULT_API_URL),
         args.api_url.is_none(),
         args.api_key.as_deref(),
         &file,
     );
-    let Some(api_key) = resolved.api_key else {
-        eprintln!("error: no API key. Pass --api-key, set VETRO_API_KEY, or run `vetro login`.");
-        return ExitCode::from(exit::AUTH);
+    let api_url = resolved.api_url.clone();
+    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
+    let oidc_opts = OidcOpts {
+        forced: args.oidc,
+        workspace: args.workspace.clone(),
+        audience: args.audience.clone(),
+        token_env: args.oidc_token_env.clone(),
+    };
+    let (api_key, _auth_mode) = match resolve_auth(
+        &api_url,
+        resolved.api_key,
+        resolved.key_source,
+        &oidc_opts,
+        &project,
+        &file,
+        &transport,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(code) => return code,
     };
     let dialect = args
         .dialect
         .clone()
+        .or_else(|| project.default_dialect.clone())
         .or_else(|| file.default_dialect.clone())
         .unwrap_or_else(|| "postgres".to_string());
 
-    let files = match resolve_files(&args.files, args.changed, &args.since) {
+    let files = match resolve_files(&args.files, args.changed, &args.since, false) {
         FileResolution::Files(f) => f,
         FileResolution::EmptyDiff(msg) => {
             println!("{msg}");
@@ -638,16 +994,16 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
         None => return ExitCode::from(exit::USAGE),
     };
 
-    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
     let resp = match api::check_all(
         api::CheckParams {
-            api_url: &resolved.api_url,
+            api_url: &api_url,
             api_key: &api_key,
             dialect: &dialect,
             file_name: None,
             provenance: build_provenance(),
             transport,
             concurrency: 4,
+            receipt: false,
         },
         queries,
     )
@@ -680,9 +1036,116 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
     }
 }
 
+/// Writes run receipts (§7.1) to `path`: a single receipt as one JSON object,
+/// or several (a chunked run) as a JSON array — the shape `verify-receipt`
+/// accepts on the way back in.
+fn write_receipts(path: &std::path::Path, receipts: &[api::Receipt]) -> std::io::Result<()> {
+    let json = if receipts.len() == 1 {
+        serde_json::to_string_pretty(&receipts[0])
+    } else {
+        serde_json::to_string_pretty(receipts)
+    }
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, json)
+}
+
+/// `vetro verify-receipt <file>` — verify a signed run receipt (§7.1) offline.
+/// Accepts a single receipt object or an array (chunked run); every receipt must
+/// verify for the command to exit 0. Prints a clear reason on failure.
+fn run_verify_receipt(args: VerifyReceiptArgs) -> ExitCode {
+    let text = match std::fs::read_to_string(&args.file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", args.file.display());
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    // Accept either a single receipt or an array of them.
+    let receipts: Vec<api::Receipt> = match serde_json::from_str::<api::Receipt>(&text) {
+        Ok(one) => vec![one],
+        Err(_) => match serde_json::from_str::<Vec<api::Receipt>>(&text) {
+            Ok(many) => many,
+            Err(e) => {
+                eprintln!(
+                    "error: {} is not a valid receipt (or array of receipts): {e}",
+                    args.file.display()
+                );
+                return ExitCode::from(exit::USAGE);
+            }
+        },
+    };
+    if receipts.is_empty() {
+        eprintln!("error: no receipts found in {}.", args.file.display());
+        return ExitCode::from(exit::USAGE);
+    }
+
+    // --public-key may be an inline PEM or a path to a .pem file.
+    let override_pem = match args.public_key.as_deref() {
+        Some(v) if v.contains("BEGIN") => Some(v.to_string()),
+        Some(pathish) => match std::fs::read_to_string(pathish) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("error: cannot read public key file '{pathish}': {e}");
+                return ExitCode::from(exit::USAGE);
+            }
+        },
+        None => None,
+    };
+
+    let total = receipts.len();
+    for (i, r) in receipts.iter().enumerate() {
+        match receipt::verify(r, override_pem.as_deref()) {
+            Ok(()) => {
+                let label = if total == 1 {
+                    "receipt".to_string()
+                } else {
+                    format!("receipt {}/{}", i + 1, total)
+                };
+                println!(
+                    "✓ {label} verified (key {}, {}).",
+                    r.public_key_id, r.scheme
+                );
+                if args.show {
+                    print_receipt_summary(r);
+                }
+            }
+            Err(e) => {
+                eprintln!("✖ receipt {}/{} failed to verify: {e}", i + 1, total);
+                // A verification failure is an auth/authenticity problem (exit 3),
+                // distinct from a malformed file (exit 2, handled above).
+                return ExitCode::from(exit::AUTH);
+            }
+        }
+    }
+    ExitCode::from(exit::OK)
+}
+
+/// Prints the human-relevant fields of a verified receipt payload (best-effort;
+/// the payload is an opaque Value, so missing fields are simply skipped).
+fn print_receipt_summary(r: &api::Receipt) {
+    let p = &r.payload;
+    let get = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("-").to_string();
+    println!("  workspace: {}", get("workspace_id"));
+    println!("  file:      {}", get("file_name"));
+    println!("  dialect:   {}", get("dialect"));
+    println!("  signed_at: {}", get("signed_at"));
+    if let Some(s) = p.get("summary") {
+        println!("  summary:   {s}");
+    }
+    if let Some(code) = p.get("exit_code") {
+        println!("  exit_code: {code}");
+    }
+}
+
 /// `vetro login` — persist an API key (and optional URL/dialect) to the config
 /// file. The key comes from --api-key/env, or an interactive prompt.
-fn run_login(args: LoginArgs) -> ExitCode {
+async fn run_login(args: LoginArgs) -> ExitCode {
+    // OIDC mode stores no secret — just the workspace/audience so CI runs
+    // authenticate with a short-lived, per-run token (§6.1).
+    if args.oidc {
+        return run_login_oidc(args).await;
+    }
     let api_key = match args.api_key {
         Some(k) => k,
         None => match prompt_secret("Vetro API key (vtro_...): ") {
@@ -720,6 +1183,90 @@ fn run_login(args: LoginArgs) -> ExitCode {
     }
 }
 
+/// `vetro login --oidc` — configure workload-identity login (§6.1). Stores only
+/// the workspace_id (and audience) — never a secret. When run inside CI with an
+/// OIDC token available, it also verifies the exchange works so the developer
+/// gets immediate feedback rather than a failure on the first CI check.
+async fn run_login_oidc(args: LoginArgs) -> ExitCode {
+    let Some(workspace) = args.workspace.clone() else {
+        eprintln!("error: `vetro login --oidc` requires --workspace <id>.");
+        return ExitCode::from(exit::USAGE);
+    };
+
+    let mut cfg = load_config();
+    // OIDC stores no api_key; clear any stale static key so `check` doesn't
+    // silently prefer it over workload-identity.
+    cfg.api_key = None;
+    cfg.workspace_id = Some(workspace.clone());
+    if let Some(url) = args.api_url.clone() {
+        cfg.api_url = Some(url);
+    }
+    if let Some(aud) = args.audience.clone() {
+        cfg.oidc_audience = Some(aud);
+    }
+
+    let path = match cfg.save() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: could not write config: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    println!(
+        "Configured OIDC login for workspace {workspace} (audience {}) in {}.",
+        args.audience
+            .as_deref()
+            .unwrap_or(config::DEFAULT_OIDC_AUDIENCE),
+        path.display()
+    );
+
+    // Best-effort live verification when a token is actually available here.
+    let token_env = oidc::DEFAULT_GITLAB_TOKEN_ENV.to_string();
+    if oidc::availability(&token_env).is_some() {
+        println!("Detected an OIDC token in this environment — verifying the exchange...");
+        let api_url = cfg.api_url.clone().unwrap_or_else(|| {
+            args.api_url
+                .clone()
+                .unwrap_or_else(|| config::DEFAULT_API_URL.to_string())
+        });
+        let audience = args
+            .audience
+            .clone()
+            .or(cfg.oidc_audience.clone())
+            .unwrap_or_else(|| config::DEFAULT_OIDC_AUDIENCE.to_string());
+        let transport = resolve_transport(None, None);
+        let avail = oidc::availability(&token_env).unwrap();
+        let ok = match oidc::fetch_token(&avail, Some(&audience), &transport).await {
+            Ok(tok) => match api::oidc_exchange(&api_url, &workspace, &tok, &transport).await {
+                Ok(_) => {
+                    println!("✓ OIDC exchange succeeded — CI runs are ready to authenticate.");
+                    true
+                }
+                Err(e) => {
+                    eprintln!("✖ OIDC exchange failed: {e}");
+                    eprintln!(
+                        "  Check that a trust policy for this workspace matches the token's \
+                         issuer/audience/subject (dashboard → OIDC policies)."
+                    );
+                    false
+                }
+            },
+            Err(e) => {
+                eprintln!("✖ could not obtain an OIDC token: {e}");
+                false
+            }
+        };
+        return ExitCode::from(if ok { exit::OK } else { exit::AUTH });
+    }
+
+    println!(
+        "Not in a CI environment with an OIDC token — configuration saved. In CI, ensure a token \
+         is available (GitHub: permissions: id-token: write · GitLab: an `id_tokens:` entry \
+         exported as {token_env})."
+    );
+    ExitCode::from(exit::OK)
+}
+
 /// `vetro logout` — drop the stored API key (keeps url/dialect prefs).
 fn run_logout() -> ExitCode {
     let Some(path) = config::config_path() else {
@@ -752,7 +1299,18 @@ fn run_logout() -> ExitCode {
 /// git pre-commit hook. Existing files are skipped unless --force. Returns
 /// usage (2) if the target can't be determined or a write fails.
 fn run_init(args: InitArgs) -> ExitCode {
-    use scaffold::{CiTarget, Written};
+    use scaffold::{AuthStyle, CiTarget, Written};
+
+    // OIDC scaffolding needs a workspace to bake into the templates.
+    let auth = if args.oidc {
+        let Some(ws) = args.workspace.clone() else {
+            eprintln!("error: `vetro init --oidc` requires --workspace <id>.");
+            return ExitCode::from(exit::USAGE);
+        };
+        AuthStyle::Oidc { workspace_id: ws }
+    } else {
+        AuthStyle::StaticKey
+    };
 
     let target = match args.target {
         Some(InitTarget::Github) => CiTarget::GitHub,
@@ -764,14 +1322,14 @@ fn run_init(args: InitArgs) -> ExitCode {
     match target {
         CiTarget::GitHub => plans.push((
             std::path::PathBuf::from(".github/workflows/vetro.yml"),
-            scaffold::github_workflow(&args.dialect),
+            scaffold::github_workflow(&args.dialect, &auth),
             false,
         )),
         CiTarget::GitLab => plans.push((
             // Never clobber an existing .gitlab-ci.yml — write an include the
             // user wires in (printed below).
             std::path::PathBuf::from(".vetro/gitlab-ci.yml"),
-            scaffold::gitlab_job(&args.dialect),
+            scaffold::gitlab_job(&args.dialect, &auth),
             false,
         )),
         CiTarget::Unknown => {
@@ -809,20 +1367,40 @@ fn run_init(args: InitArgs) -> ExitCode {
     }
 
     // Provider-specific next steps.
+    let oidc = matches!(auth, AuthStyle::Oidc { .. });
     match target {
         CiTarget::GitHub => {
-            println!(
-                "\nNext: add VETRO_API_KEY as a repository secret \
-                 (Settings → Secrets and variables → Actions)."
-            );
+            if oidc {
+                println!(
+                    "\nNext: create an OIDC trust policy for this workspace in the Vetro \
+                     dashboard (issuer https://token.actions.githubusercontent.com, audience \
+                     'vetro', subject e.g. repo:your-org/your-repo:*). No secret needed — the \
+                     workflow mints a short-lived token per run."
+                );
+            } else {
+                println!(
+                    "\nNext: add VETRO_API_KEY as a repository secret \
+                     (Settings → Secrets and variables → Actions)."
+                );
+            }
         }
         CiTarget::GitLab => {
-            println!(
-                "\nNext:\n  1. Add VETRO_API_KEY as a masked CI/CD variable \
-                 (Settings → CI/CD → Variables).\n  \
-                 2. Include the job from your .gitlab-ci.yml:\n       \
-                 include:\n         - local: .vetro/gitlab-ci.yml"
-            );
+            if oidc {
+                println!(
+                    "\nNext:\n  1. Create an OIDC trust policy for this workspace in the Vetro \
+                     dashboard (issuer https://gitlab.com, audience 'vetro', subject e.g. \
+                     project_path:your-group/your-project:*).\n  \
+                     2. Include the job from your .gitlab-ci.yml:\n       \
+                     include:\n         - local: .vetro/gitlab-ci.yml"
+                );
+            } else {
+                println!(
+                    "\nNext:\n  1. Add VETRO_API_KEY as a masked CI/CD variable \
+                     (Settings → CI/CD → Variables).\n  \
+                     2. Include the job from your .gitlab-ci.yml:\n       \
+                     include:\n         - local: .vetro/gitlab-ci.yml"
+                );
+            }
         }
         CiTarget::Unknown => {}
     }
@@ -891,14 +1469,47 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
         Err(_) => println!("backend api: (version endpoint unavailable — older backend?)"),
     }
 
-    let Some(api_key) = resolved.api_key else {
-        println!("\n✖ no API key. Run `vetro login`, pass --api-key, or set VETRO_API_KEY.");
-        return ExitCode::from(exit::AUTH);
+    // Auth: static key, or a short-lived key minted via OIDC (§6.1). `doctor`
+    // reports which mode is active so the developer isn't guessing.
+    let project = config::load_project().unwrap_or_default();
+    let api_url = resolved.api_url.clone();
+    let oidc_opts = OidcOpts {
+        forced: args.oidc,
+        workspace: args.workspace.clone(),
+        audience: args.audience.clone(),
+        token_env: args.oidc_token_env.clone(),
     };
+    let (api_key, auth_mode) = match resolve_auth(
+        &api_url,
+        resolved.api_key,
+        resolved.key_source,
+        &oidc_opts,
+        &project,
+        &file,
+        &transport,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(code) => {
+            println!("\n✖ authentication unavailable.");
+            return code;
+        }
+    };
+    match &auth_mode {
+        AuthMode::Static(src) => println!("auth mode:   static key ({})", src.label()),
+        AuthMode::Oidc { source, policy_id } => {
+            print!("auth mode:   OIDC workload-identity via {source}");
+            if let Some(pid) = policy_id {
+                print!(" (policy {pid})");
+            }
+            println!();
+        }
+    }
 
     // Validate auth + read the workspace config WITHOUT spending a CLI check
     // (read-only endpoint). Reports plan, quota, ruleset and the query mode.
-    match api::config(&resolved.api_url, &api_key, &transport).await {
+    match api::config(&api_url, &api_key, &transport).await {
         Ok(cfg) => {
             println!("\n✓ reachable and authenticated");
             if let Some(plan) = &cfg.plan {
@@ -975,6 +1586,54 @@ fn build_provenance() -> Option<api::Provenance> {
     })
 }
 
+/// Writes an append-only degraded-run record (§6.5) to `.vetro/degraded-runs.jsonl`
+/// when `--allow-degraded` waves through an unreachable backend, so the bypass
+/// leaves an auditable trace: reason, timestamp, the files that went unchecked,
+/// and CI provenance. Returns the path written, or `None` on any I/O error
+/// (best-effort — the break-glass must not fail on a write problem).
+///
+/// Note: this is a *local* record. There is no server-side reconciliation
+/// endpoint yet (see DESIGN §6.5 / §14) — the record is meant to be archived as
+/// a CI artifact so the gap is visible after the fact.
+fn write_degraded_record(reason: &str, files: &[String]) -> Option<String> {
+    use std::io::Write;
+    // Unix-epoch seconds; avoids a chrono dependency for a single timestamp.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let prov = build_provenance();
+    let record = serde_json::json!({
+        "kind": "vetro-degraded-run",
+        "version": 1,
+        "unix_time": ts,
+        "reason": reason,
+        "files": files,
+        "provenance": prov.map(|p| serde_json::json!({
+            "git_sha": p.git_sha,
+            "git_ref": p.git_ref,
+            "ci_provider": p.ci_provider,
+            "ci_run_url": p.ci_run_url,
+            "actor": p.actor,
+        })),
+    });
+
+    let dir = std::path::Path::new(".vetro");
+    if std::fs::create_dir_all(dir).is_err() {
+        return None;
+    }
+    let path = dir.join("degraded-runs.jsonl");
+    let mut line = serde_json::to_string(&record).ok()?;
+    line.push('\n');
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    f.write_all(line.as_bytes()).ok()?;
+    Some(path.display().to_string())
+}
+
 /// Outcome of resolving which files to check (shared by `check`/`baseline`).
 enum FileResolution {
     /// The resolved list of file paths (or "-" for stdin).
@@ -985,9 +1644,40 @@ enum FileResolution {
     Usage(String),
 }
 
-/// Resolves the file list from explicit args or the git diff (`--changed` /
-/// `--since`). Shared so `check` and `baseline` behave identically.
-fn resolve_files(files: &[String], changed: bool, since: &Option<String>) -> FileResolution {
+/// Resolves the file list from explicit args, the git diff (`--changed` /
+/// `--since`), or a newline-delimited list on stdin (`--stdin-file-list`).
+/// Shared so `check` and `baseline` behave identically.
+fn resolve_files(
+    files: &[String],
+    changed: bool,
+    since: &Option<String>,
+    stdin_file_list: bool,
+) -> FileResolution {
+    // --stdin-file-list: read file paths (one per line) from stdin. For pipelines
+    // that already compute the set, e.g.
+    //   git diff --name-only --diff-filter=d $BASE...HEAD -- '*.sql' | vetro check --stdin-file-list
+    if stdin_file_list {
+        if !files.is_empty() || changed || since.is_some() {
+            return FileResolution::Usage(
+                "--stdin-file-list can't be combined with files or --changed/--since.".to_string(),
+            );
+        }
+        let mut buf = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+            return FileResolution::Usage(format!("could not read file list from stdin: {e}"));
+        }
+        let list: Vec<String> = buf
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
+        if list.is_empty() {
+            return FileResolution::EmptyDiff("No files on stdin — nothing to check.".to_string());
+        }
+        return FileResolution::Files(list);
+    }
+
     let use_changed = changed || since.is_some();
     if use_changed {
         if !files.is_empty() {
@@ -1124,6 +1814,9 @@ mod tests {
             exit_code: 0,
             ci_checks_remaining: None,
             telemetry_query_mode: None,
+            receipt: None,
+            merged_receipts: Vec::new(),
+            api_version_header: None,
         }
     }
 

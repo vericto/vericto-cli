@@ -97,9 +97,35 @@ fn set_executable(_path: &Path) -> std::io::Result<()> {
 
 // ── Templates ────────────────────────────────────────────────────────────────
 
+/// How the scaffolded CI job authenticates to Vetro.
+#[derive(Debug, Clone)]
+pub enum AuthStyle {
+    /// A static `vtro_...` key from a CI secret named `VETRO_API_KEY`.
+    StaticKey,
+    /// OIDC / workload-identity (§6.1): no long-lived secret, a short-lived key
+    /// minted per run against `workspace_id`.
+    Oidc { workspace_id: String },
+}
+
 /// GitHub Actions workflow: run `vetro check --changed` on PRs touching SQL,
 /// emit SARIF, upload to Code Scanning so findings show as PR annotations.
-pub fn github_workflow(dialect: &str) -> String {
+/// With [`AuthStyle::Oidc`] it requests an ID token (no `VETRO_API_KEY` secret).
+pub fn github_workflow(dialect: &str, auth: &AuthStyle) -> String {
+    // OIDC needs `id-token: write` and passes --oidc/--workspace instead of a key.
+    let (id_token_perm, check_line, check_env) = match auth {
+        AuthStyle::StaticKey => (
+            "",
+            format!("vetro check --changed --dialect {dialect} --format sarif --output vetro.sarif"),
+            "\n        env:\n          VETRO_API_KEY: ${{ secrets.VETRO_API_KEY }}".to_string(),
+        ),
+        AuthStyle::Oidc { workspace_id } => (
+            "\n  id-token: write          # mint an OIDC token for workload-identity login (§6.1)",
+            format!(
+                "vetro check --changed --dialect {dialect} --oidc --workspace {workspace_id} --format sarif --output vetro.sarif"
+            ),
+            String::new(),
+        ),
+    };
     format!(
         r#"# Managed by `vetro init`. Validates SQL changed in a PR against your
 # Vetro workspace rules and surfaces findings as PR annotations (Code Scanning).
@@ -112,7 +138,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # required to upload SARIF to Code Scanning
+  security-events: write   # required to upload SARIF to Code Scanning{id_token_perm}
 
 jobs:
   vetro:
@@ -123,12 +149,10 @@ jobs:
           fetch-depth: 0   # full history so --changed can diff the merge base
 
       - name: Install vetro
-        run: curl -fsSL https://github.com/donkan168/vetro-cli/releases/latest/download/vetro-installer.sh | sh
+        run: curl -fsSL https://github.com/donkan168/vetro-cli/releases/latest/download/vetro-cli-installer.sh | sh
 
       - name: Vetro check
-        run: vetro check --changed --dialect {dialect} --format sarif --output vetro.sarif
-        env:
-          VETRO_API_KEY: ${{{{ secrets.VETRO_API_KEY }}}}
+        run: {check_line}{check_env}
 
       - name: Upload SARIF
         if: always()   # upload even when the check fails, so annotations appear
@@ -141,9 +165,11 @@ jobs:
 
 /// GitLab CI job: run `vetro check --changed` on MRs touching SQL, emit a Code
 /// Quality report so findings show as inline MR annotations + the CQ widget.
-pub fn gitlab_job(dialect: &str) -> String {
-    format!(
-        r#"# Managed by `vetro init`. Validates SQL changed in a merge request against
+/// With [`AuthStyle::Oidc`] it mints an `id_tokens:` JWT (no `VETRO_API_KEY`).
+pub fn gitlab_job(dialect: &str, auth: &AuthStyle) -> String {
+    match auth {
+        AuthStyle::StaticKey => format!(
+            r#"# Managed by `vetro init`. Validates SQL changed in a merge request against
 # your Vetro workspace rules and surfaces findings as MR annotations.
 vetro-sql-check:
   image: ghcr.io/donkan168/vetro-cli:latest
@@ -158,7 +184,28 @@ vetro-sql-check:
         - "**/*.sql"
   # Set VETRO_API_KEY as a masked CI/CD variable in project settings.
 "#
-    )
+        ),
+        AuthStyle::Oidc { workspace_id } => format!(
+            r#"# Managed by `vetro init`. Validates SQL changed in a merge request against
+# your Vetro workspace rules and surfaces findings as MR annotations.
+# Uses OIDC / workload-identity (§6.1): no long-lived VETRO_API_KEY secret.
+vetro-sql-check:
+  image: ghcr.io/donkan168/vetro-cli:latest
+  id_tokens:
+    VETRO_ID_TOKEN:
+      aud: vetro          # must match the workspace's OIDC trust policy audience
+  script:
+    - vetro check --changed --dialect {dialect} --oidc --workspace {workspace_id} --format gitlab-codequality --output gl-code-quality.json
+  artifacts:
+    reports:
+      codequality: gl-code-quality.json
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "**/*.sql"
+"#
+        ),
+    }
 }
 
 /// Git pre-commit hook: check staged `*.sql` before a commit. Non-blocking if
@@ -191,21 +238,49 @@ mod tests {
 
     #[test]
     fn github_workflow_has_key_pieces() {
-        let w = github_workflow("mysql");
+        let w = github_workflow("mysql", &AuthStyle::StaticKey);
         assert!(w.contains("name: Vetro SQL check"));
         assert!(w.contains("--dialect mysql"));
         assert!(w.contains("--format sarif"));
         assert!(w.contains("upload-sarif"));
-        assert!(w.contains("secrets.VETRO_API_KEY")); // clap escaping produced a single ${{ }}
+        assert!(w.contains("secrets.VETRO_API_KEY"));
+        assert!(!w.contains("id-token: write")); // static key needs no OIDC perm
+    }
+
+    #[test]
+    fn github_workflow_oidc_variant() {
+        let w = github_workflow(
+            "postgres",
+            &AuthStyle::Oidc {
+                workspace_id: "ws_9".into(),
+            },
+        );
+        assert!(w.contains("id-token: write"));
+        assert!(w.contains("--oidc --workspace ws_9"));
+        assert!(!w.contains("VETRO_API_KEY")); // no static secret in OIDC mode
     }
 
     #[test]
     fn gitlab_job_has_codequality_report() {
-        let j = gitlab_job("postgres");
+        let j = gitlab_job("postgres", &AuthStyle::StaticKey);
         assert!(j.contains("gitlab-codequality"));
         assert!(j.contains("artifacts:"));
         assert!(j.contains("codequality:"));
         assert!(j.contains("merge_request_event"));
+        assert!(!j.contains("id_tokens:"));
+    }
+
+    #[test]
+    fn gitlab_job_oidc_variant() {
+        let j = gitlab_job(
+            "postgres",
+            &AuthStyle::Oidc {
+                workspace_id: "ws_9".into(),
+            },
+        );
+        assert!(j.contains("id_tokens:"));
+        assert!(j.contains("VETRO_ID_TOKEN"));
+        assert!(j.contains("--oidc --workspace ws_9"));
     }
 
     #[test]

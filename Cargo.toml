@@ -27,6 +27,13 @@ anstyle = "1"
 toml = "0.8"
 # Cross-platform config directory resolution.
 dirs = "5"
+# Offline Ed25519 verification of signed run receipts (§7.1). `pem` reads the
+# published PEM public key; no private-key / signing capability is used.
+ed25519-dalek = { version = "2", features = ["pem"] }
+# SHA-256 digest the Ed25519 signature is computed over (scheme ed25519-sha256).
+sha2 = "0.10"
+# Decodes the base64 signature carried in the receipt.
+base64 = "0.22"
 
 [dev-dependencies]
 # HTTP mocking for the API-client tests (in-process wiremock server).
@@ -39,3 +46,8 @@ tempfile = "3"
 strip = true
 lto = true
 codegen-units = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

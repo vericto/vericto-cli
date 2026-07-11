@@ -45,13 +45,15 @@ pub(crate) fn file_for(files: &[String], line: u32) -> String {
 
 /// Renders `resp` in `format`. When `output` is set, machine formats and text
 /// are written (plain, no ANSI) to that file; otherwise text/json go to stdout
-/// (text colored). `files` maps result lines to source paths for annotations.
+/// (text colored unless `color` is false). `files` maps result lines to source
+/// paths for annotations.
 pub fn render(
     resp: &CheckResponse,
     format: Format,
     files: &[String],
     quiet: bool,
     output: Option<&Path>,
+    color: bool,
 ) -> io::Result<()> {
     // Machine formats produce a single string; text is special-cased for color.
     let rendered = match format {
@@ -74,11 +76,15 @@ pub fn render(
         return Ok(());
     }
 
-    // Text format.
+    // Text format. `--no-color` (or a file target) uses the plain renderer;
+    // otherwise anstream still auto-disables color for non-TTY / NO_COLOR.
     match output {
         Some(path) => {
             let plain = render_text_plain(resp, files, quiet);
             std::fs::write(path, plain.as_bytes())?;
+        }
+        None if !color => {
+            print!("{}", render_text_plain(resp, files, quiet));
         }
         None => render_text_colored(resp, files, quiet),
     }
@@ -420,6 +426,9 @@ mod tests {
             exit_code: 1,
             ci_checks_remaining: None,
             telemetry_query_mode: None,
+            receipt: None,
+            merged_receipts: Vec::new(),
+            api_version_header: None,
         }
     }
 
@@ -573,6 +582,7 @@ mod tests {
             &files,
             false,
             Some(&path),
+            true,
         )
         .unwrap();
         let written = std::fs::read_to_string(&path).unwrap();

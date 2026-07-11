@@ -12,33 +12,53 @@ enterprise unmetered). See [DESIGN.md](DESIGN.md) for the full design.
 ## Install
 
 Releases are built with [`cargo-dist`](https://opensource.axo.dev/cargo-dist/):
-signed, cross-compiled binaries on GitHub Releases feed every channel.
+cross-compiled binaries for Linux (x86_64/aarch64, static musl), macOS
+(x86_64/aarch64), and Windows (x86_64) are published to GitHub Releases on every
+version tag, each with SHA-256 checksums and a GitHub build attestation (see
+_Verifying a download_ below). Every other channel serves those same binaries.
 
 ```bash
 # Phase 1 — shell installer (Linux/macOS)
-curl -fsSL https://github.com/donkan168/vetro-cli/releases/latest/download/vetro-installer.sh | sh
+curl -fsSL https://github.com/donkan168/vetro-cli/releases/latest/download/vetro-cli-installer.sh | sh
 
 # Phase 1 — Docker (CI runners that prefer an image step)
-docker run --rm -e VETRO_API_KEY ghcr.io/donkan168/vetro-cli check migrations/*.sql
+docker run --rm -e VETRO_API_KEY ghcr.io/donkan168/vetro-cli:latest check migrations/*.sql
 
 # Or download a prebuilt binary directly:
 #   https://github.com/donkan168/vetro-cli/releases
 ```
 
 ```bash
-# Phase 2 — package managers
-npm install -g @vetro/cli            # or: npx @vetro/cli check ...  (great in CI)
-brew install donkan168/vetro/vetro   # macOS / Linux
-scoop install vetro                  # Windows
-```
-
-```bash
-# From source (until the above channels are published)
+# From source
 cargo install --path .
 ```
 
+> **Phase 2 (planned):** package managers — `npm i -g @vetro/cli` / `npx @vetro/cli`,
+> `brew install donkan168/vetro/vetro`, `scoop install vetro`. Not published yet;
+> use the shell installer, Docker image, or `cargo install` for now.
+
 > The CLI is a network-only thin client — it always evaluates against your live
 > Vetro workspace. There is no offline/local mode.
+
+### Verifying a download
+
+Each release binary is signed with a [GitHub build attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations)
+— keyless provenance tied to the GitHub Actions identity that built it, so there
+is no long-lived signing key to trust or manage. Verify a downloaded artifact
+with the `gh` CLI:
+
+```bash
+# A downloaded binary artifact
+gh attestation verify vetro-cli-x86_64-unknown-linux-musl.tar.xz \
+  --repo donkan168/vetro-cli
+
+# The container image (multi-arch: linux/amd64 + linux/arm64)
+gh attestation verify oci://ghcr.io/donkan168/vetro-cli:latest \
+  --repo donkan168/vetro-cli
+```
+
+Checksums (`sha256.sum`, and a per-artifact `.sha256`) are published alongside
+each binary for a quick integrity check when attestation tooling isn't available.
 
 ## Commands
 
@@ -49,6 +69,8 @@ vetro login              Store an API key (and optional URL/dialect) in config.
 vetro logout             Remove the stored API key.
 vetro doctor             Verify config, connectivity, auth, and plan quota.
 vetro init               Scaffold a CI workflow (+ pre-commit hook with --hook).
+vetro verify-receipt <f> Verify a signed run receipt offline (no network/account).
+vetro version            Print the CLI version.
 ```
 
 ## Baseline & suppression
@@ -82,6 +104,65 @@ baseline = ".vetro-baseline.json"
 
 Resolution order (first wins): flags → env → `.vetro.toml` → `~/.config/vetro/config.toml`.
 
+## CI login without a long-lived key (OIDC)
+
+Instead of storing a static `vtro_...` key in a CI secret, a pipeline can
+authenticate with a short-lived, per-run token via OIDC / workload-identity — the
+same federation GitHub Actions and GitLab CI already provide for cloud vendors.
+The CLI obtains the provider's OIDC ID token, exchanges it at the backend for a
+key scoped to `ci_dryrun:execute` only, and holds it **in memory** for the run —
+it is never written to disk.
+
+```bash
+# One-time: point the CLI at a workspace (stores no secret). If run in CI with a
+# token available, it also verifies the exchange works.
+vetro login --oidc --workspace ws_123
+
+# In CI: --oidc is auto-enabled when there's no static key and a token exists.
+vetro check --changed --oidc --workspace ws_123
+```
+
+- **GitHub Actions** — needs `permissions: id-token: write`; the CLI fetches the
+  token from the Actions token endpoint with audience `vetro`.
+- **GitLab CI** — add an `id_tokens:` entry exported as `VETRO_ID_TOKEN` (override
+  the var name with `--oidc-token-env`), audience `vetro`.
+- Create a **trust policy** for the workspace in the dashboard (issuer, audience,
+  and a subject glob like `repo:my-org/*`) so the backend knows which tokens to
+  honor. `vetro doctor --workspace ws_123` reports the active auth mode.
+
+`vetro init --oidc --workspace ws_123` scaffolds CI templates wired for this (no
+`VETRO_API_KEY` secret). Static keys keep working unchanged for local dev and
+providers without OIDC.
+
+## Signed run receipts (audit evidence you keep)
+
+`--receipt` asks the backend for a **signed, self-contained record** of a check
+and writes it to a file. It's verifiable **offline** — no Vetro account, no
+network — so it stays valid as durable compliance evidence regardless of your
+plan's dashboard retention.
+
+```bash
+# Produce a receipt alongside the check
+vetro check migrations/*.sql --receipt vetro-receipt.json
+
+# Later (or on another machine), verify authenticity offline
+vetro verify-receipt vetro-receipt.json --show
+```
+
+- Signed with Ed25519 over the SHA-256 of the canonical payload (scheme
+  `ed25519-sha256`, the same infra as Vetro's audit-trail export).
+- `verify-receipt` reports **exit 0** when authentic, **exit 3** when the
+  signature or payload doesn't check out, **exit 2** for a malformed file.
+- Archive the file as a CI artifact (GitHub/GitLab retention, or your own
+  storage) — retention becomes *your* decision.
+- The public key is bundled in the binary; override with `--public-key <PEM|path>`
+  (or `$VETRO_RECEIPT_PUBLIC_KEY`), fetched from
+  `GET /api/v1/meta/export-signing-key`. A large run split into chunks writes a
+  JSON array of per-chunk receipts (all must verify).
+
+> If the deployment hasn't configured signing, `--receipt` prints a warning and
+> writes nothing — the check itself still runs and gates as usual.
+
 ## Scaffolding CI (`vetro init`)
 
 `vetro init` detects your CI provider from the git remote and writes a ready-to-run
@@ -97,6 +178,8 @@ vetro init --target gitlab --dialect mysql
   SARIF to Code Scanning). Add `VETRO_API_KEY` as a repo secret.
 - **GitLab** → `.vetro/gitlab-ci.yml` (Code Quality report on MRs). `include:` it
   from your `.gitlab-ci.yml` and add `VETRO_API_KEY` as a masked CI/CD variable.
+- **`--oidc --workspace <id>`** → templates wired for OIDC / workload-identity
+  (GitHub `id-token: write`, GitLab `id_tokens:`) — no `VETRO_API_KEY` secret.
 - **`--hook`** → `.git/hooks/pre-commit` checking staged `*.sql` (bypass with
   `git commit --no-verify`).
 
@@ -136,9 +219,11 @@ vetro check schema.sql --monitor
 | `[files...]` | — | SQL files; `-` reads stdin. Optional with `--changed`/`--since` |
 | `--changed` | off | Check only `*.sql` changed vs the CI merge base |
 | `--since <ref>` | — | Explicit base ref for changed-file selection |
+| `--stdin-file-list` | off | Read file paths from stdin, one per line (e.g. `git diff --name-only ... \| vetro check --stdin-file-list`) |
 | `--dialect` | `postgres` | `postgres` \| `mysql` \| `oracle` \| `mssql` |
 | `--format` | `text` | `text` \| `json` \| `sarif` \| `gitlab-codequality` \| `gitlab-sast` |
 | `--output <file>` | stdout | Write the report to a file (CI artifacts) |
+| `--receipt <file>` | — | Request a signed run receipt and write it to `<file>` (verify with `vetro verify-receipt`) |
 | `--baseline <file>` | — | Ignore findings recorded in the baseline |
 | `--monitor` | off | Report findings but exit 0 (dry-run) |
 | `--fail-on` | `block` | `block` \| `flag` \| `any` — what causes exit 1 |
@@ -148,7 +233,12 @@ vetro check schema.sql --monitor
 | `--allow-degraded <reason>` | off | Exit 0 (not 4) if the backend is unreachable; reason required |
 | `--api-key` | `$VETRO_API_KEY` / config | Vetro API key (`vtro_...`) |
 | `--api-url` | `https://api.vetro.dev` | Backend URL (`$VETRO_API_URL` / config) |
+| `--oidc` | off | Authenticate via CI workload-identity (§ OIDC above); auto-enabled when no key + a token is present |
+| `--workspace <id>` | `$VETRO_WORKSPACE_ID` / config | Workspace to authenticate against for OIDC |
+| `--audience <aud>` | `vetro` | OIDC audience to request in the ID token |
+| `--oidc-token-env <VAR>` | `VETRO_ID_TOKEN` | Env var holding a pre-minted OIDC token (GitLab-style) |
 | `--quiet` / `-q` | off | Only print the summary line |
+| `--no-color` | off | Disable ANSI color (also auto-off for non-TTY / `NO_COLOR`) |
 
 `--dialect`, `--fail-on` and `--baseline` fall back to `.vetro.toml`, then their
 defaults.
@@ -210,11 +300,7 @@ vetro-check:
     - changes: [ "migrations/**/*.sql" ]
 ```
 
-> `--changed`, `--format sarif|gitlab-*`, and `--output` are v0.2 (designed in
-> DESIGN §10, not yet shipped). For v0.1, run `vetro check migrations/*.sql` and
-> gate on the exit code.
-
-## Known limitations (v0.1)
+## Known limitations
 
 - Requires network access to the Vetro backend. No offline mode. The API key
   needs the `ci_dryrun:execute` scope; checks count against the plan's monthly

@@ -45,6 +45,32 @@ pub struct CheckRequest {
     /// useful (e.g. no git, no CI env).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
+    /// Request a signed run receipt (§7.1). Only sent when true, so older
+    /// backends and non-receipt runs see the unchanged body.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub receipt: bool,
+}
+
+/// A signed run receipt (§7.1): self-contained, offline-verifiable evidence that
+/// a check happened, independent of dashboard retention. The backend signs the
+/// canonical JSON of `payload` (recursively sorted keys) with Ed25519 over its
+/// SHA-256 digest (scheme `ed25519-sha256`). `verify-receipt` reproduces that
+/// canonicalization and checks the signature against the bundled/ published
+/// public key — no network, no account.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Receipt {
+    /// The exact object that was signed. Kept as an opaque `Value` so the CLI
+    /// re-serializes it byte-identically to how the backend canonicalized it,
+    /// rather than risking drift from a typed re-encode.
+    pub payload: serde_json::Value,
+    /// Signature scheme identifier, e.g. `ed25519-sha256`.
+    pub scheme: String,
+    /// Base64 Ed25519 signature over the SHA-256 digest of the canonical payload.
+    pub signature: String,
+    /// Which published key signed this, so a verifier can select the right one.
+    pub public_key_id: String,
+    /// Hex SHA-256 of the canonical payload (for human inspection / sanity check).
+    pub sha256: String,
 }
 
 /// Per-query verdict in the response.
@@ -92,6 +118,34 @@ pub struct CheckResponse {
     /// older backends → treated as 'raw'.
     #[serde(default)]
     pub telemetry_query_mode: Option<String>,
+    /// Signed run receipt (§7.1), present only when the request set `receipt` and
+    /// signing is configured server-side. `null`/absent otherwise.
+    #[serde(default)]
+    pub receipt: Option<Receipt>,
+    /// Receipts from a chunked run — one per chunk, since each HTTP response
+    /// signs only its own chunk's summary/queries and they can't be merged into
+    /// one signature. Not on the wire (populated by `merge_responses`); empty for
+    /// a single-call run, where `receipt` carries the sole receipt instead.
+    #[serde(skip)]
+    pub merged_receipts: Vec<Receipt>,
+    /// The backend API version from the `X-Vetro-Api-Version` response header
+    /// (§9), captured so `check` can warn on a minor skew / fail on a major
+    /// mismatch without a separate `/version` round-trip. Not part of the JSON
+    /// body — set from the header in `try_once`. `None` on older backends.
+    #[serde(skip)]
+    pub api_version_header: Option<String>,
+}
+
+impl CheckResponse {
+    /// All receipts for this run: the per-chunk set from a chunked run, or the
+    /// single `receipt` for a one-call run. Empty when none were issued.
+    pub fn all_receipts(&self) -> Vec<Receipt> {
+        if !self.merged_receipts.is_empty() {
+            self.merged_receipts.clone()
+        } else {
+            self.receipt.iter().cloned().collect()
+        }
+    }
 }
 
 /// Response of `GET /api/v1/version` (§9). Absent fields tolerate older
@@ -102,6 +156,28 @@ pub struct VersionInfo {
     pub api_version: Option<String>,
     #[serde(default)]
     pub min_cli_version: Option<String>,
+}
+
+/// Response of `POST /api/v1/auth/oidc-exchange` (§6.1). The backend validates a
+/// CI-provider OIDC ID token against the workspace's trust policies and mints a
+/// short-lived, `ci_dryrun:execute`-only `vtro_...` key. The CLI holds this in
+/// memory for the process only — it is never written to disk.
+#[derive(Debug, Deserialize)]
+pub struct OidcExchangeResult {
+    /// The minted short-lived API key (a normal `vtro_...` value the existing
+    /// `X-API-Key` path accepts, so nothing else in the client special-cases it).
+    pub api_key: String,
+    /// ISO-8601 expiry of the minted key (default ~15 min server-side).
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// The scope granted — always `ci_dryrun:execute`. Part of the wire contract;
+    /// deserialized for completeness even though the CLI doesn't branch on it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub scope: Option<String>,
+    /// The trust policy that authorized the exchange (for `doctor`/diagnostics).
+    #[serde(default)]
+    pub policy_id: Option<String>,
 }
 
 /// Response of `GET /api/v1/ci/config` — the pre-flight workspace config the CLI
@@ -184,7 +260,7 @@ pub struct Transport {
 /// `NO_PROXY` (reqwest default). One client is shared across concurrent chunks.
 /// When `ca_bundle` is set, every PEM certificate in it is added to the trust
 /// store on top of the bundled Mozilla roots (§6.4).
-fn build_client(t: &Transport) -> Result<reqwest::Client, ApiError> {
+pub(crate) fn build_client(t: &Transport) -> Result<reqwest::Client, ApiError> {
     let mut builder = reqwest::Client::builder().timeout(t.timeout);
 
     if let Some(path) = &t.ca_bundle {
@@ -276,6 +352,52 @@ pub async fn config(
     }
 }
 
+/// Exchanges a CI-provider OIDC ID token for a short-lived API key (§6.1) via
+/// `POST /api/v1/auth/oidc-exchange`. No API key is presented — the ID token IS
+/// the credential. `401/403` map to `Auth` (no trust policy matched, token not
+/// verifiable), other non-2xx to `Backend`, and network failures to `Transport`.
+pub async fn oidc_exchange(
+    api_url: &str,
+    workspace_id: &str,
+    id_token: &str,
+    transport: &Transport,
+) -> Result<OidcExchangeResult, ApiError> {
+    let client = build_client(transport)?;
+    let url = format!(
+        "{}/api/v1/auth/oidc-exchange",
+        api_url.trim_end_matches('/')
+    );
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "id_token": id_token,
+            "workspace_id": workspace_id,
+        }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() {
+        return resp
+            .json::<OidcExchangeResult>()
+            .await
+            .map_err(|e| ApiError::Backend {
+                status: status.as_u16(),
+                message: format!("invalid oidc-exchange body: {e}"),
+            });
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        Err(ApiError::Auth(extract_message(&body)))
+    } else {
+        Err(ApiError::Backend {
+            status: code,
+            message: extract_message(&body),
+        })
+    }
+}
+
 /// One check against a shared client + resolved URL, with the retry loop.
 ///
 /// Transient failures — connection reset/timeout and `429`/`5xx` responses — are
@@ -326,6 +448,10 @@ pub struct CheckParams<'a> {
     pub transport: Transport,
     /// Max in-flight chunk requests (the caller clamps this to a sane cap).
     pub concurrency: usize,
+    /// Request a signed run receipt (§7.1). For a chunked run, only the first
+    /// chunk requests it — the receipt covers that chunk's summary/queries; see
+    /// `merge_responses` for why we don't ask every chunk.
+    pub receipt: bool,
 }
 
 /// Runs a full check, chunking `queries` into ≤`MAX_QUERIES_PER_CALL` batches and
@@ -348,6 +474,7 @@ pub async fn check_all(
         provenance,
         transport,
         concurrency,
+        receipt,
     } = p;
     let client = build_client(&transport)?;
     let url = format!("{}/api/v1/ci/check-key", api_url.trim_end_matches('/'));
@@ -360,6 +487,7 @@ pub async fn check_all(
             file_name,
             output_format: "json".to_string(),
             provenance,
+            receipt,
         };
         return check_with_client(&client, &url, api_key, &req).await;
     }
@@ -397,6 +525,10 @@ pub async fn check_all(
                 file_name,
                 output_format: "json".to_string(),
                 provenance,
+                // Each chunk requests its own receipt so every query in the run
+                // is covered by a signature (one receipt per chunk; see
+                // merge_responses / all_receipts).
+                receipt,
             };
             let res = check_with_client(&client, &url, &api_key, &req).await;
             (idx, res)
@@ -404,11 +536,13 @@ pub async fn check_all(
     }
 
     // Collect every chunk (barrier). Fail closed on the first hard error.
-    let mut ok: Vec<CheckResponse> = Vec::with_capacity(total_chunks);
+    // Chunks finish out of order, so keep the index and sort before merging so
+    // per-query order (and per-chunk receipts) match the original input order.
+    let mut ok: Vec<(usize, CheckResponse)> = Vec::with_capacity(total_chunks);
     let mut first_err: Option<(usize, ApiError)> = None;
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok((_idx, Ok(resp))) => ok.push(resp),
+            Ok((idx, Ok(resp))) => ok.push((idx, resp)),
             Ok((idx, Err(e))) => {
                 if first_err.as_ref().map(|(i, _)| idx < *i).unwrap_or(true) {
                     first_err = Some((idx, e));
@@ -434,7 +568,8 @@ pub async fn check_all(
         )));
     }
 
-    Ok(merge_responses(ok))
+    ok.sort_by_key(|(idx, _)| *idx);
+    Ok(merge_responses(ok.into_iter().map(|(_, r)| r).collect()))
 }
 
 /// Total query count across chunks (for the split log line).
@@ -467,6 +602,12 @@ fn merge_responses(mut parts: Vec<CheckResponse>) -> CheckResponse {
     let mut remaining: Option<i64> = None;
     // Workspace-level, identical across chunks — keep the first non-empty.
     let telemetry_query_mode = parts.iter().find_map(|p| p.telemetry_query_mode.clone());
+    // One receipt per chunk that returned one (§7.1) — they can't be merged into
+    // one signature, so we keep them all in input order.
+    let mut merged_receipts = Vec::new();
+    // API version is workspace/deployment-level, identical across chunks — keep
+    // the first non-empty.
+    let api_version_header = parts.iter().find_map(|p| p.api_version_header.clone());
     for p in parts {
         summary.total += p.summary.total;
         summary.blocked += p.summary.blocked;
@@ -478,6 +619,9 @@ fn merge_responses(mut parts: Vec<CheckResponse>) -> CheckResponse {
         if let Some(r) = p.ci_checks_remaining {
             remaining = Some(remaining.map_or(r, |cur| cur.min(r)));
         }
+        if let Some(r) = p.receipt {
+            merged_receipts.push(r);
+        }
         queries.extend(p.queries);
     }
     CheckResponse {
@@ -486,6 +630,9 @@ fn merge_responses(mut parts: Vec<CheckResponse>) -> CheckResponse {
         exit_code,
         ci_checks_remaining: remaining,
         telemetry_query_mode,
+        receipt: None,
+        merged_receipts,
+        api_version_header,
     }
 }
 
@@ -525,15 +672,28 @@ async fn try_once(
 
     let status = resp.status();
     if status.is_success() {
-        return resp.json::<CheckResponse>().await.map_err(|e| Attempt {
-            // A malformed 2xx body is not transient — don't retry.
-            err: ApiError::Backend {
-                status: status.as_u16(),
-                message: format!("invalid response body: {e}"),
-            },
-            retryable: false,
-            retry_after_hint: None,
-        });
+        // Read the API-version header before consuming the body (§9).
+        let api_version_header = resp
+            .headers()
+            .get("x-vetro-api-version")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        return resp
+            .json::<CheckResponse>()
+            .await
+            .map(|mut r| {
+                r.api_version_header = api_version_header;
+                r
+            })
+            .map_err(|e| Attempt {
+                // A malformed 2xx body is not transient — don't retry.
+                err: ApiError::Backend {
+                    status: status.as_u16(),
+                    message: format!("invalid response body: {e}"),
+                },
+                retryable: false,
+                retry_after_hint: None,
+            });
     }
 
     let code = status.as_u16();
@@ -673,6 +833,7 @@ mod tests {
             provenance: None,
             transport: transport(),
             concurrency: 4,
+            receipt: false,
         }
     }
 
@@ -700,6 +861,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_captures_api_version_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("X-Vetro-Api-Version", "1.4.0")
+                    .set_body_json(ok_body(1, 0, 999, "raw")),
+            )
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let queries = vec![QueryInput {
+            line: 1,
+            sql: "SELECT 1".into(),
+        }];
+        let resp = check_all(params(&uri, "vtro_k"), queries).await.unwrap();
+        assert_eq!(resp.api_version_header.as_deref(), Some("1.4.0"));
+    }
+
+    #[tokio::test]
     async fn config_sends_api_key_and_parses_mode() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -718,6 +900,45 @@ mod tests {
             .unwrap();
         assert_eq!(cfg.telemetry_query_mode.as_deref(), Some("sanitized"));
         assert_eq!(cfg.plan.as_deref(), Some("team"));
+    }
+
+    #[tokio::test]
+    async fn oidc_exchange_mints_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/oidc-exchange"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "api_key": "vtro_minted",
+                "expires_at": "2026-07-10T00:15:00Z",
+                "scope": "ci_dryrun:execute",
+                "policy_id": "pol_123"
+            })))
+            .mount(&server)
+            .await;
+        let res = super::oidc_exchange(&server.uri(), "ws_1", "gh.jwt", &transport())
+            .await
+            .unwrap();
+        assert_eq!(res.api_key, "vtro_minted");
+        assert_eq!(res.policy_id.as_deref(), Some("pol_123"));
+    }
+
+    #[tokio::test]
+    async fn oidc_exchange_403_is_auth_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/oidc-exchange"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": { "message": "no trust policy" }
+            })))
+            .mount(&server)
+            .await;
+        let err = super::oidc_exchange(&server.uri(), "ws_1", "gh.jwt", &transport())
+            .await
+            .unwrap_err();
+        match err {
+            ApiError::Auth(m) => assert_eq!(m, "no trust policy"),
+            other => panic!("expected Auth, got {other:?}"),
+        }
     }
 
     #[tokio::test]

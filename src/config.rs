@@ -17,6 +17,10 @@ use std::path::PathBuf;
 /// The default backend when nothing overrides it.
 pub const DEFAULT_API_URL: &str = "https://api.vetro.dev";
 
+/// The default OIDC audience requested in the ID token when none is configured
+/// (§6.1). Trust policies are created against this by convention.
+pub const DEFAULT_OIDC_AUDIENCE: &str = "vetro";
+
 /// On-disk config. Every field is optional so a partial file still parses.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -26,6 +30,15 @@ pub struct Config {
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_dialect: Option<String>,
+    /// Workspace to authenticate against when using OIDC/workload-identity login
+    /// (§6.1). Not a secret — it only identifies the tenant whose trust policy
+    /// authorizes the exchange. Written by `vetro login --oidc --workspace <id>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// OIDC audience to request in the ID token (must match a trust policy). Not
+    /// a secret. Defaults to `DEFAULT_OIDC_AUDIENCE` when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oidc_audience: Option<String>,
 }
 
 /// Returns the config file path (DESIGN §6): `$XDG_CONFIG_HOME/vetro/config.toml`
@@ -119,6 +132,19 @@ pub struct ProjectConfig {
     pub fail_on: Option<String>,
     #[serde(default)]
     pub baseline: Option<String>,
+    /// Workspace to authenticate against for OIDC login (§6.1). Safe to commit —
+    /// it's a tenant identifier, not a credential; the trust policy on the server
+    /// side is what actually authorizes the exchange.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// OIDC audience to request (must match the workspace trust policy). Safe to
+    /// commit.
+    #[serde(default)]
+    pub oidc_audience: Option<String>,
+    /// Name of the env var holding a pre-minted OIDC ID token (GitLab-style). The
+    /// token itself lives only in the CI env, never in this file.
+    #[serde(default)]
+    pub oidc_token_env: Option<String>,
     // Trap fields: present only to detect and reject secrets/decisions that must
     // not live in a committed file (see load_project's validation).
     #[serde(default)]

@@ -197,6 +197,9 @@ mod tests {
             exit_code: 0,
             ci_checks_remaining: None,
             telemetry_query_mode: None,
+            receipt: None,
+            merged_receipts: Vec::new(),
+            api_version_header: None,
         }
     }
 
