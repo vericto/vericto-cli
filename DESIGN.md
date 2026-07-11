@@ -9,13 +9,16 @@
 > statement splitting — see §5 / §12.3), **distribution via `cargo-dist`** —
 > GitHub Releases as the base, then `curl | sh` + Docker (phase 1) and Homebrew +
 > Scoop + npm (phase 2), see §9.
-> Enterprise-readiness additions (this revision — design only, 🔜 not yet
-> implemented): OIDC/workload-identity login (§6), workspace-driven query
-> sanitization instead of a CLI-side flag (§6/§7), CI provenance metadata on
-> every check (§2), portable signed run receipts (§7), Sigstore/cosign binary
-> signing (§9), system + custom CA trust (§6), bounded chunk concurrency (§5),
-> project-level `.vetro.toml` config (§6), and a degraded-mode break-glass with
-> its own exit code (§6/§8). Rationale and procurement framing in §14.
+> Enterprise-readiness additions: **OIDC/workload-identity login (§6.1)** and
+> **portable signed run receipts + `verify-receipt` (§7.1)** — both ✅
+> implemented this revision — plus workspace-driven query sanitization instead of
+> a CLI-side flag (§6/§7), CI provenance metadata on every check (§2), bounded
+> chunk concurrency (§5), project-level `.vetro.toml` config (§6), system +
+> custom CA trust (§6), and a degraded-mode break-glass with its own exit code
+> (§6/§8) — all implemented. **Distribution (§9)**: cargo-dist Level 0 + Phase 1
+> (GitHub Releases with attested, cross-compiled binaries + `curl | sh` installer
+> + distroless Docker image) ✅ implemented; package managers (Homebrew/Scoop/npm,
+> Phase 2) remain 🔜. Rationale and procurement framing in §14.
 
 ## 1. What it is
 
@@ -147,36 +150,41 @@ not on the roadmap.
 
 ```
 vetro check [files...]     Evaluate SQL files (or stdin with '-'). The core command.
-vetro login                Store an API key (interactive or --api-key).
+vetro login                Store an API key (interactive or --api-key), or --oidc setup (§6.1).
 vetro logout               Remove stored credentials.
 vetro doctor               Verify config, connectivity, auth, and plan entitlement.
-vetro baseline [files...]  Record current findings to .vetro-baseline.json (v0.2, §10).
-vetro init                 Scaffold CI workflow + pre-commit hook (v0.2, §10).
-vetro version              Print version.
+vetro baseline [files...]  Record current findings to .vetro-baseline.json (§10).
+vetro init                 Scaffold CI workflow + pre-commit hook (§10); --oidc for workload-identity.
+vetro verify-receipt <f>   Verify a signed run receipt offline (§7.1).
+vetro version              Print the CLI version (same as --version).
 ```
 
 ### `vetro check` — flags
 | Flag | Default | Description |
 |------|---------|-------------|
 | `[files...]` | — | One or more `.sql` files or globs; `-` reads stdin |
-| `--changed` | off | Check only files changed vs the CI merge base (§10) — v0.2 |
-| `--since <ref>` | — | Explicit base ref for changed-file selection (§10) — v0.2 |
+| `--changed` | off | Check only files changed vs the CI merge base (§10) |
+| `--since <ref>` | — | Explicit base ref for changed-file selection (§10) |
+| `--stdin-file-list` | off | Read the file paths to check from stdin, one per line (§10) |
 | `--dialect <d>` | `postgres` | `postgres` \| `mysql` \| `oracle` \| `mssql` |
-| `--format <f>` | `text` | `text` \| `json` \| `sarif` \| `gitlab-codequality` \| `gitlab-sast` (v0.2) |
-| `--baseline <f>` | — | Ignore findings recorded in the baseline file (§10) — v0.2 |
-| `--output <f>` | stdout | Write the report to a file (for CI artifacts) — v0.2 |
+| `--format <f>` | `text` | `text` \| `json` \| `sarif` \| `gitlab-codequality` \| `gitlab-sast` |
+| `--baseline <f>` | — | Ignore findings recorded in the baseline file (§10) |
+| `--output <f>` | stdout | Write the report to a file (for CI artifacts) |
+| `--receipt <f>` | — | Request a signed run receipt and write it to `<f>` (§7.1). Chunked runs write an array |
 | `--monitor` | off | Dry-run: report what *would* block, but exit 0 |
 | `--fail-on <level>` | `block` | `block` \| `flag` \| `any` — what causes exit 1 |
 | `--timeout <secs>` | `30` | Per-request timeout (`VETRO_TIMEOUT`) — §6 |
-| `--concurrency <n>` | `4` | Max in-flight chunk requests, capped at 8 (`VETRO_CONCURRENCY`) — §5, 🔜 |
+| `--concurrency <n>` | `4` | Max in-flight chunk requests, capped at 8 (`VETRO_CONCURRENCY`) — §5 |
 | `--api-key <k>` | env/config | Override stored key |
 | `--api-url <u>` | `https://api.vetro.dev` | Override backend |
-| `--ca-bundle <path>` | — | Extra trusted CA PEM bundle (`VETRO_CA_BUNDLE` / `SSL_CERT_FILE`) — §6.4, 🔜 |
-| `--allow-degraded <reason>` | off | Break-glass: exit 0 on backend-unreachable instead of 4, with a required reason — §6.5, 🔜 |
+| `--oidc` | off | Authenticate via CI workload-identity instead of a static key (§6.1). Auto-enabled when no key is present and a CI OIDC token is available |
+| `--workspace <id>` | env/config | Workspace to authenticate against for OIDC (`VETRO_WORKSPACE_ID`) — §6.1 |
+| `--audience <aud>` | `vetro` | OIDC audience to request in the ID token — §6.1 |
+| `--oidc-token-env <VAR>` | `VETRO_ID_TOKEN` | Env var holding a pre-minted OIDC ID token (GitLab-style) — §6.1 |
+| `--ca-bundle <path>` | — | Extra trusted CA PEM bundle (`VETRO_CA_BUNDLE` / `SSL_CERT_FILE`) — §6.4 |
+| `--allow-degraded <reason>` | off | Break-glass: exit 0 on backend-unreachable instead of 4, with a required reason — §6.5 |
 | `--quiet` / `-q` | off | Only print the summary line |
 | `--no-color` | off | Disable ANSI color (also honors `NO_COLOR`) |
-
-> Flags marked v0.2 are designed here but not yet implemented (see §11).
 
 ## 5. Input handling
 
@@ -228,7 +236,7 @@ default_dialect = "postgres"
 remaining monthly CLI allowance (surfacing an exhausted-quota or scope problem
 clearly rather than a raw 4xx at check time).
 
-### 6.1 OIDC / workload-identity login (🔜 — point 1)
+### 6.1 OIDC / workload-identity login (✅ — point 1)
 
 A static `vtro_...` key with no expiry, sitting in a CI secrets vault
 indefinitely, is exactly what enterprise security reviews flag first —
@@ -255,8 +263,29 @@ was given):
 
 This is additive: static `vtro_...` keys keep working unchanged (needed for
 local dev and CI providers without OIDC support). `doctor` reports which auth
-mode is active. Backend work required: the trust-policy config surface (new,
-dashboard + `/oidc-exchange` route) — tracked as a dependency, not CLI-only.
+mode is active.
+
+**Implemented (this revision).** CLI side: `src/oidc.rs` obtains the provider ID
+token — GitHub via the `ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN` endpoint (with the
+requested `audience`), GitLab via the `id_tokens:`-exported env var (default
+`VETRO_ID_TOKEN`, overridable with `--oidc-token-env`). `api::oidc_exchange`
+POSTs `{ id_token, workspace_id }` to `/api/v1/auth/oidc-exchange` and receives
+the short-lived key, held in memory only. Auth resolution (`resolve_auth` in
+`main.rs`, shared by `check`/`baseline`/`doctor`) uses a static key when present
+unless `--oidc` forces workload-identity, and auto-falls back to OIDC when no
+static key exists but a CI token is available. `vetro login --oidc --workspace
+<id>` stores the workspace/audience (never a secret) and, when run inside CI,
+verifies the exchange live. `vetro init --oidc --workspace <id>` scaffolds
+OIDC-flavored CI templates (GitHub `id-token: write` + `--oidc`; GitLab
+`id_tokens:` + `--oidc`), with no `VETRO_API_KEY` secret. Backend side was
+already in place: `services/oidc-exchange.ts` (JWKS validation, subject glob
+matching, short-lived `ci_dryrun:execute` key minting), `routes/auth.ts`
+`POST /oidc-exchange`, and `routes/oidc-policies.ts` (per-workspace trust-policy
+CRUD).
+
+Flags: `--oidc`, `--workspace <id>` (or `VETRO_WORKSPACE_ID` / `.vetro.toml`
+`workspace_id` / config), `--audience <aud>` (default `vetro`),
+`--oidc-token-env <VAR>`.
 
 ### 6.2 Query sanitization — inherits the workspace setting (🔜 — point 2)
 
@@ -358,13 +387,26 @@ team is relying on, an unauditable bypass is worse than a documented one.
 - `--allow-degraded` (env: `VETRO_ALLOW_DEGRADED=1`): when the backend is
   unreachable after exhausting retries (§6), instead of exiting `4`, the CLI
   exits `0` **but** prints a prominent stderr warning and — critically — writes
-  a local "degraded run" record (`file_name`, timestamp, git provenance from
-  §2.1) that is **uploaded and reconciled server-side on the next successful
-  check** from that workspace, so a gap in the audit trail is visible after the
-  fact, not hidden.
+  a local "degraded run" record so the bypass leaves an auditable trace instead
+  of vanishing.
+  - **Implemented (this revision):** the record is appended as one JSON line to
+    `.vetro/degraded-runs.jsonl` (`kind`/`version`/`unix_time`/`reason`/`files`/
+    `provenance` from §2.1), best-effort (a write failure never turns the
+    break-glass back into a hard failure). The intended workflow is that the
+    pipeline archives this file as a CI artifact, so the gap is visible after
+    the fact.
+  - **Not yet built (honest status):** there is *no* server-side reconciliation
+    endpoint, so the record is **local only** — it is not uploaded or folded
+    into the central audit trail on the next successful check. The original
+    "uploaded and reconciled server-side" design remains 🔜 and depends on a new
+    backend endpoint; until it lands the stderr warning says so explicitly, and
+    the durable trace is whatever the pipeline archives. This is a deliberately
+    conservative gap: in ephemeral CI runners the local file often dies with the
+    runner, so "reconciled server-side" cannot be claimed as working when it
+    isn't. See §14.
 - Requires a **reason**: `--allow-degraded="<why>"` — an empty/missing reason
   is a usage error (exit `2`), not silently accepted. The reason is included in
-  the reconciliation record.
+  the local record.
 - This does *not* change the §5 fail-closed rule for a *partially completed*
   chunked run (a backend that is reachable but returning errors mid-run) — it
   only applies when the backend is unreachable from the very first request,
@@ -419,7 +461,7 @@ All formats are rendered client-side from the one `output_format=json` response
 the CLI always requests, so adding a format is a client concern — no backend
 change.
 
-### 7.1 Signed run receipts — retention-independent evidence (🔜 — point 4)
+### 7.1 Signed run receipts — retention-independent evidence (✅ — point 4)
 
 §12.1 gates *browsing* history by plan (`PLAN_RETENTION_DAYS`: free 7 days,
 builder 30, team 90). That's a reasonable growth lever for the dashboard
@@ -432,18 +474,37 @@ contractually.
 **Design:** decouple "evidence exists" from "the dashboard can show it to you."
 `check-key`'s response already includes everything needed to prove what
 happened; the addition is making that response **independently verifiable**,
-not just displayable:
+not just displayable.
 
-- The backend signs the response body (`summary` + `queries` + `provenance` +
-  timestamp) with an existing key — reusing the **Ed25519 signing
-  infrastructure already built for audit-trail export** (`vetro-fmw`,
-  mentioned in §12.1) rather than introducing a second signing scheme.
-- `--receipt <path>` (or default alongside `--output`, 🔜) writes the signed
-  response as a standalone JSON file: `{ payload, signature, public_key_id }`.
-- A `vetro verify-receipt <file>` subcommand (offline — no network call)
-  checks the signature against the published Vetro public key (bundled in the
-  CLI binary, rotated via a new-major-version bump if the signing key ever
-  rotates) and prints pass/fail.
+**Implemented (this revision).** Backend (already in place): `services/ci-receipt.ts`
+builds a canonical `payload` (`kind`/`version`/`workspace_id`/`file_name`/`dialect`/
+`summary`/`queries`/`exit_code`/`provenance`/`signed_at`), signs the SHA-256
+digest of its **sorted-keys, compact JSON** (`canonicalJson`) with the existing
+Ed25519 export-signing key (`utils/signing.ts`, scheme `ed25519-sha256`), and
+attaches `{ payload, scheme, signature, public_key_id, sha256 }` to the
+`check-key` response when the request sets `receipt: true`. The public key is
+published at `GET /api/v1/meta/export-signing-key`. CLI side (new):
+
+- The request sets `receipt: true` only when `--receipt <path>` is given.
+- `--receipt <path>` writes the signed receipt as standalone JSON. A **chunked**
+  run (each HTTP response signs only its own chunk) writes a JSON **array** of
+  per-chunk receipts, since separate signatures can't be merged into one — no
+  silent loss of coverage.
+- `vetro verify-receipt <file>` verifies **offline** (no network, no account):
+  `src/receipt.rs` reproduces the exact canonicalization (`serde_json` sorts keys
+  and emits compact JSON — byte-for-byte identical to the backend, cross-checked
+  against `canonicalJson`), recomputes the SHA-256 (a mismatch → clear
+  "payload altered" error, distinct from a bad signature), and verifies the
+  Ed25519 signature. It accepts a single receipt or an array; every one must
+  verify. `--public-key <PEM|path>` overrides the key (or `VETRO_RECEIPT_PUBLIC_KEY`).
+- Key handling (`src/pubkeys.rs`): the trusted public key(s) are bundled by
+  `public_key_id`. Crucially, **multiple keys coexist**, so a signing-key
+  rotation is handled by *adding* the new public key (keeping the old), not a
+  major-version bump — old receipts keep verifying. Until an official key is
+  published the registry is empty and verification requires `--public-key`
+  (fetched from `/meta/export-signing-key`).
+- Exit codes: a verification/authenticity failure is exit `3`; a malformed or
+  unreadable receipt file is exit `2`.
 - The customer's own pipeline archives this file as a build artifact
   (GitHub/GitLab artifact retention, or their own object storage) — retention
   becomes the customer's decision, on their own infrastructure, not bounded by
@@ -474,6 +535,17 @@ Define **one release pipeline** — GitHub Releases with signed cross-compiled
 binaries — and every other channel consumes from it. Channels differ wildly in
 effort, so we layer them.
 
+> **Status (this revision): Level 0 + Phase 1 ✅ implemented.** `cargo-dist` is
+> configured (`dist-workspace.toml`) and generates `.github/workflows/release.yml`,
+> which on every version tag cross-compiles all five targets, publishes them to
+> GitHub Releases with SHA-256 checksums, generates the `vetro-cli-installer.sh`
+> `curl | sh` installer, and attaches a **GitHub build attestation** (the keyless
+> signing mechanism below). The image channel is a thin distroless `Dockerfile`
+> (static musl binary) published multi-arch (amd64 + arm64) to GHCR by a separate
+> `.github/workflows/docker.yml` — separate because `dist generate` owns and
+> would overwrite `release.yml` — with a matching image attestation. `dist plan`
+> validates the artifact set. **Phase 2** (Homebrew/Scoop/npm) remains 🔜.
+
 ### Level 0 — the base (everything else depends on it)
 
 **GitHub Releases with cross-compiled binaries.** A workflow that, on every tag,
@@ -501,32 +573,33 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
 
 ### Notes
 
-- **Signing (concrete mechanism, 🔜 — point 5):** "signed" was previously
+- **Signing (concrete mechanism, ✅ — point 5):** "signed" was previously
   unspecified — for a binary that runs inside CI pipelines holding credentials
   (§6.1), that's exactly the kind of vagueness a supply-chain security review
-  pushes back on. Concrete plan: **Sigstore/`cosign` keyless signing**,
-  integrated via `cargo-dist`'s native Sigstore support (it generates the
-  signing step in the release workflow, so this is config, not a hand-rolled
-  script — consistent with §9's "distribution surface as config" principle).
-  Every release artifact gets a `.sig` + `.bundle` alongside the existing
-  checksums; `cosign verify-blob` against the public Sigstore transparency log
-  is the documented verification step (README, and referenced from
-  `vetro init`-scaffolded CI templates so consuming pipelines can pin to a
-  verified binary instead of trusting `curl | sh` on faith). No private key
-  management burden — keyless signing ties the artifact to the GitHub Actions
-  OIDC identity that built it, which is independently auditable.
+  pushes back on. **Implemented as GitHub build attestations** (`github-attestations`
+  in `dist-workspace.toml`): the generated `release.yml` runs `actions/attest`
+  with `id-token: write`, producing keyless, Sigstore-backed provenance for every
+  release artifact — the same trust model originally sketched as `cosign`
+  (keyless, transparency-logged, no private key to manage), using the mechanism
+  `cargo-dist` 0.32 wires in natively so it stays config, not a hand-rolled
+  script. The attestation ties each artifact to the GitHub Actions OIDC identity
+  that built it, independently verifiable with `gh attestation verify <artifact>
+  --repo donkan168/vetro-cli` (documented in the README; referenceable from
+  `vetro init` templates so consuming pipelines can pin to a verified binary
+  instead of trusting `curl | sh` on faith). SHA-256 checksums
+  (`sha256.sum` + per-artifact `.sha256`) ship alongside for a quick integrity
+  check when attestation tooling isn't present.
 - **Versioning:** independent SemVer for the CLI. Every channel's package version
   tracks the CLI's git tag exactly.
-- **Backend compatibility check (🔜 — not yet built).** The CLI should fail
-  clearly on an incompatible backend instead of mis-parsing a response. Concrete
-  design: (1) the backend exposes its API version — a lightweight
-  `GET /api/v1/version` returning `{ api_version, min_cli_version }`, and/or an
-  `X-Vetro-Api-Version` response header on `/ci/check-key`; (2) the CLI embeds
-  the **minimum backend API version** it requires; (3) `doctor` fetches and
-  reports both, and `check` warns (not fails) on a minor skew, failing only on a
-  hard major mismatch. Until this lands, `doctor` reports `ruleset_version` only —
-  the §9 "pins a min backend version" guarantee is aspirational, tracked here so
-  it isn't mistaken for implemented.
+- **Backend compatibility check (✅ — implemented).** The CLI fails clearly on
+  an incompatible backend instead of mis-parsing a response: (1) the backend
+  exposes `GET /api/v1/version` returning `{ api_version, min_cli_version }` and
+  sets an `X-Vetro-Api-Version` header on `/ci/check-key` (both present in
+  `routes/version.ts` / `routes/ci.ts`); (2) the CLI embeds the **minimum
+  backend API version** it requires (`MIN_BACKEND_API_VERSION`); (3) `doctor`
+  fetches `/version` and reports both, and `check` reads the response header and
+  **warns on a minor skew, fails (exit 4) on a hard major mismatch**. An older
+  backend that sends neither is treated as unknown and not blocked.
 - **Platforms vs channels:** Linux/macOS/Windows are *targets* (the Level-0 build
   matrix), not channels — each channel just serves the right prebuilt binary for
   the host.
@@ -576,8 +649,8 @@ supports selecting the diff so a large repo isn't re-checked every run:
 - Filtered to `*.sql` (configurable). With no changed SQL, `check` exits 0 and
   says so — an empty diff is a pass, never an error.
 - Composes with hand-rolled patterns too: `git diff --name-only --diff-filter=d
-  $BASE...HEAD -- '*.sql' | vetro check --stdin-file-list` remains supported for
-  pipelines that already compute the set.
+  $BASE...HEAD -- '*.sql' | vetro check --stdin-file-list` (✅ implemented) reads
+  the paths from stdin, one per line, for pipelines that already compute the set.
 
 ### Baseline / suppression (adoption in legacy repos)
 
@@ -607,22 +680,28 @@ turns the build red on day one — the fastest way to get uninstalled. So:
 - **v0.1 (MVP) — DONE:** `check` (files + stdin), `--dialect`, `--format
   text|json`, `--monitor`, `--fail-on`, exit codes, `login`/`logout`, `doctor`,
   config file + env + flags.
-- **v0.2:** the "make it a real team tool" release —
+- **v0.2 — DONE:** the "make it a real team tool" release —
   - Output: `--format sarif` + `gitlab-codequality` + `gitlab-sast` (§7).
   - Integration: GitHub Action **and** GitLab CI templates; `vetro init`
-    (hook + workflow scaffolding) (§10).
-  - Changed-files selection: `--changed` / `--since` (§10).
+    (hook + workflow scaffolding, `--oidc` variant) (§10).
+  - Changed-files selection: `--changed` / `--since` / `--stdin-file-list` (§10).
   - Baseline + inline suppression: `vetro baseline`, `--baseline`,
     `-- vetro:ignore[...]` (§10).
   - Network resilience: `--timeout`, retries w/ backoff, proxy env (§6).
   - Chunking + partial-failure semantics (§5).
-- **Distribution (parallel track, §9):** set up `cargo-dist` for Level 0 (signed
-  cross-compiled binaries on GitHub Releases), then **Phase 1** (GitHub Releases
-  + `curl | sh` + Docker) at launch, then **Phase 2** (Homebrew + Scoop + npm) as
-  adoption grows. Can land alongside v0.2.
-- **v0.3:** backend compatibility check (§9 Notes); watch/dev ergonomics;
-  ruleset-version caching in `doctor`; shell completions. (No local-first mode —
-  out of scope, §1.)
+- **Enterprise-readiness — DONE (this revision):** OIDC/workload-identity login
+  (§6.1), signed run receipts + `verify-receipt` (§7.1), CI provenance (§2.1),
+  `.vetro.toml` (§6.3), CA trust (§6.4), degraded-mode break-glass (§6.5, with
+  the server-side reconciliation caveat noted there), bounded chunk concurrency
+  (§5), backend compatibility check (§9), `--no-color`, `vetro version`.
+- **Distribution (§9) — Level 0 + Phase 1 DONE:** `cargo-dist`
+  (`dist-workspace.toml` + generated `release.yml`) publishes attested,
+  cross-compiled binaries to GitHub Releases with a `curl | sh` installer, plus a
+  distroless multi-arch Docker image to GHCR (`docker.yml`). **Phase 2**
+  (Homebrew + Scoop + npm) remains 🔜.
+- **Still 🔜:** distribution Phase 2; server-side reconciliation of degraded runs
+  (§6.5); watch/dev ergonomics; shell completions. (No local-first mode — out of
+  scope, §1.)
 
 ## 12. Open questions (need product decisions)
 
@@ -753,8 +832,12 @@ The design keeps three properties that matter for an enterprise buyer
 evaluating this as a *control*, not just a feature:
 1. **Off by default** — nothing changes unless a team opts in per-pipeline.
 2. **Never silent** — a reason is mandatory, a stderr warning always prints,
-   and the bypass is reconciled server-side (visible in the audit trail as a
-   gap with a reason attached, not as a clean run).
+   and the bypass writes a local `.vetro/degraded-runs.jsonl` record (reason +
+   provenance + timestamp) meant to be archived as a CI artifact. *Server-side*
+   reconciliation into the central audit trail is still 🔜 (§6.5): today the
+   trace is local only, so the honest claim is "leaves an auditable local
+   record", not "reconciled server-side". Closing that gap needs a new backend
+   ingest endpoint.
 3. **Scoped to unreachability, not to findings** — it cannot be used to skip a
    `BLOCKED` verdict that was actually returned; it only overrides exit `4`
    (backend/network), never exit `1` (a real finding). A team cannot use

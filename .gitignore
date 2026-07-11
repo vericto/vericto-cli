@@ -13,6 +13,12 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Coverage instrumentation (cargo-llvm-cov / -C instrument-coverage)
+*.profraw
+
+# CLI runtime dir (degraded-run records from --allow-degraded, §6.5)
+.vetro/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
