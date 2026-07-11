@@ -547,6 +547,27 @@ async fn verify_receipt_rejects_tampered_file() {
 // ── Minor items: version, --no-color, --stdin-file-list, degraded record ─────
 
 #[test]
+fn completions_generate_for_each_shell() {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let out = vetro()
+            .args(["completions", shell])
+            .assert()
+            .code(0)
+            .get_output()
+            .stdout
+            .clone();
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.is_empty(), "{shell}: empty completion output");
+        assert!(s.contains("vetro"), "{shell}: missing binary name");
+    }
+}
+
+#[test]
+fn completions_reject_unknown_shell() {
+    vetro().args(["completions", "notashell"]).assert().code(2); // clap usage error
+}
+
+#[test]
 fn version_subcommand_prints_version() {
     let out = vetro()
         .arg("version")

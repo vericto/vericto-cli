@@ -17,7 +17,8 @@ mod scaffold;
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 use api::{ApiError, CheckResponse, QueryInput};
 use config::Config;
@@ -109,6 +110,15 @@ enum Command {
     VerifyReceipt(VerifyReceiptArgs),
     /// Print the CLI version (same as `--version`).
     Version,
+    /// Print a shell completion script to stdout (bash|zsh|fish|powershell|elvish).
+    Completions(CompletionsArgs),
+}
+
+#[derive(Parser)]
+struct CompletionsArgs {
+    /// The shell to generate completions for. Pipe the output into your shell's
+    /// completion dir, e.g. `vetro completions bash > /etc/bash_completion.d/vetro`.
+    shell: Shell,
 }
 
 #[derive(Parser)]
@@ -589,7 +599,18 @@ async fn main() -> ExitCode {
             println!("vetro {}", env!("CARGO_PKG_VERSION"));
             ExitCode::from(exit::OK)
         }
+        Command::Completions(args) => run_completions(args),
     }
+}
+
+/// `vetro completions <shell>` — write a shell completion script to stdout.
+/// clap generates it from the same command tree the CLI already defines, so it
+/// stays in sync with the flags/subcommands automatically.
+fn run_completions(args: CompletionsArgs) -> ExitCode {
+    let mut cmd = Cli::command();
+    let bin = cmd.get_name().to_string();
+    clap_complete::generate(args.shell, &mut cmd, bin, &mut std::io::stdout());
+    ExitCode::from(exit::OK)
 }
 
 /// Loads the config file, warning (but not failing) if it is malformed.

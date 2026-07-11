@@ -159,6 +159,7 @@ vetro baseline [files...]  Record current findings to .vetro-baseline.json (§10
 vetro init                 Scaffold CI workflow + pre-commit hook (§10); --oidc for workload-identity.
 vetro verify-receipt <f>   Verify a signed run receipt offline (§7.1).
 vetro version              Print the CLI version (same as --version).
+vetro completions <shell>  Print a shell completion script (bash|zsh|fish|powershell|elvish).
 ```
 
 ### `vetro check` — flags
@@ -708,7 +709,8 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   (§6.1), signed run receipts + `verify-receipt` (§7.1), CI provenance (§2.1),
   `.vetro.toml` (§6.3), CA trust (§6.4), degraded-mode break-glass (§6.5, with
   the server-side reconciliation caveat noted there), bounded chunk concurrency
-  (§5), backend compatibility check (§9), `--no-color`, `vetro version`.
+  (§5), backend compatibility check (§9), `--no-color`, `vetro version`,
+  `vetro completions <shell>` (bash/zsh/fish/powershell/elvish).
 - **Distribution (§9) — Level 0 + Phase 1 DONE, Phase 2 npm DONE:** `cargo-dist`
   (`dist-workspace.toml` + generated `release.yml`) publishes cross-compiled
   binaries + SHA-256 checksums to GitHub Releases with a `curl | sh` installer,
@@ -718,8 +720,8 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   Notes). **Homebrew + Scoop** remain 🔜 (need an external tap/bucket repo).
 - **Still 🔜:** distribution Homebrew/Scoop; npm registry publish (`NPM_TOKEN`);
   keyless attestations (repo must be public/org); server-side reconciliation of
-  degraded runs (§6.5); watch/dev ergonomics; shell completions. (No local-first
-  mode — out of scope, §1.)
+  degraded runs (§6.5); watch/dev ergonomics. (No local-first mode — out of
+  scope, §1.)
 
 ## 12. Open questions (need product decisions)
 
