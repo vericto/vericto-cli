@@ -13,7 +13,7 @@
 //! reading `{ "value": "<jwt>" }`. **GitLab CI** mints the token at
 //! pipeline-config time via `id_tokens:` and hands it to the job as an
 //! environment variable whose name the user chose; the CLI reads that variable
-//! (default `VETRO_ID_TOKEN`, overridable).
+//! (default `VERICTO_ID_TOKEN`, overridable).
 //!
 //! `availability()` returns `None` when no OIDC signal is present, so the caller
 //! silently falls back to a static key rather than failing.
@@ -21,9 +21,9 @@
 use crate::api::{ApiError, Transport};
 
 /// The GitLab env var the CLI reads for a pre-minted ID token by default. Users
-/// name it in their `id_tokens:` block; this is the name our `vetro init`
+/// name it in their `id_tokens:` block; this is the name our `vericto init`
 /// GitLab template uses, and a sensible convention when unspecified.
-pub const DEFAULT_GITLAB_TOKEN_ENV: &str = "VETRO_ID_TOKEN";
+pub const DEFAULT_GITLAB_TOKEN_ENV: &str = "VERICTO_ID_TOKEN";
 
 /// How the CLI can obtain an OIDC ID token in the current environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,10 +139,19 @@ mod tests {
     const KEYS: [&str; 3] = [
         "ACTIONS_ID_TOKEN_REQUEST_URL",
         "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-        "VETRO_ID_TOKEN",
+        "VERICTO_ID_TOKEN",
     ];
 
+    /// Serializes env-mutating tests. Environment variables are process-global,
+    /// so tests that clear/set KEYS must not run concurrently or they clobber
+    /// each other (cargo runs tests in parallel by default). Holding this lock
+    /// for the duration of the closure makes each env-dependent test atomic.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn with_clean_env<T>(f: impl FnOnce() -> T) -> T {
+        // Recover from a poisoned lock (a panicking test still cleaned up its
+        // own env below) so one failing test doesn't cascade into the rest.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved: Vec<(&str, Option<std::ffi::OsString>)> =
             KEYS.iter().map(|k| (*k, std::env::var_os(k))).collect();
         for k in KEYS {
@@ -186,10 +195,10 @@ mod tests {
     #[test]
     fn availability_detects_env_token() {
         with_clean_env(|| {
-            std::env::set_var("VETRO_ID_TOKEN", "  jwt.body.sig  ");
-            match availability("VETRO_ID_TOKEN") {
+            std::env::set_var("VERICTO_ID_TOKEN", "  jwt.body.sig  ");
+            match availability("VERICTO_ID_TOKEN") {
                 Some(Availability::EnvToken { var, token }) => {
-                    assert_eq!(var, "VETRO_ID_TOKEN");
+                    assert_eq!(var, "VERICTO_ID_TOKEN");
                     assert_eq!(token, "jwt.body.sig"); // trimmed
                 }
                 other => panic!("expected EnvToken, got {other:?}"),
@@ -202,9 +211,9 @@ mod tests {
         with_clean_env(|| {
             std::env::set_var("ACTIONS_ID_TOKEN_REQUEST_URL", "https://gh/token");
             std::env::set_var("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "req-tok");
-            std::env::set_var("VETRO_ID_TOKEN", "env-jwt");
+            std::env::set_var("VERICTO_ID_TOKEN", "env-jwt");
             assert!(matches!(
-                availability("VETRO_ID_TOKEN"),
+                availability("VERICTO_ID_TOKEN"),
                 Some(Availability::GitHubEndpoint { .. })
             ));
         });
@@ -222,10 +231,10 @@ mod tests {
     #[tokio::test]
     async fn fetch_token_returns_env_token_verbatim() {
         let avail = Availability::EnvToken {
-            var: "VETRO_ID_TOKEN".into(),
+            var: "VERICTO_ID_TOKEN".into(),
             token: "env-jwt".into(),
         };
-        let tok = fetch_token(&avail, Some("vetro"), &test_transport())
+        let tok = fetch_token(&avail, Some("vericto"), &test_transport())
             .await
             .unwrap();
         assert_eq!(tok, "env-jwt");
@@ -238,7 +247,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(header("authorization", "Bearer req-tok"))
-            .and(query_param("audience", "vetro"))
+            .and(query_param("audience", "vericto"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({ "value": "gh.jwt.token" })),
@@ -249,7 +258,7 @@ mod tests {
             url: server.uri(),
             request_token: "req-tok".into(),
         };
-        let tok = fetch_token(&avail, Some("vetro"), &test_transport())
+        let tok = fetch_token(&avail, Some("vericto"), &test_transport())
             .await
             .unwrap();
         assert_eq!(tok, "gh.jwt.token");

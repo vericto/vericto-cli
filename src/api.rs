@@ -1,4 +1,4 @@
-//! HTTP client for the Vetro CI dry-run endpoint.
+//! HTTP client for the Vericto CI dry-run endpoint.
 //!
 //! The CLI is a thin client: it does not evaluate SQL locally. It sends the SQL
 //! to `POST /api/v1/ci/check-key` (API-key auth, `ci_dryrun:execute` scope) and
@@ -128,7 +128,7 @@ pub struct CheckResponse {
     /// a single-call run, where `receipt` carries the sole receipt instead.
     #[serde(skip)]
     pub merged_receipts: Vec<Receipt>,
-    /// The backend API version from the `X-Vetro-Api-Version` response header
+    /// The backend API version from the `X-Vericto-Api-Version` response header
     /// (§9), captured so `check` can warn on a minor skew / fail on a major
     /// mismatch without a separate `/version` round-trip. Not part of the JSON
     /// body — set from the header in `try_once`. `None` on older backends.
@@ -224,7 +224,7 @@ impl std::fmt::Display for ApiError {
             ApiError::Backend { status, message } => {
                 write!(f, "backend error ({status}): {message}")
             }
-            ApiError::Transport(m) => write!(f, "could not reach the Vetro API: {m}"),
+            ApiError::Transport(m) => write!(f, "could not reach the Vericto API: {m}"),
             ApiError::PartialFailure(m) => write!(f, "{m}"),
         }
     }
@@ -232,7 +232,7 @@ impl std::fmt::Display for ApiError {
 
 use std::time::Duration;
 
-/// The default per-request timeout, overridable via `--timeout` / `VETRO_TIMEOUT`.
+/// The default per-request timeout, overridable via `--timeout` / `VERICTO_TIMEOUT`.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Max retry attempts for transient failures (so 1 initial try + this many
@@ -251,7 +251,7 @@ pub const MAX_QUERIES_PER_CALL: usize = 500;
 pub struct Transport {
     pub timeout: Duration,
     /// Path to an additional PEM bundle to trust, on top of the bundled roots.
-    /// Resolved by the caller from `--ca-bundle` / `VETRO_CA_BUNDLE` /
+    /// Resolved by the caller from `--ca-bundle` / `VERICTO_CA_BUNDLE` /
     /// `SSL_CERT_FILE`.
     pub ca_bundle: Option<std::path::PathBuf>,
 }
@@ -675,7 +675,7 @@ async fn try_once(
         // Read the API-version header before consuming the body (§9).
         let api_version_header = resp
             .headers()
-            .get("x-vetro-api-version")
+            .get("x-vericto-api-version")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
         return resp
@@ -867,7 +867,7 @@ mod tests {
             .and(path("/api/v1/ci/check-key"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .insert_header("X-Vetro-Api-Version", "1.4.0")
+                    .insert_header("X-Vericto-Api-Version", "1.4.0")
                     .set_body_json(ok_body(1, 0, 999, "raw")),
             )
             .mount(&server)

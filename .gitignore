@@ -17,7 +17,7 @@ target
 *.profraw
 
 # CLI runtime dir (degraded-run records from --allow-degraded, §6.5)
-.vetro/
+.vericto/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

@@ -1,4 +1,4 @@
-# Quality gate for vetro-cli itself (not the `vetro init` template for users).
+# Quality gate for vericto-cli itself (not the `vericto init` template for users).
 # Runs on every PR into main and on pushes to main: format, lint, build, test.
 name: CI
 

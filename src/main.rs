@@ -1,4 +1,4 @@
-//! vetro — CLI to validate SQL against a Vetro workspace's rules before it runs.
+//! vericto — CLI to validate SQL against a Vericto workspace's rules before it runs.
 //!
 //! Thin client: sends SQL to `POST /api/v1/ci/check-key` and mirrors the
 //! verdict as a process exit code, for pre-commit hooks and CI/CD gates.
@@ -83,9 +83,9 @@ fn backend_compat(api_version: &str) -> Compat {
 
 #[derive(Parser)]
 #[command(
-    name = "vetro",
+    name = "vericto",
     version,
-    about = "Validate SQL against your Vetro rules before it runs"
+    about = "Validate SQL against your Vericto rules before it runs"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -117,19 +117,19 @@ enum Command {
 #[derive(Parser)]
 struct CompletionsArgs {
     /// The shell to generate completions for. Pipe the output into your shell's
-    /// completion dir, e.g. `vetro completions bash > /etc/bash_completion.d/vetro`.
+    /// completion dir, e.g. `vericto completions bash > /etc/bash_completion.d/vericto`.
     shell: Shell,
 }
 
 #[derive(Parser)]
 struct VerifyReceiptArgs {
-    /// Path to the receipt file written by `vetro check --receipt` (a single
+    /// Path to the receipt file written by `vericto check --receipt` (a single
     /// receipt object, or a JSON array of per-chunk receipts).
     file: std::path::PathBuf,
 
     /// Public key PEM to verify against (or a path to a `.pem` file). Overrides
     /// the bundled key. Fetch it from `GET /api/v1/meta/export-signing-key`.
-    #[arg(long, value_name = "PEM_OR_PATH", env = "VETRO_RECEIPT_PUBLIC_KEY")]
+    #[arg(long, value_name = "PEM_OR_PATH", env = "VERICTO_RECEIPT_PUBLIC_KEY")]
     public_key: Option<String>,
 
     /// Print the verified payload (summary + provenance) on success.
@@ -155,15 +155,15 @@ struct BaselineArgs {
     dialect: Option<String>,
 
     /// Where to write the baseline.
-    #[arg(long, default_value = ".vetro-baseline.json")]
+    #[arg(long, default_value = ".vericto-baseline.json")]
     out: std::path::PathBuf,
 
-    /// Vetro API key (or set VETRO_API_KEY, or `vetro login`).
-    #[arg(long, env = "VETRO_API_KEY", hide_env_values = true)]
+    /// Vericto API key (or set VERICTO_API_KEY, or `vericto login`).
+    #[arg(long, env = "VERICTO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
-    /// Vetro API base URL (or set VETRO_API_URL, or `vetro login`).
-    #[arg(long, env = "VETRO_API_URL")]
+    /// Vericto API base URL (or set VERICTO_API_URL, or `vericto login`).
+    #[arg(long, env = "VERICTO_API_URL")]
     api_url: Option<String>,
 
     /// Authenticate via CI workload-identity (OIDC) instead of a static key
@@ -173,7 +173,7 @@ struct BaselineArgs {
     oidc: bool,
 
     /// Workspace ID to authenticate against for OIDC.
-    #[arg(long, value_name = "ID", env = "VETRO_WORKSPACE_ID")]
+    #[arg(long, value_name = "ID", env = "VERICTO_WORKSPACE_ID")]
     workspace: Option<String>,
 
     /// OIDC audience to request in the ID token.
@@ -185,12 +185,12 @@ struct BaselineArgs {
     oidc_token_env: Option<String>,
 
     /// Per-request timeout in seconds.
-    #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
+    #[arg(long, env = "VERICTO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
 
-    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VETRO_CA_BUNDLE,
+    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VERICTO_CA_BUNDLE,
     /// then SSL_CERT_FILE.
-    #[arg(long, env = "VETRO_CA_BUNDLE", value_name = "PATH")]
+    #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 }
 
@@ -210,7 +210,7 @@ struct InitArgs {
     dialect: String,
 
     /// Scaffold OIDC / workload-identity auth (§6.1) instead of a static
-    /// VETRO_API_KEY secret. Requires --workspace.
+    /// VERICTO_API_KEY secret. Requires --workspace.
     #[arg(long)]
     oidc: bool,
 
@@ -223,7 +223,7 @@ struct InitArgs {
     force: bool,
 }
 
-/// CI provider choices for `vetro init --target`.
+/// CI provider choices for `vericto init --target`.
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum InitTarget {
     Github,
@@ -234,11 +234,11 @@ enum InitTarget {
 struct LoginArgs {
     /// API key to store. If omitted, you'll be prompted (input is not echoed
     /// where the terminal supports it).
-    #[arg(long, env = "VETRO_API_KEY", hide_env_values = true)]
+    #[arg(long, env = "VERICTO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
     /// API base URL to store alongside the key.
-    #[arg(long, env = "VETRO_API_URL")]
+    #[arg(long, env = "VERICTO_API_URL")]
     api_url: Option<String>,
 
     /// Default SQL dialect to store (used by `check` when --dialect is omitted).
@@ -256,19 +256,19 @@ struct LoginArgs {
     #[arg(long, value_name = "ID")]
     workspace: Option<String>,
 
-    /// OIDC audience to request (defaults to "vetro").
+    /// OIDC audience to request (defaults to "vericto").
     #[arg(long, value_name = "AUD")]
     audience: Option<String>,
 }
 
 #[derive(Parser)]
 struct DoctorArgs {
-    /// Vetro API key (or set VETRO_API_KEY, or `vetro login`).
-    #[arg(long, env = "VETRO_API_KEY", hide_env_values = true)]
+    /// Vericto API key (or set VERICTO_API_KEY, or `vericto login`).
+    #[arg(long, env = "VERICTO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
-    /// Vetro API base URL (or set VETRO_API_URL, or `vetro login`).
-    #[arg(long, env = "VETRO_API_URL")]
+    /// Vericto API base URL (or set VERICTO_API_URL, or `vericto login`).
+    #[arg(long, env = "VERICTO_API_URL")]
     api_url: Option<String>,
 
     /// Test OIDC / workload-identity auth (§6.1) instead of a static key.
@@ -277,7 +277,7 @@ struct DoctorArgs {
     oidc: bool,
 
     /// Workspace ID to authenticate against for OIDC.
-    #[arg(long, value_name = "ID", env = "VETRO_WORKSPACE_ID")]
+    #[arg(long, value_name = "ID", env = "VERICTO_WORKSPACE_ID")]
     workspace: Option<String>,
 
     /// OIDC audience to request in the ID token.
@@ -289,12 +289,12 @@ struct DoctorArgs {
     oidc_token_env: Option<String>,
 
     /// Per-request timeout in seconds.
-    #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
+    #[arg(long, env = "VERICTO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
 
-    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VETRO_CA_BUNDLE,
+    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VERICTO_CA_BUNDLE,
     /// then SSL_CERT_FILE.
-    #[arg(long, env = "VETRO_CA_BUNDLE", value_name = "PATH")]
+    #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 }
 
@@ -316,7 +316,7 @@ struct CheckArgs {
 
     /// Read the list of SQL files to check from stdin, one path per line (for
     /// pipelines that already compute the set, e.g. `git diff --name-only ... |
-    /// vetro check --stdin-file-list`). Mutually exclusive with files/--changed.
+    /// vericto check --stdin-file-list`). Mutually exclusive with files/--changed.
     #[arg(long)]
     stdin_file_list: bool,
 
@@ -334,16 +334,16 @@ struct CheckArgs {
     monitor: bool,
 
     /// Which severity of finding causes a non-zero exit. Falls back to
-    /// .vetro.toml's fail_on, then "block".
+    /// .vericto.toml's fail_on, then "block".
     #[arg(long, value_enum)]
     fail_on: Option<FailOn>,
 
-    /// Vetro API key (or set VETRO_API_KEY, or `vetro login`).
-    #[arg(long, env = "VETRO_API_KEY", hide_env_values = true)]
+    /// Vericto API key (or set VERICTO_API_KEY, or `vericto login`).
+    #[arg(long, env = "VERICTO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
-    /// Vetro API base URL (or set VETRO_API_URL, or `vetro login`).
-    #[arg(long, env = "VETRO_API_URL")]
+    /// Vericto API base URL (or set VERICTO_API_URL, or `vericto login`).
+    #[arg(long, env = "VERICTO_API_URL")]
     api_url: Option<String>,
 
     /// Authenticate via CI workload-identity (OIDC) instead of a static key
@@ -352,18 +352,18 @@ struct CheckArgs {
     #[arg(long)]
     oidc: bool,
 
-    /// Workspace ID to authenticate against for OIDC (falls back to .vetro.toml /
+    /// Workspace ID to authenticate against for OIDC (falls back to .vericto.toml /
     /// config `workspace_id`). Required for OIDC.
-    #[arg(long, value_name = "ID", env = "VETRO_WORKSPACE_ID")]
+    #[arg(long, value_name = "ID", env = "VERICTO_WORKSPACE_ID")]
     workspace: Option<String>,
 
     /// OIDC audience to request in the ID token (must match the workspace trust
-    /// policy). Falls back to config, then "vetro".
+    /// policy). Falls back to config, then "vericto".
     #[arg(long, value_name = "AUD")]
     audience: Option<String>,
 
     /// Env var holding a pre-minted OIDC ID token (GitLab-style). Falls back to
-    /// .vetro.toml `oidc_token_env`, then "VETRO_ID_TOKEN".
+    /// .vericto.toml `oidc_token_env`, then "VERICTO_ID_TOKEN".
     #[arg(long, value_name = "VAR")]
     oidc_token_env: Option<String>,
 
@@ -372,7 +372,7 @@ struct CheckArgs {
     output: Option<std::path::PathBuf>,
 
     /// Request a signed run receipt (§7.1) and write it to this path — a
-    /// self-contained, offline-verifiable record (see `vetro verify-receipt`).
+    /// self-contained, offline-verifiable record (see `vericto verify-receipt`).
     /// A chunked run writes a JSON array of per-chunk receipts.
     #[arg(long, value_name = "FILE")]
     receipt: Option<std::path::PathBuf>,
@@ -383,23 +383,23 @@ struct CheckArgs {
     baseline: Option<std::path::PathBuf>,
 
     /// Per-request timeout in seconds.
-    #[arg(long, env = "VETRO_TIMEOUT", value_name = "SECS")]
+    #[arg(long, env = "VERICTO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
 
     /// Max in-flight chunk requests when the input exceeds 500 queries
     /// (capped at 8).
-    #[arg(long, env = "VETRO_CONCURRENCY", value_name = "N")]
+    #[arg(long, env = "VERICTO_CONCURRENCY", value_name = "N")]
     concurrency: Option<usize>,
 
     /// Extra CA bundle (PEM) to trust, for corporate TLS-inspecting proxies
-    /// (§6.4). Falls back to VETRO_CA_BUNDLE, then SSL_CERT_FILE.
-    #[arg(long, env = "VETRO_CA_BUNDLE", value_name = "PATH")]
+    /// (§6.4). Falls back to VERICTO_CA_BUNDLE, then SSL_CERT_FILE.
+    #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 
     /// Break-glass (§6.5): if the backend is unreachable from the first request,
     /// exit 0 instead of 4. Requires a reason. Never bypasses a real finding or
     /// a partially-completed run.
-    #[arg(long, env = "VETRO_ALLOW_DEGRADED", value_name = "REASON")]
+    #[arg(long, env = "VERICTO_ALLOW_DEGRADED", value_name = "REASON")]
     allow_degraded: Option<String>,
 
     /// Only print the summary line.
@@ -424,7 +424,7 @@ enum FailOn {
 }
 
 /// Builds the transport (timeout + CA trust). The CA bundle comes from the flag
-/// (which already folds in `VETRO_CA_BUNDLE` via clap), else `SSL_CERT_FILE` —
+/// (which already folds in `VERICTO_CA_BUNDLE` via clap), else `SSL_CERT_FILE` —
 /// the convention curl/Go and most CLIs already honor (§6.4).
 fn resolve_transport(
     timeout_secs: Option<u64>,
@@ -501,13 +501,13 @@ async fn resolve_auth(
         }
         // Auto-mode with no token and no static key: nothing to authenticate with.
         eprintln!(
-            "error: no API key and no OIDC token. Pass --api-key, set VETRO_API_KEY, \
-             run `vetro login`, or run in CI with workload-identity (§6.1)."
+            "error: no API key and no OIDC token. Pass --api-key, set VERICTO_API_KEY, \
+             run `vericto login`, or run in CI with workload-identity (§6.1)."
         );
         return Err(ExitCode::from(exit::AUTH));
     };
 
-    // Workspace + audience: flag > .vetro.toml > user config > default.
+    // Workspace + audience: flag > .vericto.toml > user config > default.
     let Some(workspace) = opts
         .workspace
         .clone()
@@ -516,7 +516,7 @@ async fn resolve_auth(
     else {
         eprintln!(
             "error: OIDC login needs a workspace. Pass --workspace <id>, set \
-             VETRO_WORKSPACE_ID, or add workspace_id to .vetro.toml / `vetro login --oidc`."
+             VERICTO_WORKSPACE_ID, or add workspace_id to .vericto.toml / `vericto login --oidc`."
         );
         return Err(ExitCode::from(exit::AUTH));
     };
@@ -568,7 +568,7 @@ async fn resolve_auth(
     }
 }
 
-/// Resolves the effective `--fail-on`: the flag wins; else `.vetro.toml`'s
+/// Resolves the effective `--fail-on`: the flag wins; else `.vericto.toml`'s
 /// `fail_on` (parsed leniently); else the default `Block`. An unrecognized
 /// value in the file is ignored (falls through to default) with no hard error,
 /// since a typo there shouldn't wedge every run — it just doesn't take effect.
@@ -596,14 +596,14 @@ async fn main() -> ExitCode {
         Command::Baseline(args) => run_baseline(args).await,
         Command::VerifyReceipt(args) => run_verify_receipt(args),
         Command::Version => {
-            println!("vetro {}", env!("CARGO_PKG_VERSION"));
+            println!("vericto {}", env!("CARGO_PKG_VERSION"));
             ExitCode::from(exit::OK)
         }
         Command::Completions(args) => run_completions(args),
     }
 }
 
-/// `vetro completions <shell>` — write a shell completion script to stdout.
+/// `vericto completions <shell>` — write a shell completion script to stdout.
 /// clap generates it from the same command tree the CLI already defines, so it
 /// stays in sync with the flags/subcommands automatically.
 fn run_completions(args: CompletionsArgs) -> ExitCode {
@@ -626,7 +626,7 @@ fn load_config() -> Config {
 
 async fn run_check(args: CheckArgs) -> ExitCode {
     let file = load_config();
-    // Project config (.vetro.toml): PR-reviewable defaults; rejected if it
+    // Project config (.vericto.toml): PR-reviewable defaults; rejected if it
     // carries secrets/allow_degraded. A malformed file is a hard error.
     let project = match config::load_project() {
         Ok(p) => p,
@@ -664,16 +664,16 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         Ok(pair) => pair,
         Err(code) => return code,
     };
-    // dialect precedence: flag > .vetro.toml > user config default > "postgres".
+    // dialect precedence: flag > .vericto.toml > user config default > "postgres".
     let dialect = args
         .dialect
         .clone()
         .or_else(|| project.default_dialect.clone())
         .or_else(|| file.default_dialect.clone())
         .unwrap_or_else(|| "postgres".to_string());
-    // fail_on precedence: flag > .vetro.toml > default (block).
+    // fail_on precedence: flag > .vericto.toml > default (block).
     let fail_on = resolve_fail_on(args.fail_on, project.fail_on.as_deref());
-    // baseline precedence: flag > .vetro.toml.
+    // baseline precedence: flag > .vericto.toml.
     let baseline_path = args
         .baseline
         .clone()
@@ -793,7 +793,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         }
     };
 
-    // Backend compatibility (§9): the response carries an `X-Vetro-Api-Version`
+    // Backend compatibility (§9): the response carries an `X-Vericto-Api-Version`
     // header. Warn on a minor skew, fail on a major mismatch (the CLI may
     // mis-parse a future major's response). Absent header (older backend) → skip.
     if let Some(v) = resp.api_version_header.as_deref() {
@@ -840,7 +840,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         } else {
             let n = receipts.len();
             eprintln!(
-                "note: wrote {} signed receipt{} to {}. Verify with `vetro verify-receipt {}`.",
+                "note: wrote {} signed receipt{} to {}. Verify with `vericto verify-receipt {}`.",
                 n,
                 if n == 1 { "" } else { "s" },
                 path.display(),
@@ -854,7 +854,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     if let Some(remaining) = resp.ci_checks_remaining {
         if remaining <= 50 {
             eprintln!(
-                "note: {remaining} CLI checks left this month on your plan. Upgrade at https://vetro.dev/pricing for more."
+                "note: {remaining} CLI checks left this month on your plan. Upgrade at https://vericto.com/pricing for more."
             );
         }
     }
@@ -866,7 +866,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     }
 
     // Suppression (§10): a finding does not fail the run if it is baselined or
-    // carries an inline `-- vetro:ignore[RULE] reason`. Reporting still shows it;
+    // carries an inline `-- vericto:ignore[RULE] reason`. Reporting still shows it;
     // only the exit code is affected.
     let suppressed = suppressed_fingerprints(&resp, &files, baseline_path.as_deref());
     let suppressed = match suppressed {
@@ -885,7 +885,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
 }
 
 /// Collects the set of finding fingerprints that should NOT fail the run:
-/// baselined entries (from `--baseline`) plus inline `-- vetro:ignore` matches.
+/// baselined entries (from `--baseline`) plus inline `-- vericto:ignore` matches.
 /// Prints what it suppressed (and any baseline drift) to stderr. Returns an
 /// ExitCode on a hard error (unreadable baseline).
 fn suppressed_fingerprints(
@@ -922,13 +922,13 @@ fn suppressed_fingerprints(
         let drift = baseline::drifted(&bl, resp, files);
         if !drift.is_empty() {
             eprintln!(
-                "note: {} baseline entr(y/ies) no longer match — consider re-running `vetro baseline`.",
+                "note: {} baseline entr(y/ies) no longer match — consider re-running `vericto baseline`.",
                 drift.len()
             );
         }
     }
 
-    // 2) Inline `-- vetro:ignore[RULE] reason` in the source file.
+    // 2) Inline `-- vericto:ignore[RULE] reason` in the source file.
     for q in resp.queries.iter().filter(|q| q.status != "ALLOWED") {
         let Some(rule) = q.rule_code.as_deref() else {
             continue;
@@ -948,7 +948,7 @@ fn suppressed_fingerprints(
     Ok(suppressed)
 }
 
-/// `vetro baseline` — run a check and record the current findings to a baseline
+/// `vericto baseline` — run a check and record the current findings to a baseline
 /// file (§10), so a later `check --baseline` only fails on *new* findings.
 async fn run_baseline(args: BaselineArgs) -> ExitCode {
     let file = load_config();
@@ -1070,7 +1070,7 @@ fn write_receipts(path: &std::path::Path, receipts: &[api::Receipt]) -> std::io:
     std::fs::write(path, json)
 }
 
-/// `vetro verify-receipt <file>` — verify a signed run receipt (§7.1) offline.
+/// `vericto verify-receipt <file>` — verify a signed run receipt (§7.1) offline.
 /// Accepts a single receipt object or an array (chunked run); every receipt must
 /// verify for the command to exit 0. Prints a clear reason on failure.
 fn run_verify_receipt(args: VerifyReceiptArgs) -> ExitCode {
@@ -1159,7 +1159,7 @@ fn print_receipt_summary(r: &api::Receipt) {
     }
 }
 
-/// `vetro login` — persist an API key (and optional URL/dialect) to the config
+/// `vericto login` — persist an API key (and optional URL/dialect) to the config
 /// file. The key comes from --api-key/env, or an interactive prompt.
 async fn run_login(args: LoginArgs) -> ExitCode {
     // OIDC mode stores no secret — just the workspace/audience so CI runs
@@ -1169,7 +1169,7 @@ async fn run_login(args: LoginArgs) -> ExitCode {
     }
     let api_key = match args.api_key {
         Some(k) => k,
-        None => match prompt_secret("Vetro API key (vtro_...): ") {
+        None => match prompt_secret("Vericto API key (vtro_...): ") {
             Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
             Ok(_) => {
                 eprintln!("error: no API key entered.");
@@ -1204,13 +1204,13 @@ async fn run_login(args: LoginArgs) -> ExitCode {
     }
 }
 
-/// `vetro login --oidc` — configure workload-identity login (§6.1). Stores only
+/// `vericto login --oidc` — configure workload-identity login (§6.1). Stores only
 /// the workspace_id (and audience) — never a secret. When run inside CI with an
 /// OIDC token available, it also verifies the exchange works so the developer
 /// gets immediate feedback rather than a failure on the first CI check.
 async fn run_login_oidc(args: LoginArgs) -> ExitCode {
     let Some(workspace) = args.workspace.clone() else {
-        eprintln!("error: `vetro login --oidc` requires --workspace <id>.");
+        eprintln!("error: `vericto login --oidc` requires --workspace <id>.");
         return ExitCode::from(exit::USAGE);
     };
 
@@ -1288,7 +1288,7 @@ async fn run_login_oidc(args: LoginArgs) -> ExitCode {
     ExitCode::from(exit::OK)
 }
 
-/// `vetro logout` — drop the stored API key (keeps url/dialect prefs).
+/// `vericto logout` — drop the stored API key (keeps url/dialect prefs).
 fn run_logout() -> ExitCode {
     let Some(path) = config::config_path() else {
         eprintln!("error: could not resolve a config directory.");
@@ -1316,7 +1316,7 @@ fn run_logout() -> ExitCode {
     }
 }
 
-/// `vetro init` — scaffold a CI workflow (GitHub or GitLab) and, with --hook, a
+/// `vericto init` — scaffold a CI workflow (GitHub or GitLab) and, with --hook, a
 /// git pre-commit hook. Existing files are skipped unless --force. Returns
 /// usage (2) if the target can't be determined or a write fails.
 fn run_init(args: InitArgs) -> ExitCode {
@@ -1325,7 +1325,7 @@ fn run_init(args: InitArgs) -> ExitCode {
     // OIDC scaffolding needs a workspace to bake into the templates.
     let auth = if args.oidc {
         let Some(ws) = args.workspace.clone() else {
-            eprintln!("error: `vetro init --oidc` requires --workspace <id>.");
+            eprintln!("error: `vericto init --oidc` requires --workspace <id>.");
             return ExitCode::from(exit::USAGE);
         };
         AuthStyle::Oidc { workspace_id: ws }
@@ -1342,14 +1342,14 @@ fn run_init(args: InitArgs) -> ExitCode {
     let mut plans: Vec<(std::path::PathBuf, String, bool)> = Vec::new();
     match target {
         CiTarget::GitHub => plans.push((
-            std::path::PathBuf::from(".github/workflows/vetro.yml"),
+            std::path::PathBuf::from(".github/workflows/vericto.yml"),
             scaffold::github_workflow(&args.dialect, &auth),
             false,
         )),
         CiTarget::GitLab => plans.push((
             // Never clobber an existing .gitlab-ci.yml — write an include the
             // user wires in (printed below).
-            std::path::PathBuf::from(".vetro/gitlab-ci.yml"),
+            std::path::PathBuf::from(".vericto/gitlab-ci.yml"),
             scaffold::gitlab_job(&args.dialect, &auth),
             false,
         )),
@@ -1393,14 +1393,14 @@ fn run_init(args: InitArgs) -> ExitCode {
         CiTarget::GitHub => {
             if oidc {
                 println!(
-                    "\nNext: create an OIDC trust policy for this workspace in the Vetro \
+                    "\nNext: create an OIDC trust policy for this workspace in the Vericto \
                      dashboard (issuer https://token.actions.githubusercontent.com, audience \
-                     'vetro', subject e.g. repo:your-org/your-repo:*). No secret needed — the \
+                     'vericto', subject e.g. repo:your-org/your-repo:*). No secret needed — the \
                      workflow mints a short-lived token per run."
                 );
             } else {
                 println!(
-                    "\nNext: add VETRO_API_KEY as a repository secret \
+                    "\nNext: add VERICTO_API_KEY as a repository secret \
                      (Settings → Secrets and variables → Actions)."
                 );
             }
@@ -1408,31 +1408,31 @@ fn run_init(args: InitArgs) -> ExitCode {
         CiTarget::GitLab => {
             if oidc {
                 println!(
-                    "\nNext:\n  1. Create an OIDC trust policy for this workspace in the Vetro \
-                     dashboard (issuer https://gitlab.com, audience 'vetro', subject e.g. \
+                    "\nNext:\n  1. Create an OIDC trust policy for this workspace in the Vericto \
+                     dashboard (issuer https://gitlab.com, audience 'vericto', subject e.g. \
                      project_path:your-group/your-project:*).\n  \
                      2. Include the job from your .gitlab-ci.yml:\n       \
-                     include:\n         - local: .vetro/gitlab-ci.yml"
+                     include:\n         - local: .vericto/gitlab-ci.yml"
                 );
             } else {
                 println!(
-                    "\nNext:\n  1. Add VETRO_API_KEY as a masked CI/CD variable \
+                    "\nNext:\n  1. Add VERICTO_API_KEY as a masked CI/CD variable \
                      (Settings → CI/CD → Variables).\n  \
                      2. Include the job from your .gitlab-ci.yml:\n       \
-                     include:\n         - local: .vetro/gitlab-ci.yml"
+                     include:\n         - local: .vericto/gitlab-ci.yml"
                 );
             }
         }
         CiTarget::Unknown => {}
     }
     if args.hook {
-        println!("\nThe pre-commit hook runs `vetro check` on staged SQL. Bypass with `git commit --no-verify`.");
+        println!("\nThe pre-commit hook runs `vericto check` on staged SQL. Bypass with `git commit --no-verify`.");
     }
     let _ = any_created;
     ExitCode::from(exit::OK)
 }
 
-/// `vetro doctor` — validate config, connectivity, auth and plan entitlement so
+/// `vericto doctor` — validate config, connectivity, auth and plan entitlement so
 /// problems surface here rather than as a cryptic failure mid-pipeline. It
 /// checks backend compatibility (`/version`) and reads the workspace config
 /// (`/ci/config`) — the latter validates auth WITHOUT spending a CLI check.
@@ -1607,7 +1607,7 @@ fn build_provenance() -> Option<api::Provenance> {
     })
 }
 
-/// Writes an append-only degraded-run record (§6.5) to `.vetro/degraded-runs.jsonl`
+/// Writes an append-only degraded-run record (§6.5) to `.vericto/degraded-runs.jsonl`
 /// when `--allow-degraded` waves through an unreachable backend, so the bypass
 /// leaves an auditable trace: reason, timestamp, the files that went unchecked,
 /// and CI provenance. Returns the path written, or `None` on any I/O error
@@ -1625,7 +1625,7 @@ fn write_degraded_record(reason: &str, files: &[String]) -> Option<String> {
         .unwrap_or(0);
     let prov = build_provenance();
     let record = serde_json::json!({
-        "kind": "vetro-degraded-run",
+        "kind": "vericto-degraded-run",
         "version": 1,
         "unix_time": ts,
         "reason": reason,
@@ -1639,7 +1639,7 @@ fn write_degraded_record(reason: &str, files: &[String]) -> Option<String> {
         })),
     });
 
-    let dir = std::path::Path::new(".vetro");
+    let dir = std::path::Path::new(".vericto");
     if std::fs::create_dir_all(dir).is_err() {
         return None;
     }
@@ -1676,7 +1676,7 @@ fn resolve_files(
 ) -> FileResolution {
     // --stdin-file-list: read file paths (one per line) from stdin. For pipelines
     // that already compute the set, e.g.
-    //   git diff --name-only --diff-filter=d $BASE...HEAD -- '*.sql' | vetro check --stdin-file-list
+    //   git diff --name-only --diff-filter=d $BASE...HEAD -- '*.sql' | vericto check --stdin-file-list
     if stdin_file_list {
         if !files.is_empty() || changed || since.is_some() {
             return FileResolution::Usage(

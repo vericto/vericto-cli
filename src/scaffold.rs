@@ -1,4 +1,4 @@
-//! `vetro init` — scaffold CI workflows and a git pre-commit hook (§10).
+//! `vericto init` — scaffold CI workflows and a git pre-commit hook (§10).
 //!
 //! Templates are generated here; the orchestration (which targets, overwrite
 //! policy) lives in `main`. Nothing is overwritten without `--force`, and a
@@ -97,39 +97,39 @@ fn set_executable(_path: &Path) -> std::io::Result<()> {
 
 // ── Templates ────────────────────────────────────────────────────────────────
 
-/// How the scaffolded CI job authenticates to Vetro.
+/// How the scaffolded CI job authenticates to Vericto.
 #[derive(Debug, Clone)]
 pub enum AuthStyle {
-    /// A static `vtro_...` key from a CI secret named `VETRO_API_KEY`.
+    /// A static `vtro_...` key from a CI secret named `VERICTO_API_KEY`.
     StaticKey,
     /// OIDC / workload-identity (§6.1): no long-lived secret, a short-lived key
     /// minted per run against `workspace_id`.
     Oidc { workspace_id: String },
 }
 
-/// GitHub Actions workflow: run `vetro check --changed` on PRs touching SQL,
+/// GitHub Actions workflow: run `vericto check --changed` on PRs touching SQL,
 /// emit SARIF, upload to Code Scanning so findings show as PR annotations.
-/// With [`AuthStyle::Oidc`] it requests an ID token (no `VETRO_API_KEY` secret).
+/// With [`AuthStyle::Oidc`] it requests an ID token (no `VERICTO_API_KEY` secret).
 pub fn github_workflow(dialect: &str, auth: &AuthStyle) -> String {
     // OIDC needs `id-token: write` and passes --oidc/--workspace instead of a key.
     let (id_token_perm, check_line, check_env) = match auth {
         AuthStyle::StaticKey => (
             "",
-            format!("vetro check --changed --dialect {dialect} --format sarif --output vetro.sarif"),
-            "\n        env:\n          VETRO_API_KEY: ${{ secrets.VETRO_API_KEY }}".to_string(),
+            format!("vericto check --changed --dialect {dialect} --format sarif --output vericto.sarif"),
+            "\n        env:\n          VERICTO_API_KEY: ${{ secrets.VERICTO_API_KEY }}".to_string(),
         ),
         AuthStyle::Oidc { workspace_id } => (
             "\n  id-token: write          # mint an OIDC token for workload-identity login (§6.1)",
             format!(
-                "vetro check --changed --dialect {dialect} --oidc --workspace {workspace_id} --format sarif --output vetro.sarif"
+                "vericto check --changed --dialect {dialect} --oidc --workspace {workspace_id} --format sarif --output vericto.sarif"
             ),
             String::new(),
         ),
     };
     format!(
-        r#"# Managed by `vetro init`. Validates SQL changed in a PR against your
-# Vetro workspace rules and surfaces findings as PR annotations (Code Scanning).
-name: Vetro SQL check
+        r#"# Managed by `vericto init`. Validates SQL changed in a PR against your
+# Vericto workspace rules and surfaces findings as PR annotations (Code Scanning).
+name: Vericto SQL check
 
 on:
   pull_request:
@@ -141,40 +141,40 @@ permissions:
   security-events: write   # required to upload SARIF to Code Scanning{id_token_perm}
 
 jobs:
-  vetro:
+  vericto:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # full history so --changed can diff the merge base
 
-      - name: Install vetro
-        run: curl -fsSL https://github.com/donkan168/vetro-cli/releases/latest/download/vetro-cli-installer.sh | sh
+      - name: Install vericto
+        run: curl -fsSL https://github.com/donkan168/vericto-cli/releases/latest/download/vericto-cli-installer.sh | sh
 
-      - name: Vetro check
+      - name: Vericto check
         run: {check_line}{check_env}
 
       - name: Upload SARIF
         if: always()   # upload even when the check fails, so annotations appear
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: vetro.sarif
+          sarif_file: vericto.sarif
 "#
     )
 }
 
-/// GitLab CI job: run `vetro check --changed` on MRs touching SQL, emit a Code
+/// GitLab CI job: run `vericto check --changed` on MRs touching SQL, emit a Code
 /// Quality report so findings show as inline MR annotations + the CQ widget.
-/// With [`AuthStyle::Oidc`] it mints an `id_tokens:` JWT (no `VETRO_API_KEY`).
+/// With [`AuthStyle::Oidc`] it mints an `id_tokens:` JWT (no `VERICTO_API_KEY`).
 pub fn gitlab_job(dialect: &str, auth: &AuthStyle) -> String {
     match auth {
         AuthStyle::StaticKey => format!(
-            r#"# Managed by `vetro init`. Validates SQL changed in a merge request against
-# your Vetro workspace rules and surfaces findings as MR annotations.
-vetro-sql-check:
-  image: ghcr.io/donkan168/vetro-cli:latest
+            r#"# Managed by `vericto init`. Validates SQL changed in a merge request against
+# your Vericto workspace rules and surfaces findings as MR annotations.
+vericto-sql-check:
+  image: ghcr.io/donkan168/vericto-cli:latest
   script:
-    - vetro check --changed --dialect {dialect} --format gitlab-codequality --output gl-code-quality.json
+    - vericto check --changed --dialect {dialect} --format gitlab-codequality --output gl-code-quality.json
   artifacts:
     reports:
       codequality: gl-code-quality.json
@@ -182,20 +182,20 @@ vetro-sql-check:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       changes:
         - "**/*.sql"
-  # Set VETRO_API_KEY as a masked CI/CD variable in project settings.
+  # Set VERICTO_API_KEY as a masked CI/CD variable in project settings.
 "#
         ),
         AuthStyle::Oidc { workspace_id } => format!(
-            r#"# Managed by `vetro init`. Validates SQL changed in a merge request against
-# your Vetro workspace rules and surfaces findings as MR annotations.
-# Uses OIDC / workload-identity (§6.1): no long-lived VETRO_API_KEY secret.
-vetro-sql-check:
-  image: ghcr.io/donkan168/vetro-cli:latest
+            r#"# Managed by `vericto init`. Validates SQL changed in a merge request against
+# your Vericto workspace rules and surfaces findings as MR annotations.
+# Uses OIDC / workload-identity (§6.1): no long-lived VERICTO_API_KEY secret.
+vericto-sql-check:
+  image: ghcr.io/donkan168/vericto-cli:latest
   id_tokens:
-    VETRO_ID_TOKEN:
-      aud: vetro          # must match the workspace's OIDC trust policy audience
+    VERICTO_ID_TOKEN:
+      aud: vericto          # must match the workspace's OIDC trust policy audience
   script:
-    - vetro check --changed --dialect {dialect} --oidc --workspace {workspace_id} --format gitlab-codequality --output gl-code-quality.json
+    - vericto check --changed --dialect {dialect} --oidc --workspace {workspace_id} --format gitlab-codequality --output gl-code-quality.json
   artifacts:
     reports:
       codequality: gl-code-quality.json
@@ -209,17 +209,17 @@ vetro-sql-check:
 }
 
 /// Git pre-commit hook: check staged `*.sql` before a commit. Non-blocking if
-/// `vetro` isn't installed (so a missing binary doesn't wedge every commit);
+/// `vericto` isn't installed (so a missing binary doesn't wedge every commit);
 /// blocks the commit when a staged file is BLOCKED.
 pub fn precommit_hook(dialect: &str) -> String {
     format!(
         r#"#!/bin/sh
-# Managed by `vetro init`. Blocks a commit if staged SQL trips a Vetro rule.
+# Managed by `vericto init`. Blocks a commit if staged SQL trips a Vericto rule.
 # Bypass once with:  git commit --no-verify
 set -e
 
-if ! command -v vetro >/dev/null 2>&1; then
-  echo "vetro not found on PATH — skipping SQL check (install: https://github.com/donkan168/vetro-cli)" >&2
+if ! command -v vericto >/dev/null 2>&1; then
+  echo "vericto not found on PATH — skipping SQL check (install: https://github.com/donkan168/vericto-cli)" >&2
   exit 0
 fi
 
@@ -227,7 +227,7 @@ staged=$(git diff --cached --name-only --diff-filter=d -- '*.sql')
 [ -z "$staged" ] && exit 0
 
 # shellcheck disable=SC2086
-echo "$staged" | xargs vetro check --dialect {dialect}
+echo "$staged" | xargs vericto check --dialect {dialect}
 "#
     )
 }
@@ -239,11 +239,11 @@ mod tests {
     #[test]
     fn github_workflow_has_key_pieces() {
         let w = github_workflow("mysql", &AuthStyle::StaticKey);
-        assert!(w.contains("name: Vetro SQL check"));
+        assert!(w.contains("name: Vericto SQL check"));
         assert!(w.contains("--dialect mysql"));
         assert!(w.contains("--format sarif"));
         assert!(w.contains("upload-sarif"));
-        assert!(w.contains("secrets.VETRO_API_KEY"));
+        assert!(w.contains("secrets.VERICTO_API_KEY"));
         assert!(!w.contains("id-token: write")); // static key needs no OIDC perm
     }
 
@@ -257,7 +257,7 @@ mod tests {
         );
         assert!(w.contains("id-token: write"));
         assert!(w.contains("--oidc --workspace ws_9"));
-        assert!(!w.contains("VETRO_API_KEY")); // no static secret in OIDC mode
+        assert!(!w.contains("VERICTO_API_KEY")); // no static secret in OIDC mode
     }
 
     #[test]
@@ -279,7 +279,7 @@ mod tests {
             },
         );
         assert!(j.contains("id_tokens:"));
-        assert!(j.contains("VETRO_ID_TOKEN"));
+        assert!(j.contains("VERICTO_ID_TOKEN"));
         assert!(j.contains("--oidc --workspace ws_9"));
     }
 
@@ -289,12 +289,12 @@ mod tests {
         assert!(h.starts_with("#!/bin/sh"));
         assert!(h.contains("--diff-filter=d"));
         assert!(h.contains("--dialect oracle"));
-        assert!(h.contains("command -v vetro")); // no-op when vetro absent
+        assert!(h.contains("command -v vericto")); // no-op when vericto absent
     }
 
     #[test]
     fn write_file_creates_skips_and_forces() {
-        let dir = std::env::temp_dir().join(format!("vetro-scaffold-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vericto-scaffold-{}", std::process::id()));
         let path = dir.join("nested/out.yml");
         // First write creates.
         match write_file(&path, "hello", false, false).unwrap() {
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn write_file_sets_executable_bit() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("vetro-scaffold-x-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vericto-scaffold-x-{}", std::process::id()));
         let path = dir.join("hook");
         write_file(&path, "#!/bin/sh\n", false, true).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();

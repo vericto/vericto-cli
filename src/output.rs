@@ -15,7 +15,7 @@ use anstyle::{AnsiColor, Style};
 use std::io::{self, Write};
 use std::path::Path;
 
-/// Output format for `vetro check`. clap renders these as kebab-case:
+/// Output format for `vericto check`. clap renders these as kebab-case:
 /// `text`, `json`, `sarif`, `gitlab-codequality`, `gitlab-sast`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
@@ -138,7 +138,7 @@ fn sarif_level(q: &QueryResult) -> &'static str {
 
 /// A one-line human message for a finding.
 fn finding_message(q: &QueryResult) -> String {
-    let rule = q.rule_code.as_deref().unwrap_or("VETRO");
+    let rule = q.rule_code.as_deref().unwrap_or("VERICTO");
     let sev = q.severity.as_deref().unwrap_or("");
     let path = q.ast_node_path.as_deref().unwrap_or("");
     let mut msg = format!("{rule} [{}]", q.status);
@@ -171,7 +171,7 @@ fn render_sarif(resp: &CheckResponse, files: &[String]) -> String {
         .filter(|q| is_finding(q))
         .map(|q| {
             serde_json::json!({
-                "ruleId": q.rule_code.clone().unwrap_or_else(|| "VETRO".to_string()),
+                "ruleId": q.rule_code.clone().unwrap_or_else(|| "VERICTO".to_string()),
                 "level": sarif_level(q),
                 "message": { "text": finding_message(q) },
                 "locations": [{
@@ -194,8 +194,8 @@ fn render_sarif(resp: &CheckResponse, files: &[String]) -> String {
         "version": "2.1.0",
         "runs": [{
             "tool": { "driver": {
-                "name": "vetro",
-                "informationUri": "https://vetro.dev",
+                "name": "vericto",
+                "informationUri": "https://vericto.com",
                 "version": env!("CARGO_PKG_VERSION"),
                 "rules": rules,
             }},
@@ -224,7 +224,7 @@ fn gitlab_cq_severity(q: &QueryResult) -> &'static str {
 /// A stable per-finding fingerprint (rule + file + ast path — NOT line number,
 /// so edits elsewhere in the file don't shift it). FNV-1a hex, dependency-free.
 /// Shared with the baseline module so a report's fingerprints match what
-/// `vetro baseline` recorded.
+/// `vericto baseline` recorded.
 pub(crate) fn fingerprint(q: &QueryResult, file: &str) -> String {
     let rule = q.rule_code.as_deref().unwrap_or("");
     let path = q.ast_node_path.as_deref().unwrap_or("");
@@ -244,7 +244,7 @@ fn render_gitlab_codequality(resp: &CheckResponse, files: &[String]) -> String {
         .filter(|q| is_finding(q))
         .map(|q| {
             let file = file_for(files, q.line);
-            let rule = q.rule_code.clone().unwrap_or_else(|| "VETRO".to_string());
+            let rule = q.rule_code.clone().unwrap_or_else(|| "VERICTO".to_string());
             serde_json::json!({
                 "description": finding_message(q),
                 "check_name": rule,
@@ -282,7 +282,7 @@ fn render_gitlab_sast(resp: &CheckResponse, files: &[String]) -> String {
         .filter(|q| is_finding(q))
         .map(|q| {
             let file = file_for(files, q.line);
-            let rule = q.rule_code.clone().unwrap_or_else(|| "VETRO".to_string());
+            let rule = q.rule_code.clone().unwrap_or_else(|| "VERICTO".to_string());
             serde_json::json!({
                 "id": fingerprint(q, &file),
                 "category": "sast",
@@ -291,7 +291,7 @@ fn render_gitlab_sast(resp: &CheckResponse, files: &[String]) -> String {
                 "severity": gitlab_sast_severity(q),
                 "location": { "file": file, "start_line": 1 },
                 "identifiers": [{
-                    "type": "vetro_rule",
+                    "type": "vericto_rule",
                     "name": rule,
                     "value": rule,
                 }],
@@ -303,10 +303,10 @@ fn render_gitlab_sast(resp: &CheckResponse, files: &[String]) -> String {
         "version": "15.0.6",
         "scan": {
             "scanner": {
-                "id": "vetro",
-                "name": "Vetro",
+                "id": "vericto",
+                "name": "Vericto",
                 "version": env!("CARGO_PKG_VERSION"),
-                "vendor": { "name": "Vetro" },
+                "vendor": { "name": "Vericto" },
             },
             "type": "sast",
             "status": "success",
@@ -445,7 +445,7 @@ mod tests {
         assert!(!is_finding(&q("ALLOWED", None, None)));
         assert!(is_finding(&q(
             "BLOCKED",
-            Some("VETRO-001"),
+            Some("VERICTO-001"),
             Some("critical")
         )));
     }
@@ -480,17 +480,17 @@ mod tests {
 
     #[test]
     fn fingerprint_is_stable_and_rule_sensitive() {
-        let a = fingerprint(&q("BLOCKED", Some("VETRO-001"), None), "m.sql");
-        let b = fingerprint(&q("BLOCKED", Some("VETRO-001"), None), "m.sql");
-        let c = fingerprint(&q("BLOCKED", Some("VETRO-010"), None), "m.sql");
+        let a = fingerprint(&q("BLOCKED", Some("VERICTO-001"), None), "m.sql");
+        let b = fingerprint(&q("BLOCKED", Some("VERICTO-001"), None), "m.sql");
+        let c = fingerprint(&q("BLOCKED", Some("VERICTO-010"), None), "m.sql");
         assert_eq!(a, b); // deterministic
         assert_ne!(a, c); // different rule → different fp
     }
 
     #[test]
     fn finding_message_includes_rule_severity_path() {
-        let m = finding_message(&q("BLOCKED", Some("VETRO-001"), Some("critical")));
-        assert!(m.contains("VETRO-001"));
+        let m = finding_message(&q("BLOCKED", Some("VERICTO-001"), Some("critical")));
+        assert!(m.contains("VERICTO-001"));
         assert!(m.contains("BLOCKED"));
         assert!(m.contains("critical"));
         assert!(m.contains("fix:"));
@@ -500,7 +500,7 @@ mod tests {
     fn render_json_roundtrips() {
         let out = render_json(&resp(vec![q(
             "BLOCKED",
-            Some("VETRO-001"),
+            Some("VERICTO-001"),
             Some("critical"),
         )]));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -513,12 +513,12 @@ mod tests {
     fn render_sarif_has_results_and_rules() {
         let files = vec!["m.sql".to_string()];
         let out = render_sarif(
-            &resp(vec![q("BLOCKED", Some("VETRO-001"), Some("critical"))]),
+            &resp(vec![q("BLOCKED", Some("VERICTO-001"), Some("critical"))]),
             &files,
         );
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["version"], "2.1.0");
-        assert_eq!(v["runs"][0]["results"][0]["ruleId"], "VETRO-001");
+        assert_eq!(v["runs"][0]["results"][0]["ruleId"], "VERICTO-001");
         assert_eq!(v["runs"][0]["results"][0]["level"], "error");
         assert_eq!(
             v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
@@ -531,9 +531,9 @@ mod tests {
     fn render_gitlab_codequality_shape() {
         let files = vec!["m.sql".to_string()];
         let out =
-            render_gitlab_codequality(&resp(vec![q("BLOCKED", Some("VETRO-001"), None)]), &files);
+            render_gitlab_codequality(&resp(vec![q("BLOCKED", Some("VERICTO-001"), None)]), &files);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v[0]["check_name"], "VETRO-001");
+        assert_eq!(v[0]["check_name"], "VERICTO-001");
         assert_eq!(v[0]["severity"], "blocker");
         assert_eq!(v[0]["location"]["path"], "m.sql");
         assert!(v[0]["fingerprint"].as_str().unwrap().len() == 16);
@@ -542,9 +542,9 @@ mod tests {
     #[test]
     fn render_gitlab_sast_shape() {
         let files = vec!["m.sql".to_string()];
-        let out = render_gitlab_sast(&resp(vec![q("BLOCKED", Some("VETRO-001"), None)]), &files);
+        let out = render_gitlab_sast(&resp(vec![q("BLOCKED", Some("VERICTO-001"), None)]), &files);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["scan"]["scanner"]["id"], "vetro");
+        assert_eq!(v["scan"]["scanner"]["id"], "vericto");
         assert_eq!(v["vulnerabilities"][0]["severity"], "Critical");
         assert_eq!(v["vulnerabilities"][0]["location"]["file"], "m.sql");
     }
@@ -553,31 +553,31 @@ mod tests {
     fn render_text_plain_lists_findings_and_summary() {
         let files = vec!["m.sql".to_string()];
         let out = render_text_plain(
-            &resp(vec![q("BLOCKED", Some("VETRO-001"), Some("critical"))]),
+            &resp(vec![q("BLOCKED", Some("VERICTO-001"), Some("critical"))]),
             &files,
             false,
         );
         assert!(out.contains("m.sql"));
-        assert!(out.contains("VETRO-001"));
+        assert!(out.contains("VERICTO-001"));
         assert!(out.contains("blocked"));
         // quiet mode: only the summary line, no per-finding lines.
         let quiet = render_text_plain(
-            &resp(vec![q("BLOCKED", Some("VETRO-001"), None)]),
+            &resp(vec![q("BLOCKED", Some("VERICTO-001"), None)]),
             &files,
             true,
         );
-        assert!(!quiet.contains("VETRO-001"));
+        assert!(!quiet.contains("VERICTO-001"));
         assert!(quiet.contains("blocked"));
     }
 
     #[test]
     fn render_to_file_writes_json() {
         let files = vec!["m.sql".to_string()];
-        let dir = std::env::temp_dir().join(format!("vetro-out-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vericto-out-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("r.json");
         render(
-            &resp(vec![q("BLOCKED", Some("VETRO-001"), None)]),
+            &resp(vec![q("BLOCKED", Some("VERICTO-001"), None)]),
             Format::Json,
             &files,
             false,
