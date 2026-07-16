@@ -2,10 +2,10 @@
 //!
 //! The CLI resolves settings from several sources, first match wins (DESIGN §6):
 //!   1. command-line flags
-//!   2. environment (`VETRO_API_KEY`, `VETRO_API_URL`)
-//!   3. project config `.vetro.toml` at the repo root — behavior defaults only,
+//!   2. environment (`VERICTO_API_KEY`, `VERICTO_API_URL`)
+//!   3. project config `.vericto.toml` at the repo root — behavior defaults only,
 //!      never credentials (§6.3, `ProjectConfig`)
-//!   4. user config file `~/.config/vetro/config.toml` (written by `vetro login`)
+//!   4. user config file `~/.config/vericto/config.toml` (written by `vericto login`)
 //!
 //! The config file holds the API key, so it is written with `0600` permissions
 //! and never logged.
@@ -15,11 +15,11 @@ use std::io;
 use std::path::PathBuf;
 
 /// The default backend when nothing overrides it.
-pub const DEFAULT_API_URL: &str = "https://api.vetro.dev";
+pub const DEFAULT_API_URL: &str = "https://api.vericto.com";
 
 /// The default OIDC audience requested in the ID token when none is configured
 /// (§6.1). Trust policies are created against this by convention.
-pub const DEFAULT_OIDC_AUDIENCE: &str = "vetro";
+pub const DEFAULT_OIDC_AUDIENCE: &str = "vericto";
 
 /// On-disk config. Every field is optional so a partial file still parses.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -32,7 +32,7 @@ pub struct Config {
     pub default_dialect: Option<String>,
     /// Workspace to authenticate against when using OIDC/workload-identity login
     /// (§6.1). Not a secret — it only identifies the tenant whose trust policy
-    /// authorizes the exchange. Written by `vetro login --oidc --workspace <id>`.
+    /// authorizes the exchange. Written by `vericto login --oidc --workspace <id>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     /// OIDC audience to request in the ID token (must match a trust policy). Not
@@ -41,8 +41,8 @@ pub struct Config {
     pub oidc_audience: Option<String>,
 }
 
-/// Returns the config file path (DESIGN §6): `$XDG_CONFIG_HOME/vetro/config.toml`
-/// when the env var is set, otherwise `~/.config/vetro/config.toml`. We follow
+/// Returns the config file path (DESIGN §6): `$XDG_CONFIG_HOME/vericto/config.toml`
+/// when the env var is set, otherwise `~/.config/vericto/config.toml`. We follow
 /// the XDG convention on every Unix (including macOS) so the path is predictable
 /// and overridable in tests/CI, rather than `dirs`' platform-specific default
 /// (`~/Library/Application Support` on macOS). None if no home is resolvable.
@@ -58,7 +58,7 @@ pub fn config_path() -> Option<PathBuf> {
     } else {
         dirs::config_dir()?
     };
-    Some(base.join("vetro").join("config.toml"))
+    Some(base.join("vericto").join("config.toml"))
 }
 
 impl Config {
@@ -121,7 +121,7 @@ fn write_private(path: &std::path::Path, contents: &str) -> io::Result<()> {
     }
 }
 
-/// Project-level config from `.vetro.toml` at the repo root (§6.3). Committed
+/// Project-level config from `.vericto.toml` at the repo root (§6.3). Committed
 /// and PR-reviewable, so it holds *defaults for behavior* — never credentials.
 /// Flags and env still override these.
 #[derive(Debug, Default, Deserialize)]
@@ -153,30 +153,30 @@ pub struct ProjectConfig {
     pub allow_degraded: Option<toml::Value>,
 }
 
-/// Loads `.vetro.toml` from the current directory (repo root). Missing file →
+/// Loads `.vericto.toml` from the current directory (repo root). Missing file →
 /// default. A file that carries `api_key` or `allow_degraded` is rejected: those
 /// are a secret and a per-run safety decision respectively, neither of which
 /// belongs in a committed, PR-reviewable file (§6.3).
 pub fn load_project() -> io::Result<ProjectConfig> {
-    let path = std::path::Path::new(".vetro.toml");
+    let path = std::path::Path::new(".vericto.toml");
     match std::fs::read_to_string(path) {
         Ok(text) => {
             let cfg: ProjectConfig = toml::from_str(&text).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("invalid .vetro.toml: {e}"),
+                    format!("invalid .vericto.toml: {e}"),
                 )
             })?;
             if cfg.api_key.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    ".vetro.toml must not contain api_key — use `vetro login`, VETRO_API_KEY, or --api-key.",
+                    ".vericto.toml must not contain api_key — use `vericto login`, VERICTO_API_KEY, or --api-key.",
                 ));
             }
             if cfg.allow_degraded.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    ".vetro.toml must not set allow_degraded — pass --allow-degraded per run so the bypass is visible in the pipeline.",
+                    ".vericto.toml must not set allow_degraded — pass --allow-degraded per run so the bypass is visible in the pipeline.",
                 ));
             }
             Ok(cfg)
@@ -207,7 +207,7 @@ impl KeySource {
     pub fn label(self) -> &'static str {
         match self {
             KeySource::Flag => "--api-key flag",
-            KeySource::Env => "VETRO_API_KEY env",
+            KeySource::Env => "VERICTO_API_KEY env",
             KeySource::ConfigFile => "config file",
             KeySource::None => "none",
         }
@@ -235,7 +235,7 @@ pub fn resolve(
 
     // api_key: flag/env (clap already merged them) beats the file.
     let (api_key, key_source) = if let Some(k) = flag_api_key {
-        let src = if std::env::var_os("VETRO_API_KEY").is_some() {
+        let src = if std::env::var_os("VERICTO_API_KEY").is_some() {
             KeySource::Env
         } else {
             KeySource::Flag
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn key_source_labels() {
         assert_eq!(KeySource::Flag.label(), "--api-key flag");
-        assert_eq!(KeySource::Env.label(), "VETRO_API_KEY env");
+        assert_eq!(KeySource::Env.label(), "VERICTO_API_KEY env");
         assert_eq!(KeySource::ConfigFile.label(), "config file");
         assert_eq!(KeySource::None.label(), "none");
     }
@@ -289,7 +289,7 @@ mod tests {
             api_key: Some("vtro_from_file".into()),
             ..Default::default()
         };
-        // Flag/env value beats the file. (No VETRO_API_KEY set in this test env
+        // Flag/env value beats the file. (No VERICTO_API_KEY set in this test env
         // → source is Flag.)
         let r = resolve(DEFAULT_API_URL, true, Some("vtro_flag"), &file);
         assert_eq!(r.api_key.as_deref(), Some("vtro_flag"));
@@ -310,7 +310,7 @@ mod tests {
         let prev = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-test");
         let p = config_path().unwrap();
-        assert!(p.ends_with("vetro/config.toml"));
+        assert!(p.ends_with("vericto/config.toml"));
         assert!(p.starts_with("/tmp/xdg-test"));
         match prev {
             Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),

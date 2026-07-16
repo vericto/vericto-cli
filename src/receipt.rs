@@ -1,7 +1,7 @@
 //! Offline verification of signed run receipts (§7.1).
 //!
 //! A receipt is self-contained evidence that a check ran, verifiable without a
-//! network call or a Vetro account — the property that makes it durable audit
+//! network call or a Vericto account — the property that makes it durable audit
 //! evidence independent of dashboard retention. The backend signs the receipt's
 //! `payload` with Ed25519 over the SHA-256 digest of its **canonical JSON**
 //! (recursively sorted object keys, compact) — scheme `ed25519-sha256`
@@ -149,7 +149,7 @@ mod tests {
     fn sample_payload() -> serde_json::Value {
         serde_json::json!({
             "version": 1,
-            "kind": "vetro-ci-receipt",
+            "kind": "vericto-ci-receipt",
             "workspace_id": "ws_1",
             "exit_code": 1,
             "summary": { "total": 2, "blocked": 1, "allowed": 1 },
@@ -166,7 +166,7 @@ mod tests {
         let c = canonicalize(&sample_payload());
         // Top-level keys sorted: dialect < exit_code < file_name < kind < ...
         assert!(c.starts_with(
-            r#"{"dialect":"postgres","exit_code":1,"file_name":"m.sql","kind":"vetro-ci-receipt""#
+            r#"{"dialect":"postgres","exit_code":1,"file_name":"m.sql","kind":"vericto-ci-receipt""#
         ));
         // Nested object sorted too: allowed < blocked < total.
         assert!(c.contains(r#""summary":{"allowed":1,"blocked":1,"total":2}"#));

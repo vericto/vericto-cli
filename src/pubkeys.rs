@@ -1,6 +1,6 @@
-//! Bundled Vetro public keys for offline receipt verification (§7.1).
+//! Bundled Vericto public keys for offline receipt verification (§7.1).
 //!
-//! Receipts are signed by a backend private key; `vetro verify-receipt` checks
+//! Receipts are signed by a backend private key; `vericto verify-receipt` checks
 //! them against the matching **public** key, which is safe to ship inside the
 //! binary. Keys are keyed by the `public_key_id` a receipt carries, so more than
 //! one can be bundled at once — this is what lets verification survive a key
@@ -14,14 +14,14 @@
 //! `GET /api/v1/meta/export-signing-key`). Populate [`BUNDLED_KEYS`] with the
 //! published PEM(s) to make verification work with zero flags.
 
-/// (key_id, PEM) pairs trusted for verification. Add the official Vetro key(s)
+/// (key_id, PEM) pairs trusted for verification. Add the official Vericto key(s)
 /// here — each entry is a `-----BEGIN PUBLIC KEY-----` PEM string. Multiple
 /// entries coexist so a rotation doesn't invalidate older receipts.
 ///
 /// Example once published:
 /// ```ignore
 /// pub const BUNDLED_KEYS: &[(&str, &str)] = &[
-///     ("2026-ed25519", include_str!("../keys/vetro-2026-ed25519.pem")),
+///     ("2026-ed25519", include_str!("../keys/vericto-2026-ed25519.pem")),
 /// ];
 /// ```
 pub const BUNDLED_KEYS: &[(&str, &str)] = &[

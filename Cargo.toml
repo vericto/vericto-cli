@@ -1,21 +1,21 @@
 [package]
-name = "vetro-cli"
-version = "0.1.0"
+name = "vericto-cli"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.88"
-description = "Vetro CLI — validate SQL against your workspace's security rules before it runs"
+description = "Vericto CLI — validate SQL against your workspace's security rules before it runs"
 license = "Elastic-2.0"
-repository = "https://github.com/donkan168/vetro-cli"
+repository = "https://github.com/donkan168/vericto-cli"
 
-# The installed command is `vetro`, not `vetro-cli`.
+# The installed command is `vericto`, not `vericto-cli`.
 [[bin]]
-name = "vetro"
+name = "vericto"
 path = "src/main.rs"
 
 [dependencies]
 # CLI parsing with derive.
 clap = { version = "4.5", features = ["derive", "env"] }
-# Shell completion script generation (`vetro completions <shell>`).
+# Shell completion script generation (`vericto completions <shell>`).
 clap_complete = "4.5"
 # HTTP client (rustls to avoid a system OpenSSL dependency in CI images).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -25,7 +25,7 @@ serde_json = "1"
 # Colored human output; honors NO_COLOR automatically.
 anstream = "0.6"
 anstyle = "1"
-# Config file (~/.config/vetro/config.toml) parsing + serialization.
+# Config file (~/.config/vericto/config.toml) parsing + serialization.
 toml = "0.8"
 # Cross-platform config directory resolution.
 dirs = "5"

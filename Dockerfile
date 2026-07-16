@@ -1,12 +1,12 @@
-# Thin container image for the `vetro` CLI (§9, Phase 1).
+# Thin container image for the `vericto` CLI (§9, Phase 1).
 #
 # Two stages: build a fully static musl binary, then drop it into a distroless
 # "static" base. The result is a tiny image with no shell and no package manager
 # — just the binary and CA certificates. rustls (see Cargo.toml) means there is
 # no system OpenSSL dependency, so `FROM scratch`-class bases work.
 #
-# Build:  docker build -t ghcr.io/donkan168/vetro-cli:latest .
-# Run:    docker run --rm -e VETRO_API_KEY ghcr.io/donkan168/vetro-cli:latest \
+# Build:  docker build -t ghcr.io/donkan168/vericto-cli:latest .
+# Run:    docker run --rm -e VERICTO_API_KEY ghcr.io/donkan168/vericto-cli:latest \
 #             check migrations/*.sql
 #
 # The release pipeline (cargo-dist) publishes the prebuilt binaries; this image
@@ -30,12 +30,12 @@ COPY src ./src
 
 # Build the release binary (LTO etc. from [profile.release]).
 RUN cargo build --release --locked \
-    && cp target/release/vetro /vetro
+    && cp target/release/vericto /vericto
 
 # ── Runtime stage: distroless static ────────────────────────────────────────
 # `static` includes CA certificates + tzdata but no shell/libc — minimal attack
 # surface for a binary that runs inside CI holding credentials (§6.1).
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /vetro /usr/local/bin/vetro
+COPY --from=build /vericto /usr/local/bin/vericto
 # So `docker run <image> check ...` works without repeating the binary name.
-ENTRYPOINT ["/usr/local/bin/vetro"]
+ENTRYPOINT ["/usr/local/bin/vericto"]
