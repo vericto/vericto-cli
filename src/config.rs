@@ -17,6 +17,13 @@ use std::path::PathBuf;
 /// The default backend when nothing overrides it.
 pub const DEFAULT_API_URL: &str = "https://api.vericto.com";
 
+/// The default dashboard origin `vericto login`'s browser flow opens (§6,
+/// "verified login") — distinct from `DEFAULT_API_URL`: the dashboard's own
+/// public origin, which reverse-proxies to the Next.js app, vs. the API's.
+/// Not persisted to the config file — only `login` itself needs it, to know
+/// where to point the browser; every other command talks to `api_url`.
+pub const DEFAULT_APP_URL: &str = "https://vericto.com";
+
 /// The default OIDC audience requested in the ID token when none is configured
 /// (§6.1). Trust policies are created against this by convention.
 pub const DEFAULT_OIDC_AUDIENCE: &str = "vericto";

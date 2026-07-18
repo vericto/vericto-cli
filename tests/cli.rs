@@ -64,6 +64,134 @@ async fn mock_backend(check: serde_json::Value, mode: &str) -> MockServer {
     server
 }
 
+// ── vericto login (browser flow) ─────────────────────────────────────────────
+
+/// Runs `vericto login` with no `--api-key`/`--oidc` (the browser flow),
+/// simulates the browser's callback by hitting the CLI's own loopback server
+/// directly (bypassing the actual dashboard page — that's covered by the
+/// backend's own tests), and returns the finished process's exit status.
+///
+/// This drives the real process end-to-end: spawns it, scrapes the printed
+/// `.../cli-auth?state=...&port=...` URL from stdout for `state`/`port`, then
+/// makes a plain HTTP GET to `http://127.0.0.1:<port>/callback?...` — exactly
+/// what the dashboard's top-level navigation does — with a fixed `code` that
+/// the mocked `/cli-login/exchange` endpoint is set up to accept.
+async fn run_browser_login(
+    api_url: &str,
+    code: &str,
+    config_dir: &std::path::Path,
+) -> std::process::ExitStatus {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let bin = assert_cmd::cargo::cargo_bin("vericto");
+    let mut child = Command::new(bin)
+        .args([
+            "login",
+            "--api-url",
+            api_url,
+            // Any unreachable app_url is fine — open_browser fails silently
+            // (a printed note, not fatal) and the URL is printed either way.
+            "--app-url",
+            "http://127.0.0.1:1",
+        ])
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn vericto login");
+
+    // Scrape the printed login URL for `state` and `port`.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut state = String::new();
+    let mut port: u16 = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).unwrap_or(0);
+        if n == 0 {
+            break; // EOF without finding the URL — caller's assertions will fail loudly.
+        }
+        if let Some(idx) = line.find("state=") {
+            let after = &line[idx + "state=".len()..];
+            state = after.split('&').next().unwrap_or("").trim().to_string();
+            let port_idx = line.find("port=").expect("URL missing port=");
+            let after_port = &line[port_idx + "port=".len()..];
+            port = after_port
+                .trim()
+                .trim_end_matches(char::is_whitespace)
+                .parse()
+                .expect("port should be numeric");
+            break;
+        }
+    }
+    assert!(
+        !state.is_empty() && port != 0,
+        "did not find the login URL in stdout"
+    );
+
+    // Simulate the dashboard's top-level navigation back to the CLI.
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))
+        .expect("could not connect to the CLI's loopback server");
+    use std::io::Write as _;
+    write!(
+        stream,
+        "GET /callback?state={state}&code={code} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+    )
+    .unwrap();
+    let mut discard = [0u8; 1024];
+    let _ = std::io::Read::read(&mut stream, &mut discard);
+
+    child.wait().expect("child process failed to run")
+}
+
+#[tokio::test]
+async fn browser_login_saves_the_exchanged_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/cli-login/exchange"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "api_key": "vtro_from_browser_e2e"
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let status = run_browser_login(&server.uri(), "the-exchange-code", dir.path()).await;
+    assert!(
+        status.success(),
+        "vericto login should exit 0, got {status}"
+    );
+
+    let cfg_path = dir.path().join("vericto/config.toml");
+    let cfg = std::fs::read_to_string(&cfg_path).expect("config file should exist");
+    assert!(cfg.contains("vtro_from_browser_e2e"));
+}
+
+#[tokio::test]
+async fn browser_login_rejected_code_does_not_save() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/cli-login/exchange"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": { "message": "Código de autenticación inválido, expirado o ya utilizado." }
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let status = run_browser_login(&server.uri(), "a-stale-code", dir.path()).await;
+    assert_eq!(status.code(), Some(3)); // exit::AUTH — see DESIGN §8
+
+    let cfg_path = dir.path().join("vericto/config.toml");
+    assert!(
+        !cfg_path.exists(),
+        "no config should be written for a rejected exchange"
+    );
+}
+
 fn vericto() -> Command {
     let mut c = Command::cargo_bin("vericto").unwrap();
     // Keep the ambient environment from leaking into the run (e.g. SSL_CERT_FILE
@@ -273,8 +401,19 @@ async fn allow_degraded_exits_0_when_unreachable() {
         .code(0);
 }
 
-#[test]
-fn login_logout_roundtrip() {
+#[tokio::test]
+async fn login_logout_roundtrip() {
+    // `login --api-key` now verifies against the backend before saving
+    // (fail-closed — see login_with_key_unreachable_backend_does_not_save
+    // below for the negative case), so the roundtrip needs a mock that
+    // answers GET /api/v1/ci/config.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(config_body("raw")))
+        .mount(&server)
+        .await;
+
     let dir = tempfile::tempdir().unwrap();
     // Isolate the config dir via XDG_CONFIG_HOME.
     vericto()
@@ -283,7 +422,7 @@ fn login_logout_roundtrip() {
             "--api-key",
             "vtro_stored",
             "--api-url",
-            "https://x",
+            &server.uri(),
         ])
         .env("XDG_CONFIG_HOME", dir.path())
         .assert()
@@ -302,6 +441,58 @@ fn login_logout_roundtrip() {
     assert!(!std::fs::read_to_string(&cfg)
         .unwrap()
         .contains("vtro_stored"));
+}
+
+#[tokio::test]
+async fn login_with_key_unreachable_backend_does_not_save() {
+    // Fail-closed: if the key can't be verified (backend unreachable here),
+    // nothing is written and the command exits non-zero — never a silent
+    // "trust it anyway".
+    let dir = tempfile::tempdir().unwrap();
+    vericto()
+        .args([
+            "login",
+            "--api-key",
+            "vtro_unverified",
+            "--api-url",
+            "http://127.0.0.1:1",
+            "--timeout",
+            "1",
+        ])
+        .env("XDG_CONFIG_HOME", dir.path())
+        .assert()
+        .code(4);
+    let cfg = dir.path().join("vericto/config.toml");
+    assert!(
+        !cfg.exists(),
+        "no config file should be written on a failed verification"
+    );
+}
+
+#[tokio::test]
+async fn login_with_key_invalid_key_does_not_save() {
+    // A key the backend explicitly rejects (401) must not be saved either —
+    // distinct exit code (3, auth) from an unreachable backend (4).
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": { "message": "API key inválida." }
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    vericto()
+        .args(["login", "--api-key", "vtro_bad", "--api-url", &server.uri()])
+        .env("XDG_CONFIG_HOME", dir.path())
+        .assert()
+        .code(3);
+    let cfg = dir.path().join("vericto/config.toml");
+    assert!(
+        !cfg.exists(),
+        "no config file should be written for a rejected key"
+    );
 }
 
 /// Mounts an oidc-exchange endpoint that mints a key, plus config + check-key.
@@ -706,4 +897,373 @@ fn init_oidc_without_workspace_exits_2() {
         .current_dir(dir.path())
         .assert()
         .code(2);
+}
+
+// ── vericto rules list / show ────────────────────────────────────────────────
+
+fn rules_list_body() -> serde_json::Value {
+    serde_json::json!({
+        "rules": [
+            {
+                "code": "VERICTO-001",
+                "name": "DELETE without WHERE",
+                "description": "Blocks DELETE with no WHERE clause",
+                "severity": "critical",
+                "dialect": "all",
+                "rule_type": "standard",
+                "is_active": true,
+                "resolved_action": "block"
+            },
+            {
+                "code": "CUSTOM-001",
+                "name": "No UPDATE on payments",
+                "description": null,
+                "severity": "high",
+                "dialect": "postgres",
+                "rule_type": "custom",
+                "is_active": false,
+                "resolved_action": "flag"
+            }
+        ],
+        "ruleset_version": "v1.0.0-20260711"
+    })
+}
+
+fn rule_detail_body() -> serde_json::Value {
+    serde_json::json!({
+        "code": "VERICTO-001",
+        "name": "DELETE without WHERE",
+        "description": "Blocks DELETE with no WHERE clause",
+        "severity": "critical",
+        "dialect": "all",
+        "rule_type": "standard",
+        "is_active": true,
+        "resolved_action": "block",
+        "ast_condition_yaml": "node_type: DeleteStmt\nwhere_null: true",
+        "ruleset_version": "v1.0.0-20260711"
+    })
+}
+
+#[tokio::test]
+async fn rules_list_text_shows_all_codes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/rules"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(rules_list_body()))
+        .mount(&server)
+        .await;
+
+    let out = vericto()
+        .args(["rules", "list"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("VERICTO-001"), "output: {s}");
+    assert!(s.contains("CUSTOM-001"), "output: {s}");
+    assert!(s.contains("2 rules"), "output: {s}");
+}
+
+#[tokio::test]
+async fn rules_list_active_only_filters_inactive() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/rules"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(rules_list_body()))
+        .mount(&server)
+        .await;
+
+    let out = vericto()
+        .args(["rules", "list", "--active-only"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("VERICTO-001"), "output: {s}");
+    assert!(!s.contains("CUSTOM-001"), "output: {s}"); // inactive, filtered out
+}
+
+#[tokio::test]
+async fn rules_list_json_matches_backend_shape() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/rules"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(rules_list_body()))
+        .mount(&server)
+        .await;
+
+    let out = vericto()
+        .args(["rules", "list", "--format", "json"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["rules"].as_array().unwrap().len(), 2);
+    assert_eq!(v["ruleset_version"], "v1.0.0-20260711");
+}
+
+#[tokio::test]
+async fn rules_show_text_includes_condition() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/rules/VERICTO-001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(rule_detail_body()))
+        .mount(&server)
+        .await;
+
+    let out = vericto()
+        .args(["rules", "show", "VERICTO-001"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("VERICTO-001"), "output: {s}");
+    assert!(s.contains("DeleteStmt"), "output: {s}");
+}
+
+#[tokio::test]
+async fn rules_show_unknown_code_exits_2() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/rules/VERICTO-999"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": { "message": "Regla no encontrada: VERICTO-999" }
+        })))
+        .mount(&server)
+        .await;
+
+    vericto()
+        .args(["rules", "show", "VERICTO-999"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(2);
+}
+
+#[tokio::test]
+async fn rules_list_missing_api_key_exits_3() {
+    vericto()
+        .args(["rules", "list"])
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .code(3);
+}
+
+#[tokio::test]
+async fn rules_list_auth_error_exits_3() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/rules"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": { "message": "API key inválida." }
+        })))
+        .mount(&server)
+        .await;
+
+    vericto()
+        .args(["rules", "list"])
+        .env("VERICTO_API_KEY", "vtro_bad")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(3);
+}
+
+// ── vericto baseline prune ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn baseline_prune_removes_fixed_findings() {
+    let server_before = mock_backend(check_body(&["BLOCKED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(&sql, "DELETE FROM users;").unwrap();
+    let bl = dir.path().join("baseline.json");
+
+    // Record a baseline while the file is still unsafe.
+    vericto()
+        .args([
+            "baseline",
+            sql.to_str().unwrap(),
+            "--out",
+            bl.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server_before.uri())
+        .assert()
+        .code(0);
+    let before: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&bl).unwrap()).unwrap();
+    assert_eq!(before["entries"].as_array().unwrap().len(), 1);
+
+    // The file is now fixed — a fresh mock server reports it ALLOWED.
+    let server_after = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let out = vericto()
+        .args([
+            "baseline",
+            "prune",
+            sql.to_str().unwrap(),
+            "--file",
+            bl.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server_after.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("Pruned 1 stale entry"), "output: {s}");
+
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&bl).unwrap()).unwrap();
+    assert_eq!(after["entries"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn baseline_prune_dry_run_does_not_modify_file() {
+    let server_before = mock_backend(check_body(&["BLOCKED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(&sql, "DELETE FROM users;").unwrap();
+    let bl = dir.path().join("baseline.json");
+
+    vericto()
+        .args([
+            "baseline",
+            sql.to_str().unwrap(),
+            "--out",
+            bl.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server_before.uri())
+        .assert()
+        .code(0);
+    let before_text = std::fs::read_to_string(&bl).unwrap();
+
+    let server_after = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let out = vericto()
+        .args([
+            "baseline",
+            "prune",
+            sql.to_str().unwrap(),
+            "--file",
+            bl.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server_after.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("Would prune 1 of 1"), "output: {s}");
+
+    // --dry-run must not touch the file on disk.
+    assert_eq!(std::fs::read_to_string(&bl).unwrap(), before_text);
+}
+
+#[tokio::test]
+async fn baseline_prune_no_stale_entries_is_a_noop() {
+    let server = mock_backend(check_body(&["BLOCKED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(&sql, "DELETE FROM users;").unwrap();
+    let bl = dir.path().join("baseline.json");
+
+    vericto()
+        .args([
+            "baseline",
+            sql.to_str().unwrap(),
+            "--out",
+            bl.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0);
+
+    // The same finding is still there — nothing to prune.
+    let out = vericto()
+        .args([
+            "baseline",
+            "prune",
+            sql.to_str().unwrap(),
+            "--file",
+            bl.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("up to date"), "output: {s}");
+}
+
+#[tokio::test]
+async fn baseline_prune_missing_file_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(&sql, "SELECT 1;").unwrap();
+
+    vericto()
+        .args([
+            "baseline",
+            "prune",
+            sql.to_str().unwrap(),
+            "--file",
+            dir.path().join("nope.json").to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .code(2);
+}
+
+#[tokio::test]
+async fn baseline_prune_empty_baseline_is_a_noop_without_network() {
+    // An empty baseline short-circuits before any auth/network call — passing a
+    // dead backend URL proves it never tries to reach it.
+    let dir = tempfile::tempdir().unwrap();
+    let bl = dir.path().join("baseline.json");
+    std::fs::write(&bl, r#"{"version":1,"entries":[]}"#).unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(&sql, "SELECT 1;").unwrap();
+
+    let out = vericto()
+        .args([
+            "baseline",
+            "prune",
+            sql.to_str().unwrap(),
+            "--file",
+            bl.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("nothing to prune"), "output: {s}");
 }

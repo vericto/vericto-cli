@@ -86,7 +86,10 @@ cargo-dist's `publish-jobs = ["npm"]`) so tags publish the package directly.
 ```
 vericto check [files...]   Evaluate SQL files (or '-' for stdin). The core command.
 vericto baseline [files]   Record current findings to .vericto-baseline.json.
-vericto login              Store an API key (and optional URL/dialect) in config.
+vericto baseline prune     Remove baseline entries that no longer match any finding.
+vericto rules list         List the workspace's effective rule catalogue.
+vericto rules show <CODE>  Show one rule's detail (e.g. VERICTO-001), incl. its AST condition.
+vericto login              Log in via your browser (default), or --api-key/--oidc for CI.
 vericto logout             Remove the stored API key.
 vericto doctor             Verify config, connectivity, auth, and plan quota.
 vericto init               Scaffold a CI workflow (+ pre-commit hook with --hook).
@@ -113,12 +116,43 @@ vericto baseline migrations/*.sql          # writes .vericto-baseline.json
 vericto check migrations/*.sql --baseline .vericto-baseline.json
 ```
 
+Over time, some baselined findings get fixed — `check --baseline` already
+notices this ("N baseline entr(y/ies) no longer match") but leaves the file
+alone. Clean it up with `vericto baseline prune`, which re-runs the same check
+and drops entries that no longer match anything:
+
+```bash
+vericto baseline prune migrations/*.sql --file .vericto-baseline.json
+vericto baseline prune migrations/*.sql --dry-run   # preview, no write
+```
+
+Pass the same file set the baseline was originally recorded against — pruning
+against a smaller set would drop entries for files that simply weren't
+re-checked, not ones that were actually fixed.
+
 Suppress a single finding inline (a **reason is required**, so it stays
 accountable):
 
 ```sql
 DELETE FROM users; -- vericto:ignore[VERICTO-001] one-off backfill, tracked in JIRA-42
 ```
+
+## Inspecting rules (`vericto rules`)
+
+See what a `check` run is actually scored against, without opening the
+dashboard — useful when a CI failure only shows a rule code and you want the
+full picture (name, severity, resolved action, AST condition):
+
+```bash
+vericto rules list                 # every active + inactive rule in the workspace
+vericto rules list --active-only   # skip disabled rules
+vericto rules show VERICTO-001     # full detail, including the AST condition
+vericto rules list --format json   # machine-readable, for scripting
+```
+
+Both are read-only and use the same `ci_dryrun:execute`-scoped API key as
+`check` — no extra scope or setup needed. Neither spends the monthly CLI
+check allowance.
 
 ## Project config (`.vericto.toml`)
 
@@ -133,6 +167,31 @@ baseline = ".vericto-baseline.json"
 ```
 
 Resolution order (first wins): flags → env → `.vericto.toml` → `~/.config/vericto/config.toml`.
+
+## Browser login (default, for a developer at a keyboard)
+
+`vericto login` with no flags opens your browser instead of asking you to paste
+a key by hand — the same "verified login" pattern `gcloud`/`aws sso`/`gh` use:
+
+```bash
+vericto login
+```
+
+1. The CLI starts a local server on `127.0.0.1` and opens
+   `https://vericto.com/cli-auth?state=...&port=...` in your default browser.
+2. You're already signed in to the dashboard (or it prompts you to sign in and
+   comes right back here) — pick the workspace you want the CLI to use and
+   click **Authorize CLI**.
+3. The dashboard mints a **30-day**, `ci_dryrun:execute`-scoped key and hands
+   your browser a one-time code — never the key itself — which it passes back
+   to the CLI's local server.
+4. The CLI exchanges that code for the actual key server-to-server and saves
+   it. The browser tab tells you it's done; the terminal picks up right after.
+
+Nothing is typed or pasted. Revoke the key anytime from the dashboard's
+Settings → API Keys (it's named "CLI (browser login)"), same as any other key.
+This requires a browser on the same machine as the CLI — for a remote/headless
+session, use `--api-key` (below) or `--oidc` (CI, see next section).
 
 ## CI login without a long-lived key (OIDC)
 
@@ -216,11 +275,20 @@ vericto init --target gitlab --dialect mysql
 ## Getting started
 
 ```bash
-# One-time: store your key (prompts if --api-key is omitted)
-vericto login --api-key vtro_...
+# One-time: opens your browser, mints a scoped key for the workspace you pick
+vericto login
 
 # Confirm everything works (reachability, auth, remaining quota)
 vericto doctor
+```
+
+For scripts, headless boxes, or CI providers without OIDC support (§ below),
+skip the browser and provide a key directly — it's verified against the
+backend before anything is saved (a bad/revoked/wrong-scope key is rejected
+here, not on the first `check` run mid-pipeline):
+
+```bash
+vericto login --api-key vtro_...
 ```
 
 ## Usage

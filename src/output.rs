@@ -10,7 +10,7 @@
 //! whole as one item, so an annotation points at the file (line 1) with the
 //! rule's AST node path in the message.
 
-use crate::api::{CheckResponse, QueryResult};
+use crate::api::{CheckResponse, QueryResult, RuleDetail, RuleSummary};
 use anstyle::{AnsiColor, Style};
 use std::io::{self, Write};
 use std::path::Path;
@@ -393,6 +393,82 @@ fn status_style(status: &str) -> (&'static str, Style) {
     }
 }
 
+// ── rules list / show (text) ─────────────────────────────────────────────────
+
+/// A short marker + color for a severity, mirroring `status_style`'s scheme so
+/// `rules list`/`show` visually match `check`'s output.
+fn severity_style(severity: &str) -> Style {
+    match severity {
+        "critical" => Style::new().fg_color(Some(AnsiColor::Red.into())).bold(),
+        "high" => Style::new().fg_color(Some(AnsiColor::Red.into())),
+        "medium" => Style::new().fg_color(Some(AnsiColor::Yellow.into())),
+        "low" => Style::new().fg_color(Some(AnsiColor::Blue.into())),
+        _ => Style::new().dimmed(), // informational / unknown
+    }
+}
+
+/// `vericto rules list` (text format): one line per rule, widest-first columns
+/// so the table stays readable whether or not a terminal supports color.
+pub fn render_rules_list(rules: &[&RuleSummary], ruleset_version: &str) {
+    let mut out = anstream::stdout();
+    if rules.is_empty() {
+        let _ = writeln!(out, "No rules found.");
+        return;
+    }
+    let code_w = rules.iter().map(|r| r.code.len()).max().unwrap_or(4).max(4);
+    let sev_w = rules
+        .iter()
+        .map(|r| r.severity.len())
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    for r in rules {
+        let style = severity_style(&r.severity);
+        let active = if r.is_active { "active" } else { "inactive" };
+        let _ = writeln!(
+            out,
+            "{:<code_w$}  {style}{:<sev_w$}{style:#}  {:<7}  {:<8}  {}",
+            r.code, r.severity, r.resolved_action, active, r.name,
+        );
+    }
+    let dim = Style::new().dimmed();
+    let _ = writeln!(
+        out,
+        "{dim}{} rules   (ruleset {ruleset_version}){dim:#}",
+        rules.len()
+    );
+}
+
+/// `vericto rules show <CODE>` (text format): a detail block including the
+/// AST condition the engine actually evaluates against.
+pub fn render_rule_detail(r: &RuleDetail) {
+    let mut out = anstream::stdout();
+    let style = severity_style(&r.severity);
+    let _ = writeln!(out, "{} — {}", r.code, r.name);
+    let _ = writeln!(
+        out,
+        "  severity: {style}{}{style:#}    action: {}    type: {}    dialect: {}    {}",
+        r.severity,
+        r.resolved_action,
+        r.rule_type,
+        r.dialect,
+        if r.is_active { "active" } else { "inactive" },
+    );
+    if let Some(desc) = &r.description {
+        if !desc.is_empty() {
+            let _ = writeln!(out, "\n  {desc}");
+        }
+    }
+    if let Some(yaml) = &r.ast_condition_yaml {
+        let _ = writeln!(out, "\n  condition:");
+        for line in yaml.lines() {
+            let _ = writeln!(out, "    {line}");
+        }
+    }
+    let dim = Style::new().dimmed();
+    let _ = writeln!(out, "\n{dim}ruleset {}{dim:#}", r.ruleset_version);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +673,80 @@ mod tests {
         assert_eq!(status_style("MONITORED").0, "•");
         assert_eq!(status_style("PARSE_ERROR").0, "?");
         assert_eq!(status_style("ALLOWED").0, "✓");
+    }
+
+    fn rule(code: &str, severity: &str, active: bool) -> RuleSummary {
+        RuleSummary {
+            code: code.to_string(),
+            name: format!("{code} name"),
+            description: Some("desc".into()),
+            severity: severity.to_string(),
+            dialect: "all".into(),
+            rule_type: "standard".into(),
+            is_active: active,
+            resolved_action: "block".into(),
+        }
+    }
+
+    #[test]
+    fn render_rules_list_handles_empty() {
+        // Just verifying it doesn't panic on an empty slice; output goes to
+        // stdout so we can't easily capture it here, but a panic would fail
+        // the test either way.
+        render_rules_list(&[], "v1.0.0");
+    }
+
+    #[test]
+    fn render_rules_list_handles_rules() {
+        let r1 = rule("VERICTO-001", "critical", true);
+        let r2 = rule("VERICTO-002", "medium", false);
+        render_rules_list(&[&r1, &r2], "v1.0.0-20260711");
+    }
+
+    #[test]
+    fn render_rule_detail_handles_full_and_minimal() {
+        let full = RuleDetail {
+            code: "VERICTO-001".into(),
+            name: "DELETE without WHERE".into(),
+            description: Some("Blocks DELETE with no WHERE clause".into()),
+            severity: "critical".into(),
+            dialect: "all".into(),
+            rule_type: "standard".into(),
+            is_active: true,
+            resolved_action: "block".into(),
+            ast_condition_yaml: Some("node_type: DeleteStmt\nwhere_null: true".into()),
+            ruleset_version: "v1.0.0".into(),
+        };
+        render_rule_detail(&full);
+
+        let minimal = RuleDetail {
+            code: "CUSTOM-001".into(),
+            name: "Custom rule".into(),
+            description: None,
+            severity: "high".into(),
+            dialect: "postgres".into(),
+            rule_type: "custom".into(),
+            is_active: false,
+            resolved_action: "flag".into(),
+            ast_condition_yaml: None,
+            ruleset_version: "v1.0.0".into(),
+        };
+        render_rule_detail(&minimal);
+    }
+
+    #[test]
+    fn severity_style_covers_all_levels() {
+        // No assertions on the exact color codes — just that every known
+        // severity (and an unknown one) resolves without panicking.
+        for sev in [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "informational",
+            "bogus",
+        ] {
+            let _ = severity_style(sev);
+        }
     }
 }

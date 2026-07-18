@@ -244,4 +244,30 @@ mod tests {
         let now = resp(vec![q("ALLOWED", "", "")]);
         assert_eq!(drifted(&bl, &now, &files).len(), 1);
     }
+
+    #[test]
+    fn drift_keeps_entries_still_present() {
+        let files = vec!["m.sql".to_string()];
+        let bl = Baseline::from_response(
+            &resp(vec![
+                q("BLOCKED", "VERICTO-001", "DeleteStmt"),
+                q("BLOCKED", "VERICTO-010", "DropStmt"),
+            ]),
+            &files,
+        );
+        // Only the second finding is still present in the new run.
+        let now = resp(vec![q("BLOCKED", "VERICTO-010", "DropStmt")]);
+        let stale = drifted(&bl, &now, &files);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].rule_code.as_deref(), Some("VERICTO-001"));
+    }
+
+    #[test]
+    fn drift_empty_when_everything_still_matches() {
+        let files = vec!["m.sql".to_string()];
+        let r = resp(vec![q("BLOCKED", "VERICTO-001", "DeleteStmt")]);
+        let bl = Baseline::from_response(&r, &files);
+        // Re-running the identical check finds nothing stale.
+        assert!(drifted(&bl, &r, &files).is_empty());
+    }
 }
