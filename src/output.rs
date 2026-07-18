@@ -416,18 +416,19 @@ pub fn render_rules_list(rules: &[&RuleSummary], ruleset_version: &str) {
         return;
     }
     let code_w = rules.iter().map(|r| r.code.len()).max().unwrap_or(4).max(4);
-    let sev_w = rules.iter().map(|r| r.severity.len()).max().unwrap_or(8).max(8);
+    let sev_w = rules
+        .iter()
+        .map(|r| r.severity.len())
+        .max()
+        .unwrap_or(8)
+        .max(8);
     for r in rules {
         let style = severity_style(&r.severity);
         let active = if r.is_active { "active" } else { "inactive" };
         let _ = writeln!(
             out,
             "{:<code_w$}  {style}{:<sev_w$}{style:#}  {:<7}  {:<8}  {}",
-            r.code,
-            r.severity,
-            r.resolved_action,
-            active,
-            r.name,
+            r.code, r.severity, r.resolved_action, active, r.name,
         );
     }
     let dim = Style::new().dimmed();
@@ -737,7 +738,14 @@ mod tests {
     fn severity_style_covers_all_levels() {
         // No assertions on the exact color codes — just that every known
         // severity (and an unknown one) resolves without panicking.
-        for sev in ["critical", "high", "medium", "low", "informational", "bogus"] {
+        for sev in [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "informational",
+            "bogus",
+        ] {
             let _ = severity_style(sev);
         }
     }

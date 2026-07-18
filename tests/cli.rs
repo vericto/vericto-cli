@@ -76,7 +76,11 @@ async fn mock_backend(check: serde_json::Value, mode: &str) -> MockServer {
 /// makes a plain HTTP GET to `http://127.0.0.1:<port>/callback?...` — exactly
 /// what the dashboard's top-level navigation does — with a fixed `code` that
 /// the mocked `/cli-login/exchange` endpoint is set up to accept.
-async fn run_browser_login(api_url: &str, code: &str, config_dir: &std::path::Path) -> std::process::ExitStatus {
+async fn run_browser_login(
+    api_url: &str,
+    code: &str,
+    config_dir: &std::path::Path,
+) -> std::process::ExitStatus {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
@@ -123,7 +127,10 @@ async fn run_browser_login(api_url: &str, code: &str, config_dir: &std::path::Pa
             break;
         }
     }
-    assert!(!state.is_empty() && port != 0, "did not find the login URL in stdout");
+    assert!(
+        !state.is_empty() && port != 0,
+        "did not find the login URL in stdout"
+    );
 
     // Simulate the dashboard's top-level navigation back to the CLI.
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))
@@ -153,7 +160,10 @@ async fn browser_login_saves_the_exchanged_key() {
 
     let dir = tempfile::tempdir().unwrap();
     let status = run_browser_login(&server.uri(), "the-exchange-code", dir.path()).await;
-    assert!(status.success(), "vericto login should exit 0, got {status}");
+    assert!(
+        status.success(),
+        "vericto login should exit 0, got {status}"
+    );
 
     let cfg_path = dir.path().join("vericto/config.toml");
     let cfg = std::fs::read_to_string(&cfg_path).expect("config file should exist");
@@ -176,7 +186,10 @@ async fn browser_login_rejected_code_does_not_save() {
     assert_eq!(status.code(), Some(3)); // exit::AUTH — see DESIGN §8
 
     let cfg_path = dir.path().join("vericto/config.toml");
-    assert!(!cfg_path.exists(), "no config should be written for a rejected exchange");
+    assert!(
+        !cfg_path.exists(),
+        "no config should be written for a rejected exchange"
+    );
 }
 
 fn vericto() -> Command {
@@ -450,7 +463,10 @@ async fn login_with_key_unreachable_backend_does_not_save() {
         .assert()
         .code(4);
     let cfg = dir.path().join("vericto/config.toml");
-    assert!(!cfg.exists(), "no config file should be written on a failed verification");
+    assert!(
+        !cfg.exists(),
+        "no config file should be written on a failed verification"
+    );
 }
 
 #[tokio::test]
@@ -468,18 +484,15 @@ async fn login_with_key_invalid_key_does_not_save() {
 
     let dir = tempfile::tempdir().unwrap();
     vericto()
-        .args([
-            "login",
-            "--api-key",
-            "vtro_bad",
-            "--api-url",
-            &server.uri(),
-        ])
+        .args(["login", "--api-key", "vtro_bad", "--api-url", &server.uri()])
         .env("XDG_CONFIG_HOME", dir.path())
         .assert()
         .code(3);
     let cfg = dir.path().join("vericto/config.toml");
-    assert!(!cfg.exists(), "no config file should be written for a rejected key");
+    assert!(
+        !cfg.exists(),
+        "no config file should be written for a rejected key"
+    );
 }
 
 /// Mounts an oidc-exchange endpoint that mints a key, plus config + check-key.

@@ -103,7 +103,7 @@ impl LoopbackServer {
                     // callback, but still bounded by the overall deadline.
                     if std::time::Instant::now() >= deadline {
                         return Err(
-                            "timed out waiting for the browser to complete login".to_string(),
+                            "timed out waiting for the browser to complete login".to_string()
                         );
                     }
                     continue;
@@ -111,7 +111,7 @@ impl LoopbackServer {
                 Err(e) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(
-                            "timed out waiting for the browser to complete login".to_string(),
+                            "timed out waiting for the browser to complete login".to_string()
                         );
                     }
                     eprintln!("note: loopback callback error (retrying): {e}");
@@ -198,7 +198,9 @@ fn read_request_line(stream: &mut TcpStream) -> Result<String, String> {
             return Err("request line too long".to_string());
         }
     }
-    Ok(String::from_utf8_lossy(&buf).trim_end_matches('\r').to_string())
+    Ok(String::from_utf8_lossy(&buf)
+        .trim_end_matches('\r')
+        .to_string())
 }
 
 /// Extracts `/path?query` from a `GET /path?query HTTP/1.1` request line.
@@ -370,7 +372,9 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
-            .write_all(b"GET /callback?state=matching-state&code=abc123 HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(
+                b"GET /callback?state=matching-state&code=abc123 HTTP/1.1\r\nHost: x\r\n\r\n",
+            )
             .unwrap();
         let mut buf = [0u8; 512];
         let _ = client.read(&mut buf); // drain the response so write completes

@@ -1925,7 +1925,10 @@ async fn run_rules_list(args: RulesListArgs) -> ExitCode {
                 "rules": rules,
                 "ruleset_version": resp.ruleset_version,
             });
-            println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            );
         }
         RulesFormat::Text => {
             output::render_rules_list(&rules, &resp.ruleset_version);
@@ -1947,7 +1950,10 @@ async fn run_rules_show(args: RulesShowArgs) -> ExitCode {
 
     let detail = match api::rules_show(&api_url, &api_key, &args.code, &transport).await {
         Ok(d) => d,
-        Err(ApiError::Backend { status: 404, message }) => {
+        Err(ApiError::Backend {
+            status: 404,
+            message,
+        }) => {
             eprintln!("error: {message}");
             return ExitCode::from(exit::USAGE);
         }
@@ -1962,7 +1968,10 @@ async fn run_rules_show(args: RulesShowArgs) -> ExitCode {
 
     match args.format {
         RulesFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&detail).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&detail).unwrap_or_default()
+            );
         }
         RulesFormat::Text => output::render_rule_detail(&detail),
     }
