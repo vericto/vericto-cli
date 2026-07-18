@@ -19,10 +19,15 @@ use std::path::Path;
 /// `text`, `json`, `sarif`, `gitlab-codequality`, `gitlab-sast`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
+    /// Colored, human-readable summary (default).
     Text,
+    /// The raw check response as JSON, for scripting.
     Json,
+    /// SARIF, for GitHub Code Scanning annotations.
     Sarif,
+    /// GitLab Code Quality report format, for merge request annotations.
     GitlabCodequality,
+    /// GitLab SAST report format, for the Security/Vulnerability tab.
     GitlabSast,
 }
 

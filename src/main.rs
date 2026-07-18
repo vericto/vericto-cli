@@ -103,11 +103,11 @@ enum Command {
     Logout,
     /// Verify config, connectivity, auth, and plan entitlement.
     Doctor(DoctorArgs),
-    /// Scaffold CI workflow + pre-commit hook (§10).
+    /// Scaffold a CI workflow (and optional pre-commit hook) for this repo.
     Init(InitArgs),
-    /// Record current findings to a baseline file (§10).
+    /// Record current findings to a baseline file so only new ones can fail later runs.
     Baseline(BaselineArgs),
-    /// Verify a signed run receipt offline (§7.1) — no network, no account.
+    /// Verify a signed run receipt offline — no network, no account.
     VerifyReceipt(VerifyReceiptArgs),
     /// Inspect the workspace's rule catalogue (`list` / `show <CODE>`).
     Rules(RulesArgs),
@@ -160,7 +160,8 @@ struct BaselinePruneArgs {
     /// for files that simply weren't re-checked, not ones that actually fixed.
     files: Vec<String>,
 
-    /// Re-check only files changed vs the CI merge base (§10).
+    /// Re-check only files changed vs the CI merge base (auto-detected), or
+    /// vs --since when given.
     #[arg(long)]
     changed: bool,
 
@@ -194,7 +195,8 @@ struct BaselineArgs {
     /// SQL files to baseline. Use '-' for stdin. Supports --changed/--since.
     files: Vec<String>,
 
-    /// Baseline only files changed vs the CI merge base (§10).
+    /// Baseline only files changed vs the CI merge base (auto-detected), or
+    /// vs --since when given.
     #[arg(long)]
     changed: bool,
 
@@ -218,9 +220,8 @@ struct BaselineArgs {
     #[arg(long, env = "VERICTO_API_URL")]
     api_url: Option<String>,
 
-    /// Authenticate via CI workload-identity (OIDC) instead of a static key
-    /// (§6.1). Auto-enabled when no static key is present and a token is
-    /// available.
+    /// Authenticate via CI workload-identity (OIDC) instead of a static key.
+    /// Auto-enabled when no static key is present and a token is available.
     #[arg(long)]
     oidc: bool,
 
@@ -240,8 +241,8 @@ struct BaselineArgs {
     #[arg(long, env = "VERICTO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
 
-    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VERICTO_CA_BUNDLE,
-    /// then SSL_CERT_FILE.
+    /// Extra CA bundle (PEM) to trust, for corporate TLS-inspecting proxies.
+    /// Falls back to VERICTO_CA_BUNDLE, then SSL_CERT_FILE.
     #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 }
@@ -261,7 +262,7 @@ struct InitArgs {
     #[arg(long, default_value = "postgres")]
     dialect: String,
 
-    /// Scaffold OIDC / workload-identity auth (§6.1) instead of a static
+    /// Scaffold OIDC / workload-identity auth instead of a static
     /// VERICTO_API_KEY secret. Requires --workspace.
     #[arg(long)]
     oidc: bool,
@@ -284,8 +285,9 @@ enum InitTarget {
 
 #[derive(Parser)]
 struct LoginArgs {
-    /// API key to store. If omitted, you'll be prompted (input is not echoed
-    /// where the terminal supports it).
+    /// API key to store (verified against the backend before saving — an
+    /// invalid key is never written to disk). If omitted (and --oidc isn't
+    /// set), a browser opens instead so you can sign in interactively.
     #[arg(long, env = "VERICTO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
@@ -297,8 +299,8 @@ struct LoginArgs {
     #[arg(long)]
     dialect: Option<String>,
 
-    /// Configure OIDC / workload-identity login instead of storing a static key
-    /// (§6.1). Stores the workspace_id (and audience) so CI runs authenticate
+    /// Configure OIDC / workload-identity login instead of storing a static
+    /// key. Stores the workspace_id (and audience) so CI runs authenticate
     /// with a short-lived, per-run token — no long-lived key on disk. When run
     /// inside CI with an OIDC token available, also verifies the exchange works.
     #[arg(long)]
@@ -312,8 +314,8 @@ struct LoginArgs {
     #[arg(long, value_name = "AUD")]
     audience: Option<String>,
 
-    /// Dashboard origin to open for the browser login flow (§6, "verified
-    /// login"). Only used when neither --api-key nor --oidc is given.
+    /// Dashboard origin to open for the browser login flow. Only used when
+    /// neither --api-key nor --oidc is given.
     #[arg(long, env = "VERICTO_APP_URL", value_name = "URL")]
     app_url: Option<String>,
 
@@ -322,8 +324,8 @@ struct LoginArgs {
     #[arg(long, env = "VERICTO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
 
-    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VERICTO_CA_BUNDLE,
-    /// then SSL_CERT_FILE.
+    /// Extra CA bundle (PEM) to trust, for corporate TLS-inspecting proxies.
+    /// Falls back to VERICTO_CA_BUNDLE, then SSL_CERT_FILE.
     #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 }
@@ -338,7 +340,7 @@ struct DoctorArgs {
     #[arg(long, env = "VERICTO_API_URL")]
     api_url: Option<String>,
 
-    /// Test OIDC / workload-identity auth (§6.1) instead of a static key.
+    /// Test OIDC / workload-identity auth instead of a static key.
     /// Auto-enabled when no static key is present and a token is available.
     #[arg(long)]
     oidc: bool,
@@ -359,8 +361,8 @@ struct DoctorArgs {
     #[arg(long, env = "VERICTO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
 
-    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VERICTO_CA_BUNDLE,
-    /// then SSL_CERT_FILE.
+    /// Extra CA bundle (PEM) to trust, for corporate TLS-inspecting proxies.
+    /// Falls back to VERICTO_CA_BUNDLE, then SSL_CERT_FILE.
     #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 }
@@ -381,7 +383,7 @@ enum RulesCommand {
 
 /// Auth/transport flags shared by `rules list` and `rules show` — the same
 /// shape `doctor` uses, since both are read-only calls against the CI API-key
-/// surface (§6.1/§6.4), not the `check` batch endpoint.
+/// surface, not the `check` batch endpoint.
 #[derive(Parser)]
 struct RulesAuthArgs {
     /// Vericto API key (or set VERICTO_API_KEY, or `vericto login`).
@@ -392,9 +394,8 @@ struct RulesAuthArgs {
     #[arg(long, env = "VERICTO_API_URL")]
     api_url: Option<String>,
 
-    /// Authenticate via CI workload-identity (OIDC) instead of a static key
-    /// (§6.1). Auto-enabled when no static key is present and a token is
-    /// available.
+    /// Authenticate via CI workload-identity (OIDC) instead of a static key.
+    /// Auto-enabled when no static key is present and a token is available.
     #[arg(long)]
     oidc: bool,
 
@@ -414,8 +415,8 @@ struct RulesAuthArgs {
     #[arg(long, env = "VERICTO_TIMEOUT", value_name = "SECS")]
     timeout: Option<u64>,
 
-    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VERICTO_CA_BUNDLE,
-    /// then SSL_CERT_FILE.
+    /// Extra CA bundle (PEM) to trust, for corporate TLS-inspecting proxies.
+    /// Falls back to VERICTO_CA_BUNDLE, then SSL_CERT_FILE.
     #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 }
@@ -483,7 +484,8 @@ struct CheckArgs {
     #[arg(long)]
     dialect: Option<String>,
 
-    /// Output format.
+    /// Output format: human-readable text, or a machine format for CI
+    /// tooling to consume.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
 
@@ -504,8 +506,8 @@ struct CheckArgs {
     #[arg(long, env = "VERICTO_API_URL")]
     api_url: Option<String>,
 
-    /// Authenticate via CI workload-identity (OIDC) instead of a static key
-    /// (§6.1). Auto-enabled when no static key is present and a CI OIDC token is
+    /// Authenticate via CI workload-identity (OIDC) instead of a static key.
+    /// Auto-enabled when no static key is present and a CI OIDC token is
     /// available; pass this to require it (and error if unavailable).
     #[arg(long)]
     oidc: bool,
@@ -529,14 +531,14 @@ struct CheckArgs {
     #[arg(long, value_name = "FILE")]
     output: Option<std::path::PathBuf>,
 
-    /// Request a signed run receipt (§7.1) and write it to this path — a
+    /// Request a signed run receipt and write it to this path — a
     /// self-contained, offline-verifiable record (see `vericto verify-receipt`).
     /// A chunked run writes a JSON array of per-chunk receipts.
     #[arg(long, value_name = "FILE")]
     receipt: Option<std::path::PathBuf>,
 
     /// Ignore findings recorded in this baseline file; only new findings can
-    /// fail the run (§10).
+    /// fail the run.
     #[arg(long, value_name = "FILE")]
     baseline: Option<std::path::PathBuf>,
 
@@ -549,14 +551,15 @@ struct CheckArgs {
     #[arg(long, env = "VERICTO_CONCURRENCY", value_name = "N")]
     concurrency: Option<usize>,
 
-    /// Extra CA bundle (PEM) to trust, for corporate TLS-inspecting proxies
-    /// (§6.4). Falls back to VERICTO_CA_BUNDLE, then SSL_CERT_FILE.
+    /// Extra CA bundle (PEM) to trust, for corporate TLS-inspecting proxies.
+    /// Falls back to VERICTO_CA_BUNDLE, then SSL_CERT_FILE.
     #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 
-    /// Break-glass (§6.5): if the backend is unreachable from the first request,
-    /// exit 0 instead of 4. Requires a reason. Never bypasses a real finding or
-    /// a partially-completed run.
+    /// Break-glass: if the backend is unreachable from the first request,
+    /// exit 0 (don't fail the build) instead of the usual exit 4. Requires a
+    /// reason, which is recorded locally for audit. Never bypasses a real
+    /// finding or a partially-completed run.
     #[arg(long, env = "VERICTO_ALLOW_DEGRADED", value_name = "REASON")]
     allow_degraded: Option<String>,
 
