@@ -36,6 +36,11 @@ ed25519-dalek = { version = "2", features = ["pem"] }
 sha2 = "0.10"
 # Decodes the base64 signature carried in the receipt.
 base64 = "0.22"
+# CSPRNG for the browser-login `state` parameter (§6, "verified login") — the
+# OS RNG directly, no `rand` crate needed for "give me N random bytes".
+# Already present transitively (rustls/ring); pinning it as a direct dep keeps
+# `cargo audit`/SBOM tooling honest about who actually uses it.
+getrandom = "0.2"
 
 [dev-dependencies]
 # HTTP mocking for the API-client tests (in-process wiremock server).

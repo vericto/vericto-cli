@@ -200,6 +200,53 @@ pub struct WorkspaceConfig {
     // don't duplicate those fields on this struct.
 }
 
+/// One rule in the workspace's effective catalogue, as returned by
+/// `GET /api/v1/ci/rules` (`vericto rules list`). No internal IDs — just what a
+/// developer needs to understand what a `check` run is scored against.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RuleSummary {
+    pub code: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub severity: String,
+    pub dialect: String,
+    /// "standard" | "custom".
+    pub rule_type: String,
+    pub is_active: bool,
+    /// The enforcement action ("block" | "flag" | "monitor") this severity
+    /// resolves to under the workspace's current policy — not just the engine
+    /// default, so what the CLI prints matches what a `check` will actually do.
+    pub resolved_action: String,
+}
+
+/// Response body of `GET /api/v1/ci/rules`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RulesListResponse {
+    pub rules: Vec<RuleSummary>,
+    pub ruleset_version: String,
+}
+
+/// Response body of `GET /api/v1/ci/rules/:code` (`vericto rules show <CODE>`).
+/// A superset of `RuleSummary`: adds the YAML condition the engine actually
+/// evaluates against, for a developer who wants to understand exactly what
+/// triggers the rule.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RuleDetail {
+    pub code: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub severity: String,
+    pub dialect: String,
+    pub rule_type: String,
+    pub is_active: bool,
+    pub resolved_action: String,
+    #[serde(default)]
+    pub ast_condition_yaml: Option<String>,
+    pub ruleset_version: String,
+}
+
 /// Errors the client surfaces, mapped to CLI exit codes by the caller.
 #[derive(Debug)]
 pub enum ApiError {
@@ -347,6 +394,153 @@ pub async fn config(
     } else {
         Err(ApiError::Backend {
             status: code,
+            message: extract_message(&body),
+        })
+    }
+}
+
+/// Fetches `GET /api/v1/ci/rules` (`vericto rules list`) — the workspace's
+/// effective rule catalogue (standard + custom, override-merged). Read-only:
+/// does not spend the monthly CI-check allowance. Maps 401/403 to `Auth` and
+/// other non-2xx (incl. an older backend's 404) to `Backend`.
+pub async fn rules_list(
+    api_url: &str,
+    api_key: &str,
+    transport: &Transport,
+) -> Result<RulesListResponse, ApiError> {
+    let client = build_client(transport)?;
+    let url = format!("{}/api/v1/ci/rules", api_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() {
+        return resp
+            .json::<RulesListResponse>()
+            .await
+            .map_err(|e| ApiError::Backend {
+                status: status.as_u16(),
+                message: format!("invalid rules list body: {e}"),
+            });
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        Err(ApiError::Auth(extract_message(&body)))
+    } else {
+        Err(ApiError::Backend {
+            status: code,
+            message: extract_message(&body),
+        })
+    }
+}
+
+/// Fetches `GET /api/v1/ci/rules/:code` (`vericto rules show <CODE>`) — one
+/// rule's full detail, including the YAML condition the engine evaluates. A
+/// `404` (unknown code) surfaces as `Backend { status: 404, .. }` so the
+/// caller can print a clear "rule not found" instead of a generic error.
+pub async fn rules_show(
+    api_url: &str,
+    api_key: &str,
+    code: &str,
+    transport: &Transport,
+) -> Result<RuleDetail, ApiError> {
+    let client = build_client(transport)?;
+    let url = format!(
+        "{}/api/v1/ci/rules/{}",
+        api_url.trim_end_matches('/'),
+        urlencode_path_segment(code)
+    );
+    let resp = client
+        .get(&url)
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() {
+        return resp
+            .json::<RuleDetail>()
+            .await
+            .map_err(|e| ApiError::Backend {
+                status: status.as_u16(),
+                message: format!("invalid rule detail body: {e}"),
+            });
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let code_status = status.as_u16();
+    if code_status == 401 || code_status == 403 {
+        Err(ApiError::Auth(extract_message(&body)))
+    } else {
+        Err(ApiError::Backend {
+            status: code_status,
+            message: extract_message(&body),
+        })
+    }
+}
+
+/// Percent-encodes a single path segment (just enough for a rule code: letters,
+/// digits, `-`/`_` pass through; anything else — notably `/` — is escaped so a
+/// crafted code can't smuggle an extra path segment into the URL).
+fn urlencode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Redeems the one-time code from the browser-login callback (§6, "verified
+/// login") for the plaintext key the dashboard minted. Server-to-server; no
+/// browser/session context involved — the code alone is the credential for
+/// this single call. Maps 401 (unknown/expired/already-consumed code) to
+/// `Auth`, everything else non-2xx to `Backend`.
+pub async fn cli_login_exchange(
+    api_url: &str,
+    code: &str,
+    transport: &Transport,
+) -> Result<String, ApiError> {
+    let client = build_client(transport)?;
+    let url = format!(
+        "{}/api/v1/auth/cli-login/exchange",
+        api_url.trim_end_matches('/')
+    );
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "code": code }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() {
+        #[derive(Deserialize)]
+        struct ExchangeResponse {
+            api_key: String,
+        }
+        return resp
+            .json::<ExchangeResponse>()
+            .await
+            .map(|r| r.api_key)
+            .map_err(|e| ApiError::Backend {
+                status: status.as_u16(),
+                message: format!("invalid exchange response: {e}"),
+            });
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let code_status = status.as_u16();
+    if code_status == 401 || code_status == 403 {
+        Err(ApiError::Auth(extract_message(&body)))
+    } else {
+        Err(ApiError::Backend {
+            status: code_status,
             message: extract_message(&body),
         })
     }
@@ -1028,6 +1222,134 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::Auth(_)));
+    }
+
+    #[tokio::test]
+    async fn cli_login_exchange_returns_api_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/cli-login/exchange"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "api_key": "vtro_from_browser_login"
+            })))
+            .mount(&server)
+            .await;
+        let key = super::cli_login_exchange(&server.uri(), "some-code", &transport())
+            .await
+            .unwrap();
+        assert_eq!(key, "vtro_from_browser_login");
+    }
+
+    #[tokio::test]
+    async fn cli_login_exchange_401_is_auth_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/cli-login/exchange"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": { "message": "Código de autenticación inválido, expirado o ya utilizado." }
+            })))
+            .mount(&server)
+            .await;
+        let err = super::cli_login_exchange(&server.uri(), "bad-code", &transport())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Auth(_)));
+    }
+
+    #[tokio::test]
+    async fn rules_list_parses_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/rules"))
+            .and(header("x-api-key", "vtro_k"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "rules": [{
+                    "code": "VERICTO-001",
+                    "name": "DELETE without WHERE",
+                    "description": "Blocks DELETE with no WHERE clause",
+                    "severity": "critical",
+                    "dialect": "all",
+                    "rule_type": "standard",
+                    "is_active": true,
+                    "resolved_action": "block"
+                }],
+                "ruleset_version": "v1.0.0-20260711"
+            })))
+            .mount(&server)
+            .await;
+        let resp = super::rules_list(&server.uri(), "vtro_k", &transport())
+            .await
+            .unwrap();
+        assert_eq!(resp.rules.len(), 1);
+        assert_eq!(resp.rules[0].code, "VERICTO-001");
+        assert_eq!(resp.ruleset_version, "v1.0.0-20260711");
+    }
+
+    #[tokio::test]
+    async fn rules_list_401_is_auth_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/rules"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": { "message": "bad key" }
+            })))
+            .mount(&server)
+            .await;
+        let err = super::rules_list(&server.uri(), "vtro_bad", &transport())
+            .await
+            .unwrap_err();
+        match err {
+            ApiError::Auth(m) => assert_eq!(m, "bad key"),
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rules_show_parses_detail_with_yaml() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/rules/VERICTO-001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": "VERICTO-001",
+                "name": "DELETE without WHERE",
+                "description": "Blocks DELETE with no WHERE clause",
+                "severity": "critical",
+                "dialect": "all",
+                "rule_type": "standard",
+                "is_active": true,
+                "resolved_action": "block",
+                "ast_condition_yaml": "node_type: DeleteStmt\nwhere_null: true",
+                "ruleset_version": "v1.0.0-20260711"
+            })))
+            .mount(&server)
+            .await;
+        let detail = super::rules_show(&server.uri(), "vtro_k", "VERICTO-001", &transport())
+            .await
+            .unwrap();
+        assert_eq!(detail.code, "VERICTO-001");
+        assert!(detail.ast_condition_yaml.unwrap().contains("DeleteStmt"));
+    }
+
+    #[tokio::test]
+    async fn rules_show_404_is_backend_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/rules/VERICTO-999"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": { "message": "Regla no encontrada: VERICTO-999" }
+            })))
+            .mount(&server)
+            .await;
+        let err = super::rules_show(&server.uri(), "vtro_k", "VERICTO-999", &transport())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Backend { status: 404, .. }));
+    }
+
+    #[test]
+    fn urlencode_path_segment_escapes_slash_and_passes_dash() {
+        assert_eq!(super::urlencode_path_segment("VERICTO-001"), "VERICTO-001");
+        assert_eq!(super::urlencode_path_segment("a/b"), "a%2Fb");
     }
 
     #[tokio::test]

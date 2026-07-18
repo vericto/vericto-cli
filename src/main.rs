@@ -5,6 +5,7 @@
 
 mod api;
 mod baseline;
+mod browser_login;
 mod ci_env;
 mod config;
 mod oidc;
@@ -14,7 +15,7 @@ mod receipt;
 mod sanitize;
 mod scaffold;
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -108,6 +109,8 @@ enum Command {
     Baseline(BaselineArgs),
     /// Verify a signed run receipt offline (§7.1) — no network, no account.
     VerifyReceipt(VerifyReceiptArgs),
+    /// Inspect the workspace's rule catalogue (`list` / `show <CODE>`).
+    Rules(RulesArgs),
     /// Print the CLI version (same as `--version`).
     Version,
     /// Print a shell completion script to stdout (bash|zsh|fish|powershell|elvish).
@@ -137,8 +140,57 @@ struct VerifyReceiptArgs {
     show: bool,
 }
 
+/// `vericto baseline prune` (§10) — drops stale entries from an existing
+/// baseline: run the same check that produced it, then keep only the
+/// fingerprints still present. Complements `drifted()`, which today only
+/// *reports* stale entries as a note during `check --baseline` — `prune` acts
+/// on that report instead of leaving the cleanup as a manual copy-paste.
+#[derive(Subcommand)]
+enum BaselineCommand {
+    /// Re-run the check and remove baseline entries that no longer match any
+    /// current finding.
+    Prune(BaselinePruneArgs),
+}
+
+#[derive(Parser)]
+struct BaselinePruneArgs {
+    /// SQL files to re-check against the baseline. Use '-' for stdin. Supports
+    /// --changed/--since. Should match the file set the baseline was recorded
+    /// against — pruning against a different (smaller) set would drop entries
+    /// for files that simply weren't re-checked, not ones that actually fixed.
+    files: Vec<String>,
+
+    /// Re-check only files changed vs the CI merge base (§10).
+    #[arg(long)]
+    changed: bool,
+
+    /// Explicit base ref for changed-file selection.
+    #[arg(long, value_name = "REF")]
+    since: Option<String>,
+
+    /// SQL dialect. Falls back to config default, then "postgres".
+    #[arg(long)]
+    dialect: Option<String>,
+
+    /// The baseline file to prune.
+    #[arg(long, default_value = ".vericto-baseline.json")]
+    file: std::path::PathBuf,
+
+    /// Report what would be pruned without writing the file.
+    #[arg(long)]
+    dry_run: bool,
+
+    #[command(flatten)]
+    auth: RulesAuthArgs,
+}
+
 #[derive(Parser)]
 struct BaselineArgs {
+    /// Baseline subcommands (currently `prune`). Omit to record (default
+    /// action below) — `vericto baseline [files...]` keeps working unchanged.
+    #[command(subcommand)]
+    command: Option<BaselineCommand>,
+
     /// SQL files to baseline. Use '-' for stdin. Supports --changed/--since.
     files: Vec<String>,
 
@@ -259,6 +311,21 @@ struct LoginArgs {
     /// OIDC audience to request (defaults to "vericto").
     #[arg(long, value_name = "AUD")]
     audience: Option<String>,
+
+    /// Dashboard origin to open for the browser login flow (§6, "verified
+    /// login"). Only used when neither --api-key nor --oidc is given.
+    #[arg(long, env = "VERICTO_APP_URL", value_name = "URL")]
+    app_url: Option<String>,
+
+    /// Per-request timeout in seconds — applies to the --api-key verification
+    /// call and the browser-login exchange call.
+    #[arg(long, env = "VERICTO_TIMEOUT", value_name = "SECS")]
+    timeout: Option<u64>,
+
+    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VERICTO_CA_BUNDLE,
+    /// then SSL_CERT_FILE.
+    #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
+    ca_bundle: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser)]
@@ -296,6 +363,97 @@ struct DoctorArgs {
     /// then SSL_CERT_FILE.
     #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
+}
+
+#[derive(Parser)]
+struct RulesArgs {
+    #[command(subcommand)]
+    command: RulesCommand,
+}
+
+#[derive(Subcommand)]
+enum RulesCommand {
+    /// List the workspace's effective rule catalogue (standard + custom).
+    List(RulesListArgs),
+    /// Show one rule's full detail, including the AST condition it matches.
+    Show(RulesShowArgs),
+}
+
+/// Auth/transport flags shared by `rules list` and `rules show` — the same
+/// shape `doctor` uses, since both are read-only calls against the CI API-key
+/// surface (§6.1/§6.4), not the `check` batch endpoint.
+#[derive(Parser)]
+struct RulesAuthArgs {
+    /// Vericto API key (or set VERICTO_API_KEY, or `vericto login`).
+    #[arg(long, env = "VERICTO_API_KEY", hide_env_values = true)]
+    api_key: Option<String>,
+
+    /// Vericto API base URL (or set VERICTO_API_URL, or `vericto login`).
+    #[arg(long, env = "VERICTO_API_URL")]
+    api_url: Option<String>,
+
+    /// Authenticate via CI workload-identity (OIDC) instead of a static key
+    /// (§6.1). Auto-enabled when no static key is present and a token is
+    /// available.
+    #[arg(long)]
+    oidc: bool,
+
+    /// Workspace ID to authenticate against for OIDC.
+    #[arg(long, value_name = "ID", env = "VERICTO_WORKSPACE_ID")]
+    workspace: Option<String>,
+
+    /// OIDC audience to request in the ID token.
+    #[arg(long, value_name = "AUD")]
+    audience: Option<String>,
+
+    /// Env var holding a pre-minted OIDC ID token (GitLab-style).
+    #[arg(long, value_name = "VAR")]
+    oidc_token_env: Option<String>,
+
+    /// Per-request timeout in seconds.
+    #[arg(long, env = "VERICTO_TIMEOUT", value_name = "SECS")]
+    timeout: Option<u64>,
+
+    /// Extra CA bundle (PEM) to trust (§6.4). Falls back to VERICTO_CA_BUNDLE,
+    /// then SSL_CERT_FILE.
+    #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
+    ca_bundle: Option<std::path::PathBuf>,
+}
+
+#[derive(Parser)]
+struct RulesListArgs {
+    #[command(flatten)]
+    auth: RulesAuthArgs,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = RulesFormat::Text)]
+    format: RulesFormat,
+
+    /// Only list rules currently active (skip disabled ones).
+    #[arg(long)]
+    active_only: bool,
+}
+
+#[derive(Parser)]
+struct RulesShowArgs {
+    /// The rule code to show, e.g. VERICTO-001 or CUSTOM-001 (case-insensitive).
+    code: String,
+
+    #[command(flatten)]
+    auth: RulesAuthArgs,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = RulesFormat::Text)]
+    format: RulesFormat,
+}
+
+/// Output format for `vericto rules`. `text` is human-oriented (a table for
+/// `list`, a detail block for `show`); `json` mirrors the backend response for
+/// scripting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum RulesFormat {
+    Text,
+    Json,
 }
 
 #[derive(Parser)]
@@ -595,6 +753,10 @@ async fn main() -> ExitCode {
         Command::Init(args) => run_init(args),
         Command::Baseline(args) => run_baseline(args).await,
         Command::VerifyReceipt(args) => run_verify_receipt(args),
+        Command::Rules(args) => match args.command {
+            RulesCommand::List(a) => run_rules_list(a).await,
+            RulesCommand::Show(a) => run_rules_show(a).await,
+        },
         Command::Version => {
             println!("vericto {}", env!("CARGO_PKG_VERSION"));
             ExitCode::from(exit::OK)
@@ -950,7 +1112,11 @@ fn suppressed_fingerprints(
 
 /// `vericto baseline` — run a check and record the current findings to a baseline
 /// file (§10), so a later `check --baseline` only fails on *new* findings.
+/// Dispatches to `prune` first when that subcommand was given.
 async fn run_baseline(args: BaselineArgs) -> ExitCode {
+    if let Some(BaselineCommand::Prune(prune_args)) = args.command {
+        return run_baseline_prune(prune_args).await;
+    }
     let file = load_config();
     // Project config (for OIDC workspace/audience defaults, like `check`).
     let project = match config::load_project() {
@@ -1047,6 +1213,148 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
                 "Wrote {} finding(s) to {}.",
                 bl.entries.len(),
                 args.out.display()
+            );
+            ExitCode::from(exit::OK)
+        }
+        Err(e) => {
+            eprintln!("error: could not write baseline: {e}");
+            ExitCode::from(exit::USAGE)
+        }
+    }
+}
+
+/// `vericto baseline prune` — re-runs the check that produced the baseline and
+/// removes entries whose fingerprint no longer matches any current finding
+/// (`baseline::drifted`). `check --baseline` already *detects* this drift and
+/// prints a note; `prune` is the action that follow-up note points at, instead
+/// of a developer hand-editing the JSON.
+async fn run_baseline_prune(args: BaselinePruneArgs) -> ExitCode {
+    let bl = match baseline::Baseline::load(&args.file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    if bl.entries.is_empty() {
+        println!("{} has no entries — nothing to prune.", args.file.display());
+        return ExitCode::from(exit::OK);
+    }
+
+    let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    // Dialect precedence mirrors `baseline`/`check`: flag > .vericto.toml >
+    // user config default > "postgres".
+    let project = config::load_project().unwrap_or_default();
+    let file_cfg = load_config();
+    let dialect = args
+        .dialect
+        .clone()
+        .or_else(|| project.default_dialect.clone())
+        .or_else(|| file_cfg.default_dialect.clone())
+        .unwrap_or_else(|| "postgres".to_string());
+
+    let files = match resolve_files(&args.files, args.changed, &args.since, false) {
+        FileResolution::Files(f) => f,
+        FileResolution::EmptyDiff(_) => {
+            // No SQL to re-check (e.g. --changed with an empty diff) means we
+            // have no current findings to compare against — pruning here would
+            // treat every entry as drifted, which is almost certainly wrong
+            // (the file set just wasn't re-checked, not verified clean).
+            eprintln!(
+                "error: no files to re-check (see --changed/--since). Pass the same \
+                 file set the baseline was recorded against."
+            );
+            return ExitCode::from(exit::USAGE);
+        }
+        FileResolution::Usage(msg) => {
+            eprintln!("error: {msg}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let queries = match collect_queries(&files) {
+        Some(q) if !q.is_empty() => q,
+        Some(_) => {
+            eprintln!("error: no SQL to check (all inputs were empty).");
+            return ExitCode::from(exit::USAGE);
+        }
+        None => return ExitCode::from(exit::USAGE),
+    };
+
+    let resp = match api::check_all(
+        api::CheckParams {
+            api_url: &api_url,
+            api_key: &api_key,
+            dialect: &dialect,
+            file_name: None,
+            provenance: build_provenance(),
+            transport,
+            concurrency: 4,
+            receipt: false,
+        },
+        queries,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return match e {
+                ApiError::Auth(_) => ExitCode::from(exit::AUTH),
+                _ => ExitCode::from(exit::BACKEND),
+            };
+        }
+    };
+
+    let stale = baseline::drifted(&bl, &resp, &files);
+    if stale.is_empty() {
+        println!("No stale entries — {} is up to date.", args.file.display());
+        return ExitCode::from(exit::OK);
+    }
+
+    let stale_fps: std::collections::HashSet<String> =
+        stale.iter().map(|e| e.fingerprint.clone()).collect();
+    let total_before = bl.entries.len();
+
+    if args.dry_run {
+        println!(
+            "Would prune {} of {} entr{} from {}:",
+            stale.len(),
+            total_before,
+            if stale.len() == 1 { "y" } else { "ies" },
+            args.file.display()
+        );
+        for e in &stale {
+            println!(
+                "  {} {} ({})",
+                e.rule_code.as_deref().unwrap_or("?"),
+                e.file,
+                e.fingerprint
+            );
+        }
+        return ExitCode::from(exit::OK);
+    }
+
+    let pruned_count = stale_fps.len();
+    let kept: Vec<baseline::Entry> = bl
+        .entries
+        .into_iter()
+        .filter(|e| !stale_fps.contains(&e.fingerprint))
+        .collect();
+    let remaining = baseline::Baseline {
+        version: bl.version,
+        entries: kept,
+    };
+    match remaining.save(&args.file) {
+        Ok(()) => {
+            println!(
+                "Pruned {pruned_count} stale entr{} from {} ({} remaining).",
+                if pruned_count == 1 { "y" } else { "ies" },
+                args.file.display(),
+                remaining.entries.len()
             );
             ExitCode::from(exit::OK)
         }
@@ -1159,39 +1467,39 @@ fn print_receipt_summary(r: &api::Receipt) {
     }
 }
 
-/// `vericto login` — persist an API key (and optional URL/dialect) to the config
-/// file. The key comes from --api-key/env, or an interactive prompt.
+/// `vericto login` — dispatches to one of three, mutually exclusive modes:
+///   - `--oidc`: workload-identity config, no secret ever stored (§6.1).
+///   - `--api-key <key>` (or `VERICTO_API_KEY`): manual entry — verified
+///     against the backend before anything is written (fail-closed: an
+///     invalid/revoked/wrong-scope key is caught here, not on the first `check`
+///     run mid-CI-pipeline).
+///   - neither flag: browser-based login (§6, "verified login") — the default
+///     for a developer at a keyboard with a browser. Replaces the old
+///     interactive "paste a key at a prompt" flow, which had no way to know
+///     the pasted value was even valid until the first network call.
 async fn run_login(args: LoginArgs) -> ExitCode {
-    // OIDC mode stores no secret — just the workspace/audience so CI runs
-    // authenticate with a short-lived, per-run token (§6.1).
     if args.oidc {
         return run_login_oidc(args).await;
     }
-    let api_key = match args.api_key {
-        Some(k) => k,
-        None => match prompt_secret("Vericto API key (vtro_...): ") {
-            Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
-            Ok(_) => {
-                eprintln!("error: no API key entered.");
-                return ExitCode::from(exit::USAGE);
-            }
-            Err(e) => {
-                eprintln!("error: could not read API key: {e}");
-                return ExitCode::from(exit::USAGE);
-            }
-        },
-    };
+    match args.api_key.clone() {
+        Some(key) => run_login_with_key(args, key).await,
+        None => run_login_browser(args).await,
+    }
+}
 
-    // Merge onto any existing config so we don't clobber unrelated fields.
+/// Persists `api_key` (plus optional url/dialect) to the config file, merging
+/// onto whatever was already there so unrelated fields survive. Shared by the
+/// manual (`--api-key`) and browser-login paths — the only difference between
+/// them is how `api_key` was obtained, not how it's stored.
+fn save_login(api_key: String, api_url: Option<String>, dialect: Option<String>) -> ExitCode {
     let mut cfg = load_config();
     cfg.api_key = Some(api_key);
-    if let Some(url) = args.api_url {
+    if let Some(url) = api_url {
         cfg.api_url = Some(url);
     }
-    if let Some(d) = args.dialect {
+    if let Some(d) = dialect {
         cfg.default_dialect = Some(d);
     }
-
     match cfg.save() {
         Ok(path) => {
             println!("Saved credentials to {}", path.display());
@@ -1200,6 +1508,117 @@ async fn run_login(args: LoginArgs) -> ExitCode {
         Err(e) => {
             eprintln!("error: could not write config: {e}");
             ExitCode::from(exit::USAGE)
+        }
+    }
+}
+
+/// `vericto login --api-key <key>` — manual entry. Verifies the key against
+/// the backend (`GET /api/v1/ci/config`, the same read-only, quota-free call
+/// `doctor`/`check`'s pre-flight use) BEFORE writing anything to disk. Any
+/// failure — bad/revoked/wrong-scope key (`Auth`), or the backend being
+/// unreachable (`Transport`/`Backend`) — aborts without saving. There is no
+/// escape hatch: a credential that could not be confirmed valid is never
+/// persisted, network blip or not.
+async fn run_login_with_key(args: LoginArgs, api_key: String) -> ExitCode {
+    let file = load_config();
+    let api_url = args
+        .api_url
+        .clone()
+        .or_else(|| file.api_url.clone())
+        .unwrap_or_else(|| config::DEFAULT_API_URL.to_string());
+    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
+
+    match api::config(&api_url, &api_key, &transport).await {
+        Ok(cfg) => {
+            if let Some(plan) = &cfg.plan {
+                println!("Verified — workspace plan: {plan}.");
+            } else {
+                println!("Verified.");
+            }
+            save_login(api_key, args.api_url.clone(), args.dialect.clone())
+        }
+        Err(e) => {
+            eprintln!("error: could not verify this API key: {e}");
+            eprintln!("Nothing was saved.");
+            match e {
+                ApiError::Auth(_) => ExitCode::from(exit::AUTH),
+                _ => ExitCode::from(exit::BACKEND),
+            }
+        }
+    }
+}
+
+/// `vericto login` (no `--api-key`, no `--oidc`) — browser-based login (§6,
+/// "verified login"). Opens the dashboard's `/cli-auth` page in the user's
+/// browser; the already-authenticated dashboard session mints a scoped,
+/// 30-day key and hands back a one-time code via a local loopback callback,
+/// which this process exchanges for the actual key. See browser_login.rs for
+/// the full protocol and api::cli_login_exchange for the exchange call.
+async fn run_login_browser(args: LoginArgs) -> ExitCode {
+    let file = load_config();
+    let api_url = args
+        .api_url
+        .clone()
+        .or_else(|| file.api_url.clone())
+        .unwrap_or_else(|| config::DEFAULT_API_URL.to_string());
+    let app_url = args
+        .app_url
+        .clone()
+        .unwrap_or_else(|| config::DEFAULT_APP_URL.to_string());
+    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
+
+    let state = match browser_login::generate_state() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let server = match browser_login::LoopbackServer::bind() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: could not start a local server for the login callback: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let port = match server.port() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+
+    let login_url = format!(
+        "{}/cli-auth?state={state}&port={port}",
+        app_url.trim_end_matches('/')
+    );
+    println!("Opening your browser to finish logging in...");
+    if browser_login::open_browser(&login_url).is_err() {
+        eprintln!("note: could not open a browser automatically.");
+    }
+    println!("If it didn't open, visit this URL:\n  {login_url}\n");
+    println!("Waiting for you to finish in the browser (5 min timeout)...");
+
+    let code = match server.wait_for_callback(&state) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(exit::BACKEND);
+        }
+    };
+
+    match api::cli_login_exchange(&api_url, &code, &transport).await {
+        Ok(api_key) => {
+            println!("Login successful.");
+            save_login(api_key, args.api_url.clone(), args.dialect.clone())
+        }
+        Err(e) => {
+            eprintln!("error: could not complete login: {e}");
+            match e {
+                ApiError::Auth(_) => ExitCode::from(exit::AUTH),
+                _ => ExitCode::from(exit::BACKEND),
+            }
         }
     }
 }
@@ -1255,7 +1674,7 @@ async fn run_login_oidc(args: LoginArgs) -> ExitCode {
             .clone()
             .or(cfg.oidc_audience.clone())
             .unwrap_or_else(|| config::DEFAULT_OIDC_AUDIENCE.to_string());
-        let transport = resolve_transport(None, None);
+        let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
         let avail = oidc::availability(&token_env).unwrap();
         let ok = match oidc::fetch_token(&avail, Some(&audience), &transport).await {
             Ok(tok) => match api::oidc_exchange(&api_url, &workspace, &tok, &transport).await {
@@ -1432,6 +1851,124 @@ fn run_init(args: InitArgs) -> ExitCode {
     ExitCode::from(exit::OK)
 }
 
+/// Resolves config + auth for the read-only rule-catalogue commands (`rules
+/// list`/`rules show`), sharing the exact same precedence and OIDC fallback as
+/// `check`/`baseline`/`doctor` (`resolve_auth`). Returns `(api_url, api_key,
+/// transport)` on success, or the `ExitCode` to return on failure.
+async fn resolve_rules_auth(
+    args: &RulesAuthArgs,
+) -> Result<(String, String, api::Transport), ExitCode> {
+    let file = load_config();
+    let project = match config::load_project() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(ExitCode::from(exit::USAGE));
+        }
+    };
+    let resolved = config::resolve(
+        args.api_url.as_deref().unwrap_or(config::DEFAULT_API_URL),
+        args.api_url.is_none(),
+        args.api_key.as_deref(),
+        &file,
+    );
+    let api_url = resolved.api_url.clone();
+    let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
+    let oidc_opts = OidcOpts {
+        forced: args.oidc,
+        workspace: args.workspace.clone(),
+        audience: args.audience.clone(),
+        token_env: args.oidc_token_env.clone(),
+    };
+    let (api_key, _auth_mode) = resolve_auth(
+        &api_url,
+        resolved.api_key,
+        resolved.key_source,
+        &oidc_opts,
+        &project,
+        &file,
+        &transport,
+    )
+    .await?;
+    Ok((api_url, api_key, transport))
+}
+
+/// `vericto rules list` — print the workspace's effective rule catalogue
+/// (standard rules merged with overrides, plus active custom rules). Read-only:
+/// does not spend the monthly CI-check allowance.
+async fn run_rules_list(args: RulesListArgs) -> ExitCode {
+    let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    let resp = match api::rules_list(&api_url, &api_key, &transport).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return match e {
+                ApiError::Auth(_) => ExitCode::from(exit::AUTH),
+                _ => ExitCode::from(exit::BACKEND),
+            };
+        }
+    };
+
+    let rules: Vec<&api::RuleSummary> = resp
+        .rules
+        .iter()
+        .filter(|r| !args.active_only || r.is_active)
+        .collect();
+
+    match args.format {
+        RulesFormat::Json => {
+            let value = serde_json::json!({
+                "rules": rules,
+                "ruleset_version": resp.ruleset_version,
+            });
+            println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
+        }
+        RulesFormat::Text => {
+            output::render_rules_list(&rules, &resp.ruleset_version);
+        }
+    }
+    ExitCode::from(exit::OK)
+}
+
+/// `vericto rules show <CODE>` — print one rule's full detail, including the
+/// AST condition the engine evaluates. Exit 3 (auth-shaped: not found is a
+/// usage/lookup problem, not a backend outage) when the code doesn't exist —
+/// mirrors how `check`'s exit codes distinguish "your input was wrong" from
+/// "the backend is down".
+async fn run_rules_show(args: RulesShowArgs) -> ExitCode {
+    let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    let detail = match api::rules_show(&api_url, &api_key, &args.code, &transport).await {
+        Ok(d) => d,
+        Err(ApiError::Backend { status: 404, message }) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(exit::USAGE);
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return match e {
+                ApiError::Auth(_) => ExitCode::from(exit::AUTH),
+                _ => ExitCode::from(exit::BACKEND),
+            };
+        }
+    };
+
+    match args.format {
+        RulesFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&detail).unwrap_or_default());
+        }
+        RulesFormat::Text => output::render_rule_detail(&detail),
+    }
+    ExitCode::from(exit::OK)
+}
+
 /// `vericto doctor` — validate config, connectivity, auth and plan entitlement so
 /// problems surface here rather than as a cryptic failure mid-pipeline. It
 /// checks backend compatibility (`/version`) and reads the workspace config
@@ -1560,32 +2097,6 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
             ExitCode::from(exit::BACKEND)
         }
     }
-}
-
-/// Prompts on the terminal and reads a line. Best-effort no-echo on Unix TTYs
-/// (toggles the terminal's echo flag via stty); falls back to a visible read.
-fn prompt_secret(prompt: &str) -> std::io::Result<String> {
-    print!("{prompt}");
-    std::io::stdout().flush()?;
-
-    #[cfg(unix)]
-    let echo_disabled = std::process::Command::new("stty")
-        .arg("-echo")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    let mut line = String::new();
-    let res = std::io::stdin().read_line(&mut line);
-
-    #[cfg(unix)]
-    if echo_disabled {
-        let _ = std::process::Command::new("stty").arg("echo").status();
-        println!(); // move past the (unechoed) newline the user typed
-    }
-
-    res?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 
 /// Collects CI provenance (§2.1) for the request. Returns `None` when nothing
