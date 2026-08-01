@@ -605,9 +605,18 @@ mod tests {
             suggested_fix: None,
         };
         let m = finding_message(&pe);
-        assert!(!m.contains("VERICTO"), "should not show a bogus rule code: {m}");
-        assert!(!m.contains("— PARSE_ERROR"), "should not echo the status as a path: {m}");
-        assert!(m.to_lowercase().contains("parse"), "should say it couldn't parse: {m}");
+        assert!(
+            !m.contains("VERICTO"),
+            "should not show a bogus rule code: {m}"
+        );
+        assert!(
+            !m.contains("— PARSE_ERROR"),
+            "should not echo the status as a path: {m}"
+        );
+        assert!(
+            m.to_lowercase().contains("parse"),
+            "should say it couldn't parse: {m}"
+        );
         assert!(
             m.to_lowercase().contains("not blocked") || m.to_lowercase().contains("skipped"),
             "should reassure it doesn't block: {m}"
