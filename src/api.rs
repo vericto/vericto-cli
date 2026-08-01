@@ -308,7 +308,13 @@ pub struct Transport {
 /// When `ca_bundle` is set, every PEM certificate in it is added to the trust
 /// store on top of the bundled Mozilla roots (§6.4).
 pub(crate) fn build_client(t: &Transport) -> Result<reqwest::Client, ApiError> {
-    let mut builder = reqwest::Client::builder().timeout(t.timeout);
+    // Identify the client so the backend can attribute checks to the CLI + its
+    // version (populates ci_run_reports.client_name/client_version for the
+    // dashboard's per-channel latency + adoption analytics). Format: the
+    // conventional "<product>/<version>".
+    let mut builder = reqwest::Client::builder()
+        .timeout(t.timeout)
+        .user_agent(concat!("vericto-cli/", env!("CARGO_PKG_VERSION")));
 
     if let Some(path) = &t.ca_bundle {
         let pem = std::fs::read(path).map_err(|e| {
