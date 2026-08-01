@@ -143,6 +143,16 @@ fn sarif_level(q: &QueryResult) -> &'static str {
 
 /// A one-line human message for a finding.
 fn finding_message(q: &QueryResult) -> String {
+    // PARSE_ERROR is informational, not a rule match: the engine couldn't parse
+    // the statement, so there's no rule_code/severity, and ast_node_path is just
+    // the literal "PARSE_ERROR" (which made the old message read
+    // "VERICTO [PARSE_ERROR] — PARSE_ERROR"). Give it a plain, self-explanatory
+    // line that says what happened and that it doesn't block.
+    if q.status == "PARSE_ERROR" {
+        return "Could not parse this SQL — skipped, not blocked (check the syntax or --dialect)"
+            .to_string();
+    }
+
     let rule = q.rule_code.as_deref().unwrap_or("VERICTO");
     let sev = q.severity.as_deref().unwrap_or("");
     let path = q.ast_node_path.as_deref().unwrap_or("");
@@ -150,7 +160,9 @@ fn finding_message(q: &QueryResult) -> String {
     if !sev.is_empty() {
         msg.push_str(&format!(" ({sev})"));
     }
-    if !path.is_empty() {
+    // Skip a path that just echoes the status (e.g. PARSE_ERROR handled above,
+    // but guard generally against a redundant "— <STATUS>" tail).
+    if !path.is_empty() && path != q.status {
         msg.push_str(&format!(" — {path}"));
     }
     if let Some(fix) = &q.suggested_fix {
@@ -575,6 +587,31 @@ mod tests {
         assert!(m.contains("BLOCKED"));
         assert!(m.contains("critical"));
         assert!(m.contains("fix:"));
+    }
+
+    #[test]
+    fn finding_message_parse_error_is_plain_and_not_redundant() {
+        // Backend sends status=PARSE_ERROR, no rule_code/severity, and
+        // ast_node_path echoing the literal "PARSE_ERROR". The message must not
+        // read "VERICTO [PARSE_ERROR] — PARSE_ERROR".
+        let pe = QueryResult {
+            line: 1,
+            sql_preview: "COPY t FROM stdin".into(),
+            status: "PARSE_ERROR".into(),
+            action: None,
+            rule_code: None,
+            ast_node_path: Some("PARSE_ERROR".into()),
+            severity: None,
+            suggested_fix: None,
+        };
+        let m = finding_message(&pe);
+        assert!(!m.contains("VERICTO"), "should not show a bogus rule code: {m}");
+        assert!(!m.contains("— PARSE_ERROR"), "should not echo the status as a path: {m}");
+        assert!(m.to_lowercase().contains("parse"), "should say it couldn't parse: {m}");
+        assert!(
+            m.to_lowercase().contains("not blocked") || m.to_lowercase().contains("skipped"),
+            "should reassure it doesn't block: {m}"
+        );
     }
 
     #[test]
