@@ -224,6 +224,34 @@ pub struct RuleSummary {
     pub resolved_action: String,
 }
 
+/// One API key's metadata, from `GET /api/v1/ci/keys` (`vericto keys list`).
+/// No secret/hash — keys can't be re-shown; management stays in the dashboard.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiKeyInfo {
+    pub key_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    pub is_active: bool,
+    /// True for the key making the request (the one the CLI is authenticated as).
+    #[serde(default)]
+    pub is_current: bool,
+}
+
+/// Response body of `GET /api/v1/ci/keys`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KeysListResponse {
+    pub data: Vec<ApiKeyInfo>,
+}
+
 /// Response body of `GET /api/v1/ci/rules`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RulesListResponse {
@@ -434,6 +462,45 @@ pub async fn config(
                 message: extract_message(&body),
             })
         };
+    }
+}
+
+/// Fetches `GET /api/v1/ci/keys` (`vericto keys list`) — the workspace's API
+/// keys (metadata only, never secrets). Read-only; a 404 on an older backend
+/// surfaces as `Backend` so the caller can hint that the feature needs a newer
+/// server.
+pub async fn keys_list(
+    api_url: &str,
+    api_key: &str,
+    transport: &Transport,
+) -> Result<KeysListResponse, ApiError> {
+    let client = build_client(transport)?;
+    let url = format!("{}/api/v1/ci/keys", api_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() {
+        return resp
+            .json::<KeysListResponse>()
+            .await
+            .map_err(|e| ApiError::Backend {
+                status: status.as_u16(),
+                message: format!("invalid keys list body: {e}"),
+            });
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        Err(ApiError::Auth(extract_message(&body)))
+    } else {
+        Err(ApiError::Backend {
+            status: code,
+            message: extract_message(&body),
+        })
     }
 }
 

@@ -119,7 +119,10 @@ fn backend_compat(api_version: &str) -> Compat {
 #[command(
     name = "vericto",
     version,
-    about = "Validate SQL against your Vericto rules before it runs"
+    about = "Validate SQL against your Vericto rules before it runs",
+    // Put the invocation on its own line under the "Usage:" label (clap's
+    // default renders "Usage: vericto <COMMAND>" on a single line).
+    override_usage = "\n       vericto <COMMAND>"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -144,6 +147,10 @@ enum Command {
     VerifyReceipt(VerifyReceiptArgs),
     /// Inspect the workspace's rule catalogue (`list` / `show <CODE>`).
     Rules(RulesArgs),
+    /// List the workspace's API keys (read-only; manage them in the dashboard).
+    Keys(KeysArgs),
+    /// Links to the documentation, by topic (open one with `docs <TOPIC>`).
+    Docs(DocsArgs),
     /// Print the CLI version (same as `--version`).
     Version,
     /// Print a shell completion script to stdout (bash|zsh|fish|powershell|elvish).
@@ -413,6 +420,113 @@ enum RulesCommand {
     /// Show one rule's full detail, including the AST condition it matches.
     Show(RulesShowArgs),
 }
+
+#[derive(Parser)]
+struct KeysArgs {
+    #[command(subcommand)]
+    command: KeysCommand,
+}
+
+#[derive(Subcommand)]
+enum KeysCommand {
+    /// List the workspace's API keys (metadata only; create/revoke in the dashboard).
+    List(KeysListArgs),
+}
+
+#[derive(Parser)]
+struct KeysListArgs {
+    #[command(flatten)]
+    auth: RulesAuthArgs,
+
+    /// Emit the key list as JSON instead of a human-readable table.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct DocsArgs {
+    /// A topic slug to open in your browser (e.g. `enforcement`). With no
+    /// topic, prints the full list of topics and their URLs.
+    topic: Option<String>,
+
+    /// Print the topic list as JSON (ignored when a topic is given).
+    #[arg(long)]
+    json: bool,
+
+    /// Base URL for the docs site (defaults to the app URL). Handy for a
+    /// self-hosted or staging docs site.
+    #[arg(long, value_name = "URL", env = "VERICTO_APP_URL")]
+    app_url: Option<String>,
+}
+
+/// A documentation topic: `slug` is what the user types (`docs enforcement`)
+/// and what the URL path uses; `title`/`blurb` are for the printed list.
+struct DocTopic {
+    slug: &'static str,
+    title: &'static str,
+    blurb: &'static str,
+}
+
+/// The docs topics `vericto docs` links to. Kept in sync with the pages served
+/// at `<app>/docs/<slug>` (landing/docs/*.html). Order is roughly the reading
+/// order a new user would follow.
+const DOC_TOPICS: &[DocTopic] = &[
+    DocTopic {
+        slug: "overview",
+        title: "Overview",
+        blurb: "What Vericto is and how the pieces fit together",
+    },
+    DocTopic {
+        slug: "enforcement",
+        title: "Enforcement",
+        blurb: "How rules resolve to block / flag / monitor actions",
+    },
+    DocTopic {
+        slug: "custom-rules",
+        title: "Custom rules",
+        blurb: "Write your own AST-condition rules beyond the standard set",
+    },
+    DocTopic {
+        slug: "api-keys",
+        title: "API keys",
+        blurb: "Create, scope, and rotate keys for the CLI and CI",
+    },
+    DocTopic {
+        slug: "telemetry-privacy",
+        title: "Telemetry & privacy",
+        blurb: "Raw vs sanitized query telemetry and what leaves your machine",
+    },
+    DocTopic {
+        slug: "audit-trail",
+        title: "Audit trail",
+        blurb: "The immutable record of decisions and its retention window",
+    },
+    DocTopic {
+        slug: "verify-reports",
+        title: "Verify reports",
+        blurb: "Offline verification of signed run receipts",
+    },
+    DocTopic {
+        slug: "alerts",
+        title: "Alerts",
+        blurb: "Notifications when rules fire or thresholds are crossed",
+    },
+    DocTopic {
+        slug: "teams",
+        title: "Teams",
+        blurb: "Members, roles, and workspace access",
+    },
+    DocTopic {
+        slug: "sso",
+        title: "SSO",
+        blurb: "Single sign-on / OIDC for the dashboard and CLI login",
+    },
+    DocTopic {
+        slug: "timezones",
+        title: "Timezones",
+        blurb: "How timestamps and quota windows are anchored",
+    },
+];
 
 /// Auth/transport flags shared by `rules list` and `rules show` — the same
 /// shape `doctor` uses, since both are read-only calls against the CI API-key
@@ -800,6 +914,10 @@ async fn main() -> ExitCode {
             RulesCommand::List(a) => run_rules_list(a).await,
             RulesCommand::Show(a) => run_rules_show(a).await,
         },
+        Command::Keys(args) => match args.command {
+            KeysCommand::List(a) => run_keys_list(a).await,
+        },
+        Command::Docs(args) => run_docs(args),
         Command::Version => {
             println!("vericto {}", env!("CARGO_PKG_VERSION"));
             ExitCode::from(exit::OK)
@@ -1985,6 +2103,98 @@ async fn resolve_rules_auth(
 /// `vericto rules list` — print the workspace's effective rule catalogue
 /// (standard rules merged with overrides, plus active custom rules). Read-only:
 /// does not spend the monthly CI-check allowance.
+/// `vericto keys list` — list the workspace's API keys (read-only; management
+/// lives in the dashboard). Marks the key the CLI is authenticated as.
+async fn run_keys_list(args: KeysListArgs) -> ExitCode {
+    let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    let resp = match api::keys_list(&api_url, &api_key, &transport).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return match e {
+                ApiError::Auth(_) => ExitCode::from(exit::AUTH),
+                _ => ExitCode::from(exit::BACKEND),
+            };
+        }
+    };
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&resp).unwrap_or_default()
+        );
+        return ExitCode::from(exit::OK);
+    }
+
+    if resp.data.is_empty() {
+        println!("No API keys in this workspace.");
+        return ExitCode::from(exit::OK);
+    }
+
+    output::render_keys(&resp.data);
+    ExitCode::from(exit::OK)
+}
+
+/// `vericto docs` — list documentation topics and their URLs, or open one in
+/// the browser with `docs <TOPIC>`. Purely local: it builds `<app>/docs/<slug>`
+/// URLs from a static catalogue — no network, no auth, no config required.
+fn run_docs(args: DocsArgs) -> ExitCode {
+    let base = args
+        .app_url
+        .clone()
+        .unwrap_or_else(|| config::DEFAULT_APP_URL.to_string());
+    let base = base.trim_end_matches('/');
+    let url_for = |slug: &str| format!("{base}/docs/{slug}");
+
+    // `docs <topic>` — resolve the slug (case-insensitively) and open it.
+    if let Some(topic) = args.topic.as_deref() {
+        let wanted = topic.trim().to_lowercase();
+        let Some(t) = DOC_TOPICS.iter().find(|t| t.slug == wanted) else {
+            eprintln!("error: unknown docs topic: {topic}");
+            eprintln!("run `vericto docs` to see the available topics.");
+            return ExitCode::from(exit::USAGE);
+        };
+        let url = url_for(t.slug);
+        println!("Opening {} — {url}", t.title);
+        if browser_login::open_browser(&url).is_err() {
+            eprintln!("note: could not open a browser automatically. Visit:\n  {url}");
+        }
+        return ExitCode::from(exit::OK);
+    }
+
+    // No topic — list them all.
+    if args.json {
+        let items: Vec<_> = DOC_TOPICS
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "slug": t.slug,
+                    "title": t.title,
+                    "description": t.blurb,
+                    "url": url_for(t.slug),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "topics": items }))
+                .unwrap_or_default()
+        );
+        return ExitCode::from(exit::OK);
+    }
+
+    output::render_docs(
+        DOC_TOPICS
+            .iter()
+            .map(|t| (t.slug, t.title, t.blurb, url_for(t.slug))),
+    );
+    ExitCode::from(exit::OK)
+}
+
 async fn run_rules_list(args: RulesListArgs) -> ExitCode {
     let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
         Ok(t) => t,
