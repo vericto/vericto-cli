@@ -529,6 +529,19 @@ pub fn render_rule_detail(r: &RuleDetail) {
             let _ = writeln!(out, "    {line}");
         }
     }
+    // Curated samples: what trips the rule (red ✗) and a safe equivalent
+    // (green ✓, when one exists). Shown only for rules that carry them.
+    if r.example_bad.is_some() || r.example_good.is_some() {
+        let bad = Style::new().fg_color(Some(AnsiColor::Red.into()));
+        let good = Style::new().fg_color(Some(AnsiColor::Green.into()));
+        let _ = writeln!(out, "\n  examples:");
+        if let Some(sql) = &r.example_bad {
+            let _ = writeln!(out, "    {bad}✗ triggers:{bad:#} {sql}");
+        }
+        if let Some(sql) = &r.example_good {
+            let _ = writeln!(out, "    {good}✓ safe:{good:#}     {sql}");
+        }
+    }
     let dim = Style::new().dimmed();
     let _ = writeln!(out, "\n{dim}ruleset {}{dim:#}", r.ruleset_version);
 }
@@ -814,6 +827,8 @@ mod tests {
             is_active: true,
             resolved_action: "block".into(),
             ast_condition_yaml: Some("node_type: DeleteStmt\nwhere_null: true".into()),
+            example_bad: Some("DELETE FROM orders;".into()),
+            example_good: Some("DELETE FROM orders WHERE id = $1;".into()),
             ruleset_version: "v1.0.0".into(),
         };
         render_rule_detail(&full);
@@ -828,6 +843,8 @@ mod tests {
             is_active: false,
             resolved_action: "flag".into(),
             ast_condition_yaml: None,
+            example_bad: None,
+            example_good: None,
             ruleset_version: "v1.0.0".into(),
         };
         render_rule_detail(&minimal);

@@ -276,6 +276,12 @@ pub struct RuleDetail {
     pub resolved_action: String,
     #[serde(default)]
     pub ast_condition_yaml: Option<String>,
+    /// Curated example that triggers this rule (standard rules; None for custom
+    /// or older backends). `example_good` is a safe equivalent when one exists.
+    #[serde(default)]
+    pub example_bad: Option<String>,
+    #[serde(default)]
+    pub example_good: Option<String>,
     pub ruleset_version: String,
 }
 
