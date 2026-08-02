@@ -53,6 +53,39 @@ fn parse_major_minor(v: &str) -> Option<(u32, u32)> {
     Some((major, minor.unwrap_or(0)))
 }
 
+/// Parses "MAJOR.MINOR.PATCH" into a comparable tuple (missing parts → 0).
+/// Returns None if it can't read at least a major. Used for the update nudge.
+fn parse_semver(v: &str) -> Option<(u32, u32, u32)> {
+    let core = v.trim().trim_start_matches('v');
+    let mut it = core.split('.');
+    let part = |s: Option<&str>| -> u32 {
+        s.map(|s| {
+            s.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+        })
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(0)
+    };
+    let major = it
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((major, part(it.next()), part(it.next())))
+}
+
+/// True when `installed` is strictly older than `minimum` (both "x.y.z").
+/// Unparseable inputs → false (never nudge on garbage).
+fn version_older_than(installed: &str, minimum: &str) -> bool {
+    match (parse_semver(installed), parse_semver(minimum)) {
+        (Some(a), Some(b)) => a < b,
+        _ => false,
+    }
+}
+
 /// Compatibility verdict between the backend's reported API version and the
 /// minimum this CLI requires.
 enum Compat {
@@ -479,6 +512,13 @@ struct CheckArgs {
     #[arg(long)]
     stdin_file_list: bool,
 
+    /// Evaluate a SQL statement passed on the command line instead of reading a
+    /// file — e.g. `vericto check --sql "UPDATE * FROM payments"`. Repeat to
+    /// check several. Mutually exclusive with files / --changed / stdin. Reported
+    /// in telemetry as `<inline>`, and subject to the same raw/sanitized mode.
+    #[arg(long = "sql", short = 'e', value_name = "SQL")]
+    sql: Vec<String>,
+
     /// SQL dialect of the files. Falls back to the config's default_dialect,
     /// then "postgres".
     #[arg(long)]
@@ -844,33 +884,64 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         .clone()
         .or_else(|| project.baseline.as_ref().map(std::path::PathBuf::from));
 
-    // Resolve the file list: explicit args, the git diff (--changed/--since), or
-    // a newline-delimited list piped in (--stdin-file-list).
-    let files = match resolve_files(&args.files, args.changed, &args.since, args.stdin_file_list) {
-        FileResolution::Files(f) => f,
-        FileResolution::EmptyDiff(msg) => {
-            println!("{msg}");
-            return ExitCode::from(exit::OK);
-        }
-        FileResolution::Usage(msg) => {
-            eprintln!("error: {msg}");
+    // Two input modes: inline SQL passed with --sql/-e, or SQL read from files
+    // / the git diff / stdin. They're mutually exclusive. `files` is the label
+    // list aligned with `queries` by 1-based line (drives report/telemetry
+    // paths + fingerprints); inline uses "<inline>" for every entry.
+    let (mut queries, file_name, files) = if !args.sql.is_empty() {
+        // Inline mode: --sql can't be combined with file selectors.
+        if !args.files.is_empty() || args.changed || args.since.is_some() || args.stdin_file_list {
+            eprintln!("error: --sql can't be combined with files, --changed/--since, or --stdin-file-list.");
             return ExitCode::from(exit::USAGE);
         }
-    };
-
-    let mut queries = match collect_queries(&files) {
-        Some(q) => q,
-        None => return ExitCode::from(exit::USAGE),
-    };
-    if queries.is_empty() {
-        eprintln!("error: no SQL to check (all inputs were empty).");
-        return ExitCode::from(exit::USAGE);
-    }
-
-    let file_name = if files.len() == 1 && files[0] != "-" {
-        Some(files[0].clone())
+        let queries: Vec<QueryInput> = args
+            .sql
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.trim().is_empty())
+            .map(|(i, s)| QueryInput {
+                line: (i + 1) as u32,
+                sql: s.clone(),
+            })
+            .collect();
+        if queries.is_empty() {
+            eprintln!("error: --sql was empty — nothing to check.");
+            return ExitCode::from(exit::USAGE);
+        }
+        // No source path — telemetry/report labels every inline query "<inline>".
+        let labels = vec!["<inline>".to_string(); queries.len()];
+        (queries, Some("<inline>".to_string()), labels)
     } else {
-        None
+        // File mode: explicit args, the git diff (--changed/--since), or a
+        // newline-delimited list piped in (--stdin-file-list).
+        let files =
+            match resolve_files(&args.files, args.changed, &args.since, args.stdin_file_list) {
+                FileResolution::Files(f) => f,
+                FileResolution::EmptyDiff(msg) => {
+                    println!("{msg}");
+                    return ExitCode::from(exit::OK);
+                }
+                FileResolution::Usage(msg) => {
+                    eprintln!("error: {msg}");
+                    return ExitCode::from(exit::USAGE);
+                }
+            };
+
+        let queries = match collect_queries(&files) {
+            Some(q) => q,
+            None => return ExitCode::from(exit::USAGE),
+        };
+        if queries.is_empty() {
+            eprintln!("error: no SQL to check (all inputs were empty).");
+            return ExitCode::from(exit::USAGE);
+        }
+
+        let file_name = if files.len() == 1 && files[0] != "-" {
+            Some(files[0].clone())
+        } else {
+            None
+        };
+        (queries, file_name, files)
     };
 
     // Pre-flight (§6.2): learn the workspace's telemetry query mode BEFORE
@@ -1020,6 +1091,21 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         if remaining <= 50 {
             eprintln!(
                 "note: {remaining} CLI checks left this month on your plan. Upgrade at https://vericto.com/pricing for more."
+            );
+        }
+    }
+
+    // Nudge to update when this CLI is older than the backend's minimum
+    // supported version (stderr, so it never touches --format json on stdout).
+    // Channel-agnostic message: npm is the primary channel; link releases for
+    // the shell installer / other channels.
+    if let Some(min) = resp.min_cli_version.as_deref() {
+        if version_older_than(env!("CARGO_PKG_VERSION"), min) {
+            eprintln!(
+                "note: vericto-cli {} is older than the minimum supported {min}. \
+                 Update: `npm install -g @vericto/vericto-cli@latest` \
+                 (or see https://github.com/vericto/vericto-cli/releases).",
+                env!("CARGO_PKG_VERSION")
             );
         }
     }
@@ -2321,6 +2407,22 @@ mod tests {
     }
 
     #[test]
+    fn version_older_than_nudges_only_when_strictly_older() {
+        // Older by patch / minor / major → nudge.
+        assert!(version_older_than("1.0.0", "1.0.1"));
+        assert!(version_older_than("1.0.0", "1.1.0"));
+        assert!(version_older_than("1.9.9", "2.0.0"));
+        assert!(version_older_than("v1.0.0", "1.0.1")); // leading v tolerated
+                                                        // Equal or newer → no nudge.
+        assert!(!version_older_than("1.1.0", "1.1.0"));
+        assert!(!version_older_than("1.2.0", "1.1.0"));
+        assert!(!version_older_than("2.0.0", "1.9.9"));
+        // Unparseable → never nudge (don't cry wolf on garbage).
+        assert!(!version_older_than("nope", "1.0.0"));
+        assert!(!version_older_than("1.0.0", "nope"));
+    }
+
+    #[test]
     fn backend_compat_matrix() {
         // MIN_BACKEND_API_VERSION is "1.0.0".
         assert!(matches!(backend_compat("1.0.0"), Compat::Ok));
@@ -2358,6 +2460,7 @@ mod tests {
             exit_code: 0,
             ci_checks_remaining: None,
             telemetry_query_mode: None,
+            min_cli_version: None,
             receipt: None,
             merged_receipts: Vec::new(),
             api_version_header: None,

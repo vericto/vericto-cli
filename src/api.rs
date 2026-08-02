@@ -118,6 +118,10 @@ pub struct CheckResponse {
     /// older backends → treated as 'raw'.
     #[serde(default)]
     pub telemetry_query_mode: Option<String>,
+    /// Oldest CLI this backend still speaks to. When our own version is older,
+    /// `check` nudges the user to update. Absent on older backends → no nudge.
+    #[serde(default)]
+    pub min_cli_version: Option<String>,
     /// Signed run receipt (§7.1), present only when the request set `receipt` and
     /// signing is configured server-side. `null`/absent otherwise.
     #[serde(default)]
@@ -808,6 +812,8 @@ fn merge_responses(mut parts: Vec<CheckResponse>) -> CheckResponse {
     // API version is workspace/deployment-level, identical across chunks — keep
     // the first non-empty.
     let api_version_header = parts.iter().find_map(|p| p.api_version_header.clone());
+    // Deployment-level, identical across chunks — keep the first non-empty.
+    let min_cli_version = parts.iter().find_map(|p| p.min_cli_version.clone());
     for p in parts {
         summary.total += p.summary.total;
         summary.blocked += p.summary.blocked;
@@ -830,6 +836,7 @@ fn merge_responses(mut parts: Vec<CheckResponse>) -> CheckResponse {
         exit_code,
         ci_checks_remaining: remaining,
         telemetry_query_mode,
+        min_cli_version,
         receipt: None,
         merged_receipts,
         api_version_header,

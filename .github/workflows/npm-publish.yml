@@ -1,0 +1,49 @@
+# Custom cargo-dist publish job: publish the npm package.
+#
+# Why a custom job instead of the built-in `publish-jobs = ["npm"]`? The
+# NPM_TOKEN lives in the `prod` GitHub Environment (required-reviewer gated,
+# since this is a public repo). The built-in job runs without an `environment:`,
+# so it can't read an environment-scoped secret. A reusable workflow that
+# declares `environment: prod` at the job level resolves that secret locally
+# (environment secrets aren't inheritable via the caller — they must be read by
+# a job that sets the environment). Referenced from dist-workspace.toml as
+# `publish-jobs = ["./npm-publish"]`; regenerated into release.yml by `dist
+# generate`, so it survives regeneration.
+name: Publish npm package
+
+on:
+  workflow_call:
+    # cargo-dist passes the release plan (same JSON as dist-manifest.json) so we
+    # can find the built npm tarball(s) to publish.
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  npm-publish:
+    runs-on: ubuntu-22.04
+    # Gates the publish behind the `prod` environment (required reviewer) and,
+    # crucially, makes the environment-scoped NPM_TOKEN available to this job.
+    environment: prod
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - name: Fetch npm packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: npm/
+          merge-multiple: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish to npm
+        run: |
+          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
+            pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
+            npm publish --access public "./npm/${pkg}"
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -7,7 +7,7 @@ The installed command is `vericto`. It is a **thin client**: it sends SQL to the
 Vericto backend (`POST /api/v1/ci/check-key`, API-key auth) and mirrors the verdict
 as a process exit code. It does not evaluate locally. Available on **every plan**
 — checks are metered by a monthly CLI allowance (free tier included; team/
-enterprise unmetered). See [DESIGN.md](DESIGN.md) for the full design.
+enterprise unmetered). See [DESIGN.md](https://github.com/vericto/vericto-cli/blob/main/DESIGN.md) for the full design.
 
 ## Install
 
@@ -19,13 +19,13 @@ Every other channel serves those same binaries.
 
 ```bash
 # Phase 1 — shell installer (Linux/macOS)
-curl -fsSL https://github.com/donkan168/vericto-cli/releases/latest/download/vericto-cli-installer.sh | sh
+curl -fsSL https://github.com/vericto/vericto-cli/releases/latest/download/vericto-cli-installer.sh | sh
 
 # Phase 1 — Docker (CI runners that prefer an image step)
-docker run --rm -e VERICTO_API_KEY ghcr.io/donkan168/vericto-cli:latest check migrations/*.sql
+docker run --rm -e VERICTO_API_KEY ghcr.io/vericto/vericto-cli:latest check migrations/*.sql
 
 # Or download a prebuilt binary directly:
-#   https://github.com/donkan168/vericto-cli/releases
+#   https://github.com/vericto/vericto-cli/releases
 ```
 
 ```bash
@@ -38,11 +38,10 @@ npm install -g @vericto/vericto-cli      # or: npx @vericto/vericto-cli check ..
 cargo install --path .
 ```
 
-> **npm:** the release pipeline builds the `@vericto/vericto-cli` package on every
-> tag; publishing to the npm registry requires an `NPM_TOKEN` repo secret (see
-> _Publishing to npm_ below). **Homebrew/Scoop remain planned** —
-> `brew install donkan168/vericto/vericto`, `scoop install vericto` — pending a tap /
-> bucket repo. Until a channel is live, use the shell installer, Docker image,
+> **npm:** the release pipeline builds **and publishes** `@vericto/vericto-cli`
+> to the registry on every version tag. **Homebrew/Scoop remain planned** —
+> `brew install vericto/vericto/vericto`, `scoop install vericto` — pending a tap /
+> bucket repo. Until those are live, use npm, the shell installer, Docker image,
 > or `cargo install`.
 
 > The CLI is a network-only thin client — it always evaluates against your live
@@ -63,23 +62,8 @@ sha256sum -c vericto-cli-x86_64-unknown-linux-musl.tar.xz.sha256
 > pipeline but **currently disabled**: GitHub artifact attestations aren't
 > available for user-owned _private_ repositories. Once this repo is public or
 > moves under an org, re-enable them (see `dist-workspace.toml`) and verification
-> becomes `gh attestation verify <artifact> --repo donkan168/vericto-cli`.
+> becomes `gh attestation verify <artifact> --repo vericto/vericto-cli`.
 
-### Publishing to npm (maintainers)
-
-The release pipeline builds the `@vericto/vericto-cli` npm package tarball on every
-tag, but does not publish it. To publish `v0.1.0` to the registry:
-
-```bash
-# One-time: create an automation token at npmjs.com and grant the @vericto org
-# publish rights, then either publish manually…
-gh release download v0.1.0 --repo donkan168/vericto-cli --pattern 'vericto-cli-npm-package.tar.gz'
-tar -xf vericto-cli-npm-package.tar.gz
-cd vericto-cli-npm-package && npm publish --access public   # needs `npm login` / NPM_TOKEN
-```
-
-To automate it in CI, add an `NPM_TOKEN` repo secret and a publish step (or
-cargo-dist's `publish-jobs = ["npm"]`) so tags publish the package directly.
 
 ## Commands
 
@@ -375,7 +359,7 @@ Distinct non-zero codes let CI distinguish a real block from an outage.
 GitHub and GitLab are both first-class: findings render inline on PRs/MRs, not
 just as an exit code. See DESIGN §10 for the full integration design.
 
-**GitHub Actions** (SARIF → Code Scanning annotations — v0.2):
+**GitHub Actions** (SARIF → Code Scanning annotations):
 ```yaml
 - run: vericto check --changed --format sarif --output vericto.sarif
   env:
@@ -385,7 +369,7 @@ just as an exit code. See DESIGN §10 for the full integration design.
     sarif_file: vericto.sarif
 ```
 
-**GitLab CI** (Code Quality report → MR annotations — v0.2):
+**GitLab CI** (Code Quality report → MR annotations):
 ```yaml
 vericto-check:
   script: vericto check --changed --format gitlab-codequality --output gl-code-quality.json
