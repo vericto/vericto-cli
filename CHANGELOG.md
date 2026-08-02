@@ -13,6 +13,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   metadata only — never a key secret or hash. Create/revoke/rotate stay
   JWT-gated in the dashboard on purpose (an API key must not manage other keys).
   Uses the same `ci_dryrun:execute` scope as `check`; spends no check allowance.
+- **`vericto docs [topic]`** — list documentation links by topic, or open one in
+  your browser (`vericto docs enforcement`). `--json` for scripting. Purely
+  local (no network/auth); links to `https://vericto.com/docs/<topic>`, with an
+  `--app-url` / `$VERICTO_APP_URL` override for self-hosted/staging docs.
+
+### Changed
+- `vericto --help` / `vericto help` now prints the usage invocation on its own
+  line under the `Usage:` label, instead of the single-line
+  `Usage: vericto <COMMAND>`.
 
 ## [1.2.0] - 2026-08-02
 

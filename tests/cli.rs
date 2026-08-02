@@ -1255,6 +1255,79 @@ async fn keys_list_auth_error_exits_3() {
         .code(3);
 }
 
+// ── vericto docs ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn docs_list_shows_topics_and_urls() {
+    // No network, no auth — purely local URL building.
+    let out = vericto()
+        .args(["docs"])
+        .env("VERICTO_APP_URL", "https://vericto.com")
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("enforcement"), "output: {s}");
+    assert!(
+        s.contains("https://vericto.com/docs/enforcement"),
+        "output: {s}"
+    );
+    assert!(s.contains("vericto docs <topic>"), "output: {s}");
+}
+
+#[tokio::test]
+async fn docs_json_lists_every_topic() {
+    let out = vericto()
+        .args(["docs", "--json"])
+        .env("VERICTO_APP_URL", "https://vericto.com")
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let topics = v["topics"].as_array().unwrap();
+    assert!(
+        topics.len() >= 10,
+        "expected the full catalogue: {}",
+        topics.len()
+    );
+    assert!(topics.iter().any(|t| t["slug"] == "api-keys"));
+    assert!(topics.iter().all(|t| t["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://vericto.com/docs/")));
+}
+
+#[tokio::test]
+async fn docs_app_url_override_changes_base() {
+    let out = vericto()
+        .args([
+            "docs",
+            "--json",
+            "--app-url",
+            "https://staging.example.test/",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    // Trailing slash on the base must not double up in the URL.
+    assert!(v["topics"][0]["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://staging.example.test/docs/"));
+}
+
+#[tokio::test]
+async fn docs_unknown_topic_exits_2() {
+    vericto().args(["docs", "does-not-exist"]).assert().code(2);
+}
+
 // ── vericto baseline prune ───────────────────────────────────────────────────
 
 #[tokio::test]

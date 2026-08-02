@@ -74,6 +74,7 @@ vericto baseline prune     Remove baseline entries that no longer match any find
 vericto rules list         List the workspace's effective rule catalogue.
 vericto rules show <CODE>  Show one rule's detail (e.g. VERICTO-001), incl. its AST condition.
 vericto keys list          List the workspace's API keys (read-only; manage them in the dashboard).
+vericto docs [topic]       List documentation links by topic, or open one in your browser.
 vericto login              Log in via your browser (default), or --api-key/--oidc for CI.
 vericto logout             Remove the stored API key.
 vericto doctor             Verify config, connectivity, auth, and plan quota.
@@ -153,6 +154,21 @@ Read-only by design and returns metadata only — never a key secret or hash.
 Creating, revoking, or rotating keys stays in the dashboard: an API key must not
 be able to manage other keys (that would be privilege escalation). Uses the same
 `ci_dryrun:execute`-scoped key as `check`, and spends no check allowance.
+
+## Documentation links (`vericto docs`)
+
+Jump to the right doc without leaving the terminal — list every topic with its
+URL, or open one straight in your browser:
+
+```bash
+vericto docs                 # list all topics + URLs
+vericto docs enforcement     # open the "enforcement" page in your browser
+vericto docs --json          # machine-readable, for scripting
+```
+
+Purely local — no network, no auth, no config needed. Links point at
+`https://vericto.com/docs/<topic>`; override the base with `--app-url`
+(or `$VERICTO_APP_URL`) for a self-hosted or staging docs site.
 
 ## Project config (`.vericto.toml`)
 

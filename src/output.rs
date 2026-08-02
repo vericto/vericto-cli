@@ -489,6 +489,20 @@ pub fn render_keys(keys: &[ApiKeyInfo]) {
     );
 }
 
+/// `vericto docs` (text): one entry per topic — bold slug, blurb, then a dim
+/// URL underneath. Takes `(slug, title, blurb, url)` tuples so it stays
+/// decoupled from the topic catalogue in main.rs.
+pub fn render_docs<'a>(topics: impl Iterator<Item = (&'a str, &'a str, &'a str, String)>) {
+    let mut out = anstream::stdout();
+    let bold = Style::new().bold();
+    let dim = Style::new().dimmed();
+    for (slug, _title, blurb, url) in topics {
+        let _ = writeln!(out, "{bold}{slug}{bold:#}  {blurb}");
+        let _ = writeln!(out, "  {dim}{url}{dim:#}");
+    }
+    let _ = writeln!(out, "{dim}Open one with: vericto docs <topic>{dim:#}");
+}
+
 /// `vericto rules show <CODE>` (text format): a detail block including the
 /// AST condition the engine actually evaluates against.
 pub fn render_rule_detail(r: &RuleDetail) {
