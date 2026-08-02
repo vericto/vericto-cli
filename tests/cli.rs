@@ -1258,7 +1258,7 @@ async fn keys_list_auth_error_exits_3() {
 // ── vericto docs ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn docs_list_shows_topics_and_urls() {
+async fn docs_list_shows_topics_grouped_with_base_url() {
     // No network, no auth — purely local URL building.
     let out = vericto()
         .args(["docs"])
@@ -1269,10 +1269,15 @@ async fn docs_list_shows_topics_and_urls() {
         .stdout
         .clone();
     let s = String::from_utf8_lossy(&out);
+    // Slugs are listed, grouped under category headings.
     assert!(s.contains("enforcement"), "output: {s}");
+    assert!(s.contains("Getting started"), "output: {s}");
+    assert!(s.contains("Security & privacy"), "output: {s}");
+    // The URL base is shown once in the header — not repeated per row.
+    assert!(s.contains("https://vericto.com/docs"), "output: {s}");
     assert!(
-        s.contains("https://vericto.com/docs/enforcement"),
-        "output: {s}"
+        !s.contains("https://vericto.com/docs/enforcement"),
+        "per-row URLs should be gone: {s}"
     );
     assert!(s.contains("vericto docs <topic>"), "output: {s}");
 }
@@ -1299,6 +1304,10 @@ async fn docs_json_lists_every_topic() {
         .as_str()
         .unwrap()
         .starts_with("https://vericto.com/docs/")));
+    // Every topic carries a category (used to group the text output).
+    assert!(topics
+        .iter()
+        .all(|t| t["category"].as_str().is_some_and(|c| !c.is_empty())));
 }
 
 #[tokio::test]

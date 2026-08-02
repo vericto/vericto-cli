@@ -161,10 +161,14 @@ Jump to the right doc without leaving the terminal — list every topic with its
 URL, or open one straight in your browser:
 
 ```bash
-vericto docs                 # list all topics + URLs
+vericto docs                 # topics grouped by category, with slugs to open
 vericto docs enforcement     # open the "enforcement" page in your browser
 vericto docs --json          # machine-readable, for scripting
 ```
+
+The list groups topics by category (Getting started / Security & privacy /
+Workspace) with the URL base shown once in the header, so you scan slugs and
+open the one you want.
 
 Purely local — no network, no auth, no config needed. Links point at
 `https://vericto.com/docs/<topic>`; override the base with `--app-url`

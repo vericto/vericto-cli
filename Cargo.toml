@@ -1,6 +1,6 @@
 [package]
 name = "vericto-cli"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2021"
 rust-version = "1.88"
 description = "Vericto CLI — validate SQL against your workspace's security rules before it runs"
