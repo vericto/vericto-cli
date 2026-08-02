@@ -381,31 +381,59 @@ pub async fn config(
 ) -> Result<WorkspaceConfig, ApiError> {
     let client = build_client(transport)?;
     let url = format!("{}/api/v1/ci/config", api_url.trim_end_matches('/'));
-    let resp = client
-        .get(&url)
-        .header("X-API-Key", api_key)
-        .send()
-        .await
-        .map_err(|e| ApiError::Transport(e.to_string()))?;
-    let status = resp.status();
-    if status.is_success() {
-        return resp
-            .json::<WorkspaceConfig>()
-            .await
-            .map_err(|e| ApiError::Backend {
-                status: status.as_u16(),
-                message: format!("invalid config body: {e}"),
-            });
-    }
-    let body = resp.text().await.unwrap_or_default();
-    let code = status.as_u16();
-    if code == 401 || code == 403 {
-        Err(ApiError::Auth(extract_message(&body)))
-    } else {
-        Err(ApiError::Backend {
-            status: code,
-            message: extract_message(&body),
-        })
+    // Retry 429/5xx (honoring Retry-After on a 429) so a transient throttle on
+    // this pre-flight doesn't fall through to check's fail-open path — which
+    // would send unsanitized literals when the workspace policy is 'sanitized'.
+    let mut attempt = 0u32;
+    loop {
+        let sent = client.get(&url).header("X-API-Key", api_key).send().await;
+        let resp = match sent {
+            Ok(r) => r,
+            Err(e) => {
+                if attempt < MAX_RETRIES {
+                    tokio::time::sleep(backoff_delay(attempt)).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(ApiError::Transport(e.to_string()));
+            }
+        };
+        let status = resp.status();
+        if status.is_success() {
+            return resp
+                .json::<WorkspaceConfig>()
+                .await
+                .map_err(|e| ApiError::Backend {
+                    status: status.as_u16(),
+                    message: format!("invalid config body: {e}"),
+                });
+        }
+        let code = status.as_u16();
+        // Transient (429 / 5xx): back off and retry, respecting Retry-After.
+        if (code == 429 || code >= 500) && attempt < MAX_RETRIES {
+            let delay = if code == 429 {
+                resp.headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| backoff_delay(attempt))
+            } else {
+                backoff_delay(attempt)
+            };
+            tokio::time::sleep(delay).await;
+            attempt += 1;
+            continue;
+        }
+        let body = resp.text().await.unwrap_or_default();
+        return if code == 401 || code == 403 {
+            Err(ApiError::Auth(extract_message(&body)))
+        } else {
+            Err(ApiError::Backend {
+                status: code,
+                message: extract_message(&body),
+            })
+        };
     }
 }
 
