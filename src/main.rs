@@ -53,6 +53,39 @@ fn parse_major_minor(v: &str) -> Option<(u32, u32)> {
     Some((major, minor.unwrap_or(0)))
 }
 
+/// Parses "MAJOR.MINOR.PATCH" into a comparable tuple (missing parts → 0).
+/// Returns None if it can't read at least a major. Used for the update nudge.
+fn parse_semver(v: &str) -> Option<(u32, u32, u32)> {
+    let core = v.trim().trim_start_matches('v');
+    let mut it = core.split('.');
+    let part = |s: Option<&str>| -> u32 {
+        s.map(|s| {
+            s.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+        })
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(0)
+    };
+    let major = it
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((major, part(it.next()), part(it.next())))
+}
+
+/// True when `installed` is strictly older than `minimum` (both "x.y.z").
+/// Unparseable inputs → false (never nudge on garbage).
+fn version_older_than(installed: &str, minimum: &str) -> bool {
+    match (parse_semver(installed), parse_semver(minimum)) {
+        (Some(a), Some(b)) => a < b,
+        _ => false,
+    }
+}
+
 /// Compatibility verdict between the backend's reported API version and the
 /// minimum this CLI requires.
 enum Compat {
@@ -1020,6 +1053,21 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         if remaining <= 50 {
             eprintln!(
                 "note: {remaining} CLI checks left this month on your plan. Upgrade at https://vericto.com/pricing for more."
+            );
+        }
+    }
+
+    // Nudge to update when this CLI is older than the backend's minimum
+    // supported version (stderr, so it never touches --format json on stdout).
+    // Channel-agnostic message: npm is the primary channel; link releases for
+    // the shell installer / other channels.
+    if let Some(min) = resp.min_cli_version.as_deref() {
+        if version_older_than(env!("CARGO_PKG_VERSION"), min) {
+            eprintln!(
+                "note: vericto-cli {} is older than the minimum supported {min}. \
+                 Update: `npm install -g @vericto/vericto-cli@latest` \
+                 (or see https://github.com/vericto/vericto-cli/releases).",
+                env!("CARGO_PKG_VERSION")
             );
         }
     }
@@ -2321,6 +2369,22 @@ mod tests {
     }
 
     #[test]
+    fn version_older_than_nudges_only_when_strictly_older() {
+        // Older by patch / minor / major → nudge.
+        assert!(version_older_than("1.0.0", "1.0.1"));
+        assert!(version_older_than("1.0.0", "1.1.0"));
+        assert!(version_older_than("1.9.9", "2.0.0"));
+        assert!(version_older_than("v1.0.0", "1.0.1")); // leading v tolerated
+                                                        // Equal or newer → no nudge.
+        assert!(!version_older_than("1.1.0", "1.1.0"));
+        assert!(!version_older_than("1.2.0", "1.1.0"));
+        assert!(!version_older_than("2.0.0", "1.9.9"));
+        // Unparseable → never nudge (don't cry wolf on garbage).
+        assert!(!version_older_than("nope", "1.0.0"));
+        assert!(!version_older_than("1.0.0", "nope"));
+    }
+
+    #[test]
     fn backend_compat_matrix() {
         // MIN_BACKEND_API_VERSION is "1.0.0".
         assert!(matches!(backend_compat("1.0.0"), Compat::Ok));
@@ -2358,6 +2422,7 @@ mod tests {
             exit_code: 0,
             ci_checks_remaining: None,
             telemetry_query_mode: None,
+            min_cli_version: None,
             receipt: None,
             merged_receipts: Vec::new(),
             api_version_header: None,

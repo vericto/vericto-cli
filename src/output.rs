@@ -519,6 +519,7 @@ mod tests {
             exit_code: 1,
             ci_checks_remaining: None,
             telemetry_query_mode: None,
+            min_cli_version: None,
             receipt: None,
             merged_receipts: Vec::new(),
             api_version_header: None,
