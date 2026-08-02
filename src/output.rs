@@ -10,7 +10,7 @@
 //! whole as one item, so an annotation points at the file (line 1) with the
 //! rule's AST node path in the message.
 
-use crate::api::{CheckResponse, QueryResult, RuleDetail, RuleSummary};
+use crate::api::{ApiKeyInfo, CheckResponse, QueryResult, RuleDetail, RuleSummary};
 use anstyle::{AnsiColor, Style};
 use std::io::{self, Write};
 use std::path::Path;
@@ -453,6 +453,39 @@ pub fn render_rules_list(rules: &[&RuleSummary], ruleset_version: &str) {
         out,
         "{dim}{} rules   (ruleset {ruleset_version}){dim:#}",
         rules.len()
+    );
+}
+
+/// `vericto keys list` (text): one row per API key. Marks the key the CLI is
+/// authenticated as with "*", and dims revoked/expired (inactive) keys. No
+/// secrets — management (create/revoke) lives in the dashboard.
+pub fn render_keys(keys: &[ApiKeyInfo]) {
+    let mut out = anstream::stdout();
+    let name_w = keys.iter().map(|k| k.name.len()).max().unwrap_or(4).max(4);
+    for k in keys {
+        let cur = if k.is_current { "*" } else { " " };
+        let status = if k.is_active { "active" } else { "revoked" };
+        let last = k.last_used_at.as_deref().unwrap_or("never");
+        let dim = Style::new().dimmed();
+        let line = format!(
+            "{cur} {:<name_w$}  {:<7}  {}  last used: {}",
+            k.name,
+            status,
+            k.scopes.join(","),
+            last,
+        );
+        // Dim inactive keys so the active ones stand out.
+        if k.is_active {
+            let _ = writeln!(out, "{line}");
+        } else {
+            let _ = writeln!(out, "{dim}{line}{dim:#}");
+        }
+    }
+    let dim = Style::new().dimmed();
+    let _ = writeln!(
+        out,
+        "{dim}* = the key you're using   ({} total){dim:#}",
+        keys.len()
     );
 }
 

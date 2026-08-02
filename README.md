@@ -73,6 +73,7 @@ vericto baseline [files]   Record current findings to .vericto-baseline.json.
 vericto baseline prune     Remove baseline entries that no longer match any finding.
 vericto rules list         List the workspace's effective rule catalogue.
 vericto rules show <CODE>  Show one rule's detail (e.g. VERICTO-001), incl. its AST condition.
+vericto keys list          List the workspace's API keys (read-only; manage them in the dashboard).
 vericto login              Log in via your browser (default), or --api-key/--oidc for CI.
 vericto logout             Remove the stored API key.
 vericto doctor             Verify config, connectivity, auth, and plan quota.
@@ -137,6 +138,21 @@ vericto rules list --format json   # machine-readable, for scripting
 Both are read-only and use the same `ci_dryrun:execute`-scoped API key as
 `check` — no extra scope or setup needed. Neither spends the monthly CLI
 check allowance.
+
+## Inspecting API keys (`vericto keys`)
+
+See which API keys exist in the workspace — handy for spotting a stale CI key or
+confirming *which* key a runner is authenticated as (marked `*`):
+
+```bash
+vericto keys list          # name, status, scopes, last-used — current key marked *
+vericto keys list --json   # machine-readable, for scripting
+```
+
+Read-only by design and returns metadata only — never a key secret or hash.
+Creating, revoking, or rotating keys stays in the dashboard: an API key must not
+be able to manage other keys (that would be privilege escalation). Uses the same
+`ci_dryrun:execute`-scoped key as `check`, and spends no check allowance.
 
 ## Project config (`.vericto.toml`)
 

@@ -1120,6 +1120,141 @@ async fn rules_list_auth_error_exits_3() {
         .code(3);
 }
 
+// ── vericto keys list ────────────────────────────────────────────────────────
+
+fn keys_list_body() -> serde_json::Value {
+    serde_json::json!({
+        "data": [
+            {
+                "key_id": "11111111-1111-1111-1111-111111111111",
+                "name": "ci-primary",
+                "scopes": ["ci_dryrun:execute"],
+                "last_used_at": "2026-08-01T12:00:00Z",
+                "expires_at": null,
+                "revoked_at": null,
+                "created_at": "2026-07-01T00:00:00Z",
+                "is_active": true,
+                "is_current": true
+            },
+            {
+                "key_id": "22222222-2222-2222-2222-222222222222",
+                "name": "old-laptop",
+                "scopes": ["ci_dryrun:execute"],
+                "last_used_at": null,
+                "expires_at": null,
+                "revoked_at": "2026-07-20T00:00:00Z",
+                "created_at": "2026-06-01T00:00:00Z",
+                "is_active": false,
+                "is_current": false
+            }
+        ]
+    })
+}
+
+#[tokio::test]
+async fn keys_list_text_shows_names_and_marks_current() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(keys_list_body()))
+        .mount(&server)
+        .await;
+
+    let out = vericto()
+        .args(["keys", "list"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("ci-primary"), "output: {s}");
+    assert!(s.contains("old-laptop"), "output: {s}");
+    assert!(s.contains('*'), "should mark the current key: {s}");
+    // Never leak a secret/hash — only metadata is returned.
+    assert!(!s.contains("vtro_"), "must not echo a key secret: {s}");
+    assert!(
+        !s.to_lowercase().contains("hash"),
+        "must not print a hash: {s}"
+    );
+}
+
+#[tokio::test]
+async fn keys_list_json_matches_backend_shape() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(keys_list_body()))
+        .mount(&server)
+        .await;
+
+    let out = vericto()
+        .args(["keys", "list", "--json"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["data"].as_array().unwrap().len(), 2);
+    assert_eq!(v["data"][0]["name"], "ci-primary");
+    assert_eq!(v["data"][0]["is_current"], true);
+}
+
+#[tokio::test]
+async fn keys_list_empty_is_ok() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })))
+        .mount(&server)
+        .await;
+
+    let out = vericto()
+        .args(["keys", "list"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("No API keys"), "output: {s}");
+}
+
+#[tokio::test]
+async fn keys_list_missing_api_key_exits_3() {
+    vericto()
+        .args(["keys", "list"])
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .code(3);
+}
+
+#[tokio::test]
+async fn keys_list_auth_error_exits_3() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/keys"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "error": { "message": "Scope insuficiente." }
+        })))
+        .mount(&server)
+        .await;
+
+    vericto()
+        .args(["keys", "list"])
+        .env("VERICTO_API_KEY", "vtro_noscope")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(3);
+}
+
 // ── vericto baseline prune ───────────────────────────────────────────────────
 
 #[tokio::test]

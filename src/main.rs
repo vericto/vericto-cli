@@ -144,6 +144,8 @@ enum Command {
     VerifyReceipt(VerifyReceiptArgs),
     /// Inspect the workspace's rule catalogue (`list` / `show <CODE>`).
     Rules(RulesArgs),
+    /// List the workspace's API keys (read-only; manage them in the dashboard).
+    Keys(KeysArgs),
     /// Print the CLI version (same as `--version`).
     Version,
     /// Print a shell completion script to stdout (bash|zsh|fish|powershell|elvish).
@@ -412,6 +414,28 @@ enum RulesCommand {
     List(RulesListArgs),
     /// Show one rule's full detail, including the AST condition it matches.
     Show(RulesShowArgs),
+}
+
+#[derive(Parser)]
+struct KeysArgs {
+    #[command(subcommand)]
+    command: KeysCommand,
+}
+
+#[derive(Subcommand)]
+enum KeysCommand {
+    /// List the workspace's API keys (metadata only; create/revoke in the dashboard).
+    List(KeysListArgs),
+}
+
+#[derive(Parser)]
+struct KeysListArgs {
+    #[command(flatten)]
+    auth: RulesAuthArgs,
+
+    /// Emit the key list as JSON instead of a human-readable table.
+    #[arg(long)]
+    json: bool,
 }
 
 /// Auth/transport flags shared by `rules list` and `rules show` — the same
@@ -799,6 +823,9 @@ async fn main() -> ExitCode {
         Command::Rules(args) => match args.command {
             RulesCommand::List(a) => run_rules_list(a).await,
             RulesCommand::Show(a) => run_rules_show(a).await,
+        },
+        Command::Keys(args) => match args.command {
+            KeysCommand::List(a) => run_keys_list(a).await,
         },
         Command::Version => {
             println!("vericto {}", env!("CARGO_PKG_VERSION"));
@@ -1985,6 +2012,42 @@ async fn resolve_rules_auth(
 /// `vericto rules list` — print the workspace's effective rule catalogue
 /// (standard rules merged with overrides, plus active custom rules). Read-only:
 /// does not spend the monthly CI-check allowance.
+/// `vericto keys list` — list the workspace's API keys (read-only; management
+/// lives in the dashboard). Marks the key the CLI is authenticated as.
+async fn run_keys_list(args: KeysListArgs) -> ExitCode {
+    let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    let resp = match api::keys_list(&api_url, &api_key, &transport).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return match e {
+                ApiError::Auth(_) => ExitCode::from(exit::AUTH),
+                _ => ExitCode::from(exit::BACKEND),
+            };
+        }
+    };
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&resp).unwrap_or_default()
+        );
+        return ExitCode::from(exit::OK);
+    }
+
+    if resp.data.is_empty() {
+        println!("No API keys in this workspace.");
+        return ExitCode::from(exit::OK);
+    }
+
+    output::render_keys(&resp.data);
+    ExitCode::from(exit::OK)
+}
+
 async fn run_rules_list(args: RulesListArgs) -> ExitCode {
     let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
         Ok(t) => t,

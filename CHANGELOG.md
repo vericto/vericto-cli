@@ -4,6 +4,16 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-02
+
+### Added
+- **`vericto keys list`** — inspect the workspace's API keys from the terminal
+  (name, active/revoked status, scopes, last-used), with the key the CLI is
+  authenticated as marked `*`. `--json` for scripting. Read-only and returns
+  metadata only — never a key secret or hash. Create/revoke/rotate stay
+  JWT-gated in the dashboard on purpose (an API key must not manage other keys).
+  Uses the same `ci_dryrun:execute` scope as `check`; spends no check allowance.
+
 ## [1.2.0] - 2026-08-02
 
 ### Added
