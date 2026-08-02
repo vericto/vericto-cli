@@ -240,6 +240,42 @@ async fn check_allowed_exits_0() {
 }
 
 #[tokio::test]
+async fn check_inline_sql_blocked_exits_1() {
+    // --sql evaluates a statement passed on the command line — no file needed.
+    let server = mock_backend(check_body(&["BLOCKED"]), "raw").await;
+    vericto()
+        .args(["check", "--sql", "DELETE FROM payments", "--quiet"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(1);
+}
+
+#[tokio::test]
+async fn check_inline_sql_short_flag_allowed_exits_0() {
+    // -e is the short alias for --sql.
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    vericto()
+        .args(["check", "-e", "SELECT 1 LIMIT 1", "--quiet"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0);
+}
+
+#[tokio::test]
+async fn check_inline_sql_rejects_file_combo() {
+    // --sql is mutually exclusive with file selectors → usage error (exit 2),
+    // before any network call (no mock server needed).
+    vericto()
+        .args(["check", "--sql", "SELECT 1", "some-file.sql", "--quiet"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .code(2);
+}
+
+#[tokio::test]
 async fn check_monitor_forces_exit_0_on_blocked() {
     let server = mock_backend(check_body(&["BLOCKED"]), "raw").await;
     let dir = tempfile::tempdir().unwrap();

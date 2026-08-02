@@ -512,6 +512,13 @@ struct CheckArgs {
     #[arg(long)]
     stdin_file_list: bool,
 
+    /// Evaluate a SQL statement passed on the command line instead of reading a
+    /// file — e.g. `vericto check --sql "UPDATE * FROM payments"`. Repeat to
+    /// check several. Mutually exclusive with files / --changed / stdin. Reported
+    /// in telemetry as `<inline>`, and subject to the same raw/sanitized mode.
+    #[arg(long = "sql", short = 'e', value_name = "SQL")]
+    sql: Vec<String>,
+
     /// SQL dialect of the files. Falls back to the config's default_dialect,
     /// then "postgres".
     #[arg(long)]
@@ -877,33 +884,64 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         .clone()
         .or_else(|| project.baseline.as_ref().map(std::path::PathBuf::from));
 
-    // Resolve the file list: explicit args, the git diff (--changed/--since), or
-    // a newline-delimited list piped in (--stdin-file-list).
-    let files = match resolve_files(&args.files, args.changed, &args.since, args.stdin_file_list) {
-        FileResolution::Files(f) => f,
-        FileResolution::EmptyDiff(msg) => {
-            println!("{msg}");
-            return ExitCode::from(exit::OK);
-        }
-        FileResolution::Usage(msg) => {
-            eprintln!("error: {msg}");
+    // Two input modes: inline SQL passed with --sql/-e, or SQL read from files
+    // / the git diff / stdin. They're mutually exclusive. `files` is the label
+    // list aligned with `queries` by 1-based line (drives report/telemetry
+    // paths + fingerprints); inline uses "<inline>" for every entry.
+    let (mut queries, file_name, files) = if !args.sql.is_empty() {
+        // Inline mode: --sql can't be combined with file selectors.
+        if !args.files.is_empty() || args.changed || args.since.is_some() || args.stdin_file_list {
+            eprintln!("error: --sql can't be combined with files, --changed/--since, or --stdin-file-list.");
             return ExitCode::from(exit::USAGE);
         }
-    };
-
-    let mut queries = match collect_queries(&files) {
-        Some(q) => q,
-        None => return ExitCode::from(exit::USAGE),
-    };
-    if queries.is_empty() {
-        eprintln!("error: no SQL to check (all inputs were empty).");
-        return ExitCode::from(exit::USAGE);
-    }
-
-    let file_name = if files.len() == 1 && files[0] != "-" {
-        Some(files[0].clone())
+        let queries: Vec<QueryInput> = args
+            .sql
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.trim().is_empty())
+            .map(|(i, s)| QueryInput {
+                line: (i + 1) as u32,
+                sql: s.clone(),
+            })
+            .collect();
+        if queries.is_empty() {
+            eprintln!("error: --sql was empty — nothing to check.");
+            return ExitCode::from(exit::USAGE);
+        }
+        // No source path — telemetry/report labels every inline query "<inline>".
+        let labels = vec!["<inline>".to_string(); queries.len()];
+        (queries, Some("<inline>".to_string()), labels)
     } else {
-        None
+        // File mode: explicit args, the git diff (--changed/--since), or a
+        // newline-delimited list piped in (--stdin-file-list).
+        let files =
+            match resolve_files(&args.files, args.changed, &args.since, args.stdin_file_list) {
+                FileResolution::Files(f) => f,
+                FileResolution::EmptyDiff(msg) => {
+                    println!("{msg}");
+                    return ExitCode::from(exit::OK);
+                }
+                FileResolution::Usage(msg) => {
+                    eprintln!("error: {msg}");
+                    return ExitCode::from(exit::USAGE);
+                }
+            };
+
+        let queries = match collect_queries(&files) {
+            Some(q) => q,
+            None => return ExitCode::from(exit::USAGE),
+        };
+        if queries.is_empty() {
+            eprintln!("error: no SQL to check (all inputs were empty).");
+            return ExitCode::from(exit::USAGE);
+        }
+
+        let file_name = if files.len() == 1 && files[0] != "-" {
+            Some(files[0].clone())
+        } else {
+            None
+        };
+        (queries, file_name, files)
     };
 
     // Pre-flight (§6.2): learn the workspace's telemetry query mode BEFORE
