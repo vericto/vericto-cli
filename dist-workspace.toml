@@ -13,6 +13,12 @@ ci = "github"
 installers = ["shell", "npm"]
 # npm scope for the generated package → published as @vericto/cli.
 npm-scope = "@vericto"
+# Publish the npm package automatically as part of the release via a CUSTOM
+# publish job (.github/workflows/npm-publish.yml). Not the built-in "npm" job:
+# NPM_TOKEN lives in the `prod` GitHub Environment (reviewer-gated, public repo),
+# and only a job that declares `environment: prod` can read it — which the
+# built-in job doesn't. Replaces the manual `npm publish` after each release.
+publish-jobs = ["./npm-publish"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
 # Path that installers should place binaries in
