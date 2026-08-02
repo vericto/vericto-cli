@@ -75,6 +75,7 @@ vericto rules list         List the workspace's effective rule catalogue.
 vericto rules show <CODE>  Show one rule's detail (e.g. VERICTO-001), incl. its AST condition.
 vericto keys list          List the workspace's API keys (read-only; manage them in the dashboard).
 vericto docs [topic]       List documentation links by topic, or open one in your browser.
+vericto feedback [msg]     Send feedback (bug/idea/other) to the Vericto team.
 vericto login              Log in via your browser (default), or --api-key/--oidc for CI.
 vericto logout             Remove the stored API key.
 vericto doctor             Verify config, connectivity, auth, and plan quota.
@@ -173,6 +174,23 @@ open the one you want.
 Purely local — no network, no auth, no config needed. Links point at
 `https://vericto.com/docs/<topic>`; override the base with `--app-url`
 (or `$VERICTO_APP_URL`) for a self-hosted or staging docs site.
+
+## Sending feedback (`vericto feedback`)
+
+Send a bug report, an idea, or a note straight from the terminal — it lands in
+your workspace's feedback inbox (the same place the dashboard's "share
+feedback" writes to):
+
+```bash
+vericto feedback "the docs output looks great"
+vericto feedback --category bug "rules show crashes on VERICTO-999"
+echo "idea: add a --watch mode" | vericto feedback --category idea
+vericto feedback            # no message → type it, then Ctrl-D
+```
+
+Categories are `bug`, `idea`, or `other` (default). Uses the same
+`ci_dryrun:execute`-scoped API key as `check`; your CLI version is attached
+automatically (via the User-Agent) so the team knows which build it came from.
 
 ## Project config (`.vericto.toml`)
 

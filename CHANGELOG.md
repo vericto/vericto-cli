@@ -4,6 +4,17 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-02
+
+### Added
+- **`vericto feedback [message]`** — send a bug report, idea, or note to the
+  Vericto team from the terminal. The message can be an argument, piped on
+  stdin, or typed interactively (Ctrl-D to send). `--category bug|idea|other`
+  (default `other`). Uses the same `ci_dryrun:execute` API key as `check`;
+  writes to the workspace's feedback inbox (the same store as the dashboard's
+  feedback widget) via the new `POST /api/v1/ci/feedback` endpoint. The CLI
+  version is attached automatically through the User-Agent.
+
 ## [1.3.2] - 2026-08-02
 
 ### Changed
@@ -100,6 +111,7 @@ SARIF / GitLab output formats, `doctor`, `init`, `verify-receipt`, and static
 API-key / env-based auth. Distributed as prebuilt binaries and the
 `@vericto/vericto-cli` npm package.
 
+[1.4.0]: https://github.com/vericto/vericto-cli/releases/tag/v1.4.0
 [1.3.2]: https://github.com/vericto/vericto-cli/releases/tag/v1.3.2
 [1.3.1]: https://github.com/vericto/vericto-cli/releases/tag/v1.3.1
 [1.3.0]: https://github.com/vericto/vericto-cli/releases/tag/v1.3.0

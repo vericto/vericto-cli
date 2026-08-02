@@ -151,6 +151,8 @@ enum Command {
     Keys(KeysArgs),
     /// Links to the documentation, by topic (open one with `docs <TOPIC>`).
     Docs(DocsArgs),
+    /// Send feedback (a bug, an idea, or a note) to the Vericto team.
+    Feedback(FeedbackArgs),
     /// Print the CLI version (same as `--version`).
     Version,
     /// Print a shell completion script to stdout (bash|zsh|fish|powershell|elvish).
@@ -457,6 +459,43 @@ struct DocsArgs {
     /// self-hosted or staging docs site.
     #[arg(long, value_name = "URL", env = "VERICTO_APP_URL")]
     app_url: Option<String>,
+}
+
+/// What kind of feedback is being sent. clap renders these as `bug`, `idea`,
+/// `other`; the backend accepts the same enum (routes/feedback.ts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum FeedbackCategory {
+    /// Something is broken or behaving unexpectedly.
+    Bug,
+    /// A feature request or suggestion.
+    Idea,
+    /// Anything else.
+    Other,
+}
+
+impl FeedbackCategory {
+    /// The wire value the backend expects.
+    fn as_str(self) -> &'static str {
+        match self {
+            FeedbackCategory::Bug => "bug",
+            FeedbackCategory::Idea => "idea",
+            FeedbackCategory::Other => "other",
+        }
+    }
+}
+
+#[derive(Parser)]
+struct FeedbackArgs {
+    /// The feedback message. If omitted, it's read from stdin (type your note,
+    /// then Ctrl-D) — handy for piping: `echo "great tool" | vericto feedback`.
+    message: Option<String>,
+
+    /// What kind of feedback this is.
+    #[arg(long, short, value_enum, default_value_t = FeedbackCategory::Other)]
+    category: FeedbackCategory,
+
+    #[command(flatten)]
+    auth: RulesAuthArgs,
 }
 
 /// A documentation topic: `slug` is what the user types (`docs enforcement`)
@@ -932,6 +971,7 @@ async fn main() -> ExitCode {
             KeysCommand::List(a) => run_keys_list(a).await,
         },
         Command::Docs(args) => run_docs(args),
+        Command::Feedback(args) => run_feedback(args).await,
         Command::Version => {
             println!("vericto {}", env!("CARGO_PKG_VERSION"));
             ExitCode::from(exit::OK)
@@ -2211,6 +2251,68 @@ fn run_docs(args: DocsArgs) -> ExitCode {
         }),
     );
     ExitCode::from(exit::OK)
+}
+
+/// `vericto feedback` — send a short note (bug/idea/other) to the Vericto team.
+/// The message comes from the argument, or from stdin when omitted (so it can be
+/// piped or typed interactively). Uses the same API key as `check`.
+async fn run_feedback(args: FeedbackArgs) -> ExitCode {
+    // Message: the argument if given, otherwise read stdin to end.
+    let message = match args.message {
+        Some(m) => m,
+        None => {
+            // Only prompt when stdin is a terminal; a pipe just reads silently.
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                eprintln!("Type your feedback, then press Ctrl-D (Ctrl-C to cancel):");
+            }
+            let mut buf = String::new();
+            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                eprintln!("error: could not read feedback from stdin: {e}");
+                return ExitCode::from(exit::USAGE);
+            }
+            buf
+        }
+    };
+
+    let message = message.trim();
+    if message.is_empty() {
+        eprintln!("error: feedback message is empty. Pass it as an argument or on stdin:");
+        eprintln!("  vericto feedback \"the docs output looks great\"");
+        return ExitCode::from(exit::USAGE);
+    }
+    // Match the backend's 4000-char bound so we fail fast with a clear message
+    // instead of a 400 round-trip.
+    if message.chars().count() > 4000 {
+        eprintln!("error: feedback is too long (max 4000 characters).");
+        return ExitCode::from(exit::USAGE);
+    }
+
+    let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    match api::feedback_submit(
+        &api_url,
+        &api_key,
+        args.category.as_str(),
+        message,
+        &transport,
+    )
+    .await
+    {
+        Ok(_) => {
+            println!("✓ Thanks! Your feedback was sent to the Vericto team.");
+            ExitCode::from(exit::OK)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            match e {
+                ApiError::Auth(_) => ExitCode::from(exit::AUTH),
+                _ => ExitCode::from(exit::BACKEND),
+            }
+        }
+    }
 }
 
 async fn run_rules_list(args: RulesListArgs) -> ExitCode {
