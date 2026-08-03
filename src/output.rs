@@ -489,18 +489,50 @@ pub fn render_keys(keys: &[ApiKeyInfo]) {
     );
 }
 
-/// `vericto docs` (text): one entry per topic — bold slug, blurb, then a dim
-/// URL underneath. Takes `(slug, title, blurb, url)` tuples so it stays
-/// decoupled from the topic catalogue in main.rs.
-pub fn render_docs<'a>(topics: impl Iterator<Item = (&'a str, &'a str, &'a str, String)>) {
+/// One topic row for `render_docs`. Decouples output.rs from the `DocTopic`
+/// catalogue in main.rs — the URL base is shown once in the header, so a row
+/// only needs the slug, its blurb, and the category it belongs to.
+pub struct DocRow<'a> {
+    pub slug: &'a str,
+    pub blurb: &'a str,
+    pub category: &'a str,
+}
+
+/// `vericto docs` (text): the URL base once in the header, then topics grouped
+/// under their category heading with slugs aligned in a column (so blurbs line
+/// up and the eye can scan straight down). `base` is the shared docs URL prefix
+/// (e.g. `https://vericto.com/docs`); each slug is a path segment under it.
+///
+/// Rows are consumed in catalogue order; a new category prints its heading the
+/// first time it appears, so `DOC_TOPICS` must keep same-category topics
+/// contiguous (they are).
+pub fn render_docs<'a>(base: &str, rows: impl Iterator<Item = DocRow<'a>>) {
     let mut out = anstream::stdout();
     let bold = Style::new().bold();
     let dim = Style::new().dimmed();
-    for (slug, _title, blurb, url) in topics {
-        let _ = writeln!(out, "{bold}{slug}{bold:#}  {blurb}");
-        let _ = writeln!(out, "  {dim}{url}{dim:#}");
+
+    let rows: Vec<DocRow<'a>> = rows.collect();
+    // Column width = the longest slug, so every blurb starts at the same column.
+    let slug_w = rows.iter().map(|r| r.slug.len()).max().unwrap_or(0);
+
+    let _ = writeln!(out, "{bold}Vericto docs{bold:#} {dim}· {base}{dim:#}\n");
+
+    let mut current = "";
+    for r in &rows {
+        if r.category != current {
+            if !current.is_empty() {
+                let _ = writeln!(out); // blank line between groups
+            }
+            let _ = writeln!(out, "  {bold}{}{bold:#}", r.category);
+            current = r.category;
+        }
+        let _ = writeln!(out, "    {:<slug_w$}  {}", r.slug, r.blurb);
     }
-    let _ = writeln!(out, "{dim}Open one with: vericto docs <topic>{dim:#}");
+
+    let _ = writeln!(
+        out,
+        "\n{dim}Open one: vericto docs <topic>   ·   JSON: vericto docs --json{dim:#}"
+    );
 }
 
 /// `vericto rules show <CODE>` (text format): a detail block including the

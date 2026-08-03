@@ -4,6 +4,15 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-08-02
+
+### Changed
+- **`vericto docs`** now groups topics by category (Getting started / Security &
+  privacy / Workspace) with slugs aligned in a column, and shows the URL base
+  once in the header instead of repeating the full URL on every row — easier to
+  scan. `--json` gains a `category` field per topic. The `docs <topic>` open
+  behavior is unchanged.
+
 ## [1.3.1] - 2026-08-02
 
 ### Added
@@ -91,6 +100,7 @@ SARIF / GitLab output formats, `doctor`, `init`, `verify-receipt`, and static
 API-key / env-based auth. Distributed as prebuilt binaries and the
 `@vericto/vericto-cli` npm package.
 
+[1.3.2]: https://github.com/vericto/vericto-cli/releases/tag/v1.3.2
 [1.3.1]: https://github.com/vericto/vericto-cli/releases/tag/v1.3.1
 [1.3.0]: https://github.com/vericto/vericto-cli/releases/tag/v1.3.0
 [1.2.0]: https://github.com/vericto/vericto-cli/releases/tag/v1.2.0

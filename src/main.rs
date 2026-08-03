@@ -460,71 +460,85 @@ struct DocsArgs {
 }
 
 /// A documentation topic: `slug` is what the user types (`docs enforcement`)
-/// and what the URL path uses; `title`/`blurb` are for the printed list.
+/// and what the URL path uses; `title`/`blurb` are for the printed list;
+/// `category` groups related topics under a heading in the text output.
 struct DocTopic {
     slug: &'static str,
     title: &'static str,
     blurb: &'static str,
+    category: &'static str,
 }
 
 /// The docs topics `vericto docs` links to. Kept in sync with the pages served
-/// at `<app>/docs/<slug>` (landing/docs/*.html). Order is roughly the reading
-/// order a new user would follow.
+/// at `<app>/docs/<slug>` (landing/docs/*.html). Grouped by `category`, in the
+/// order a new user would work through them — the text output prints them under
+/// their category heading in the order they appear here.
 const DOC_TOPICS: &[DocTopic] = &[
     DocTopic {
         slug: "overview",
         title: "Overview",
         blurb: "What Vericto is and how the pieces fit together",
+        category: "Getting started",
     },
     DocTopic {
         slug: "enforcement",
         title: "Enforcement",
         blurb: "How rules resolve to block / flag / monitor actions",
+        category: "Getting started",
     },
     DocTopic {
         slug: "custom-rules",
         title: "Custom rules",
         blurb: "Write your own AST-condition rules beyond the standard set",
+        category: "Getting started",
     },
     DocTopic {
         slug: "api-keys",
         title: "API keys",
         blurb: "Create, scope, and rotate keys for the CLI and CI",
+        category: "Security & privacy",
     },
     DocTopic {
         slug: "telemetry-privacy",
         title: "Telemetry & privacy",
         blurb: "Raw vs sanitized query telemetry and what leaves your machine",
+        category: "Security & privacy",
     },
     DocTopic {
         slug: "audit-trail",
         title: "Audit trail",
         blurb: "The immutable record of decisions and its retention window",
+        category: "Security & privacy",
     },
     DocTopic {
         slug: "verify-reports",
         title: "Verify reports",
         blurb: "Offline verification of signed run receipts",
-    },
-    DocTopic {
-        slug: "alerts",
-        title: "Alerts",
-        blurb: "Notifications when rules fire or thresholds are crossed",
-    },
-    DocTopic {
-        slug: "teams",
-        title: "Teams",
-        blurb: "Members, roles, and workspace access",
+        category: "Security & privacy",
     },
     DocTopic {
         slug: "sso",
         title: "SSO",
         blurb: "Single sign-on / OIDC for the dashboard and CLI login",
+        category: "Security & privacy",
+    },
+    DocTopic {
+        slug: "alerts",
+        title: "Alerts",
+        blurb: "Notifications when rules fire or thresholds are crossed",
+        category: "Workspace",
+    },
+    DocTopic {
+        slug: "teams",
+        title: "Teams",
+        blurb: "Members, roles, and workspace access",
+        category: "Workspace",
     },
     DocTopic {
         slug: "timezones",
         title: "Timezones",
         blurb: "How timestamps and quota windows are anchored",
+        category: "Workspace",
     },
 ];
 
@@ -2175,6 +2189,7 @@ fn run_docs(args: DocsArgs) -> ExitCode {
                     "slug": t.slug,
                     "title": t.title,
                     "description": t.blurb,
+                    "category": t.category,
                     "url": url_for(t.slug),
                 })
             })
@@ -2188,9 +2203,12 @@ fn run_docs(args: DocsArgs) -> ExitCode {
     }
 
     output::render_docs(
-        DOC_TOPICS
-            .iter()
-            .map(|t| (t.slug, t.title, t.blurb, url_for(t.slug))),
+        &format!("{base}/docs"),
+        DOC_TOPICS.iter().map(|t| output::DocRow {
+            slug: t.slug,
+            blurb: t.blurb,
+            category: t.category,
+        }),
     );
     ExitCode::from(exit::OK)
 }
