@@ -1296,11 +1296,23 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         Ok(s) => s,
         Err(code) => return code,
     };
-    let fails = resp.queries.iter().any(|q| {
-        let fp = output::fingerprint(q, &output::file_for(&files, q.line));
-        !suppressed.contains(&fp) && finding_fails(q, fail_on)
-    });
-    if fails {
+    let failing: Vec<&api::QueryResult> = resp
+        .queries
+        .iter()
+        .filter(|q| {
+            let fp = output::fingerprint(q, &output::file_for(&files, q.line));
+            !suppressed.contains(&fp) && finding_fails(q, fail_on)
+        })
+        .collect();
+    if !failing.is_empty() {
+        // Always explain the failure on stderr — otherwise a machine `--format`
+        // with `--output` leaves the console showing only a bare `exit code 1`,
+        // which reads as a crash rather than an enforced rule. `--quiet`
+        // suppresses the per-finding detail; the framing line still helps.
+        if !args.quiet {
+            let on_github = ci_env::Provider::detect() == ci_env::Provider::GitHub;
+            output::render_ci_failure_summary(&resp, &failing, &files, on_github);
+        }
         ExitCode::from(exit::FINDING)
     } else {
         ExitCode::from(exit::OK)
