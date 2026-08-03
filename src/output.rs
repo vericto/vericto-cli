@@ -410,6 +410,106 @@ fn status_style(status: &str) -> (&'static str, Style) {
     }
 }
 
+// ── CI failure summary (always to stderr) ────────────────────────────────────
+
+/// Human-readable explanation printed to **stderr** when a run fails the gate,
+/// regardless of `--format`/`--output`. Without this, `--format sarif --output
+/// file` writes everything to the file and the console shows only a bare
+/// `exit code 1`, which reads like Vericto *crashed* rather than *enforced a
+/// rule*. This makes the verdict legible: what matched, where, and that it was
+/// an intentional decision — plus how to consciously allow it.
+///
+/// `failing` are the findings that actually caused the non-zero exit (already
+/// filtered for suppression by the caller). When running under GitHub Actions,
+/// also emits `::error::` workflow commands so the findings surface as inline
+/// annotations even without GitHub Advanced Security / Code Scanning.
+pub fn render_ci_failure_summary(
+    resp: &CheckResponse,
+    failing: &[&QueryResult],
+    files: &[String],
+    on_github: bool,
+) {
+    if failing.is_empty() {
+        return;
+    }
+    // GitHub annotations first (parsed from the raw log by the runner). Findings
+    // are file-granular (§12.3), so anchor at line 1 with the detail in-message.
+    if on_github {
+        let mut raw = io::stderr();
+        for q in failing {
+            let file = file_for(files, q.line);
+            let title = q
+                .rule_code
+                .as_deref()
+                .map(|c| format!("Vericto {c} [{}]", q.status))
+                .unwrap_or_else(|| format!("Vericto [{}]", q.status));
+            // Workflow commands take a single line; encode newlines just in case.
+            let msg = gha_encode(&finding_message(q));
+            let _ = writeln!(raw, "::error file={file},line=1,title={title}::{msg}");
+        }
+    }
+
+    let mut err = anstream::stderr();
+    let s = &resp.summary;
+    let hdr = Style::new().fg_color(Some(AnsiColor::Red.into())).bold();
+    let dim = Style::new().dimmed();
+
+    let n = failing.len();
+    let _ = writeln!(err);
+    let _ = writeln!(
+        err,
+        "{hdr}✖ Vericto blocked {n} statement{}{hdr:#}  {dim}(ruleset {ver}){dim:#}",
+        if n == 1 { "" } else { "s" },
+        ver = s.ruleset_version,
+    );
+    for q in failing {
+        let (mark, style) = status_style(&q.status);
+        let file = file_for(files, q.line);
+        let rule = q.rule_code.as_deref().unwrap_or("");
+        let sev = q.severity.as_deref().unwrap_or("");
+        let _ = writeln!(
+            err,
+            "  {style}{mark} {file}  {status}{style:#}  {rule} {sev}",
+            status = q.status
+        );
+        if let Some(path) = &q.ast_node_path {
+            if path != &q.status {
+                let _ = writeln!(err, "      {path}");
+            }
+        }
+        if let Some(fix) = &q.suggested_fix {
+            let _ = writeln!(err, "      fix: {fix}");
+        }
+    }
+    // The crucial reframing: this is a policy decision, not a tool error, and
+    // there is an accountable escape hatch.
+    let _ = writeln!(err);
+    let _ = writeln!(
+        err,
+        "{dim}This is Vericto enforcing a rule — the exit code is intentional, not a crash.{dim:#}"
+    );
+    let _ = writeln!(
+        err,
+        "{dim}To allow a finding on purpose, add an inline comment on the statement:{dim:#}"
+    );
+    let _ = writeln!(
+        err,
+        "{dim}    -- vericto:ignore[{rule}] <reason>   (a reason is required){dim:#}",
+        rule = failing
+            .iter()
+            .find_map(|q| q.rule_code.as_deref())
+            .unwrap_or("RULE"),
+    );
+}
+
+/// Percent-encodes the characters GitHub workflow commands treat specially in a
+/// message value, so a multi-line/`::`-containing message stays on one command.
+fn gha_encode(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
 // ── rules list / show (text) ─────────────────────────────────────────────────
 
 /// A short marker + color for a severity, mirroring `status_style`'s scheme so
@@ -788,6 +888,33 @@ mod tests {
         );
         assert!(!quiet.contains("VERICTO-001"));
         assert!(quiet.contains("blocked"));
+    }
+
+    #[test]
+    fn gha_encode_escapes_command_breakers() {
+        assert_eq!(gha_encode("a\nb"), "a%0Ab");
+        assert_eq!(gha_encode("100%"), "100%25");
+        assert_eq!(gha_encode("x\r\ny"), "x%0D%0Ay");
+        assert_eq!(gha_encode("plain text"), "plain text");
+    }
+
+    #[test]
+    fn ci_failure_summary_is_noop_when_nothing_fails() {
+        // Empty failing set must not write annotations or panic (both branches).
+        let files = vec!["m.sql".to_string()];
+        let r = resp(vec![q("ALLOWED", None, None)]);
+        render_ci_failure_summary(&r, &[], &files, true);
+        render_ci_failure_summary(&r, &[], &files, false);
+    }
+
+    #[test]
+    fn ci_failure_summary_renders_findings_without_panicking() {
+        // Exercise the full render path (stderr) for both GitHub and non-GitHub.
+        let files = vec!["m.sql".to_string()];
+        let r = resp(vec![q("BLOCKED", Some("VERICTO-001"), Some("critical"))]);
+        let failing: Vec<&QueryResult> = r.queries.iter().collect();
+        render_ci_failure_summary(&r, &failing, &files, true);
+        render_ci_failure_summary(&r, &failing, &files, false);
     }
 
     #[test]

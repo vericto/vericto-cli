@@ -4,6 +4,21 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-08-03
+
+### Added
+- **Legible failure summary on blocked runs.** When `check` fails the gate, the
+  CLI now prints a human-readable summary to **stderr** regardless of
+  `--format`/`--output` — previously a `--format sarif --output file` run left
+  the console showing only a bare `exit code 1`, which read like a crash rather
+  than an enforced rule. The summary lists each blocking finding (file, status,
+  rule, severity, AST path, suggested fix), a framing line clarifying the exit
+  code is intentional, and how to consciously allow a finding via an inline
+  `-- vericto:ignore[RULE] <reason>` comment. `--quiet` still suppresses it.
+- **GitHub Actions inline annotations.** Under GitHub Actions, blocking findings
+  are also emitted as `::error::` workflow commands so they surface as inline
+  PR annotations even without GitHub Advanced Security / Code Scanning.
+
 ## [1.4.0] - 2026-08-02
 
 ### Added
