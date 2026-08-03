@@ -1337,6 +1337,103 @@ async fn docs_unknown_topic_exits_2() {
     vericto().args(["docs", "does-not-exist"]).assert().code(2);
 }
 
+// ── vericto feedback ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn feedback_message_arg_is_sent_and_confirms() {
+    use wiremock::matchers::body_partial_json;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/feedback"))
+        // The category flag and message must reach the backend as JSON.
+        .and(body_partial_json(
+            serde_json::json!({ "category": "idea", "message": "the docs output looks great" }),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "feedback_id": "fedfedfe-dfed-fedf-edfe-dfedfedfedfe",
+            "created_at": "2026-08-02T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let out = vericto()
+        .args([
+            "feedback",
+            "--category",
+            "idea",
+            "the docs output looks great",
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("Thanks"), "output: {s}");
+}
+
+#[tokio::test]
+async fn feedback_reads_message_from_stdin() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/feedback"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "feedback_id": "fedfedfe-dfed-fedf-edfe-dfedfedfedfe"
+        })))
+        .mount(&server)
+        .await;
+
+    // No message argument → read from stdin (the piped path).
+    vericto()
+        .args(["feedback"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .write_stdin("piped feedback\n")
+        .assert()
+        .code(0);
+}
+
+#[tokio::test]
+async fn feedback_empty_message_exits_2_without_calling_backend() {
+    // No server needed — validation happens before any request.
+    vericto()
+        .args(["feedback", "   "])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .code(2);
+}
+
+#[tokio::test]
+async fn feedback_missing_api_key_exits_3() {
+    vericto()
+        .args(["feedback", "hello"])
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .code(3);
+}
+
+#[tokio::test]
+async fn feedback_auth_error_exits_3() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/feedback"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "error": { "message": "Scope insuficiente." }
+        })))
+        .mount(&server)
+        .await;
+
+    vericto()
+        .args(["feedback", "hello"])
+        .env("VERICTO_API_KEY", "vtro_noscope")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(3);
+}
+
 // ── vericto baseline prune ───────────────────────────────────────────────────
 
 #[tokio::test]

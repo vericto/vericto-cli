@@ -510,6 +510,63 @@ pub async fn keys_list(
     }
 }
 
+/// Response body of `POST /api/v1/ci/feedback`. The fields aren't shown to the
+/// user (a success line is enough), but we parse them to validate the response
+/// shape and keep them available for `--json`/scripting later.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct FeedbackResponse {
+    pub feedback_id: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+/// Submits `POST /api/v1/ci/feedback` (`vericto feedback`) — a short message
+/// plus a category (bug/idea/other) written to the workspace's feedback table.
+/// The CLI's User-Agent (set on the client) tells the backend which version it
+/// came from. Maps 401/403 to `Auth`, 429 to a clear rate-limit `Backend`, and
+/// other non-2xx (incl. an older backend's 404) to `Backend`.
+pub async fn feedback_submit(
+    api_url: &str,
+    api_key: &str,
+    category: &str,
+    message: &str,
+    transport: &Transport,
+) -> Result<FeedbackResponse, ApiError> {
+    let client = build_client(transport)?;
+    let url = format!("{}/api/v1/ci/feedback", api_url.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .header("X-API-Key", api_key)
+        .json(&serde_json::json!({ "category": category, "message": message }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() {
+        return resp
+            .json::<FeedbackResponse>()
+            .await
+            .map_err(|e| ApiError::Backend {
+                status: status.as_u16(),
+                message: format!("invalid feedback body: {e}"),
+            });
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let code = status.as_u16();
+    match code {
+        401 | 403 => Err(ApiError::Auth(extract_message(&body))),
+        429 => Err(ApiError::Backend {
+            status: 429,
+            message: "rate limited — too many feedback submissions, try again later".to_string(),
+        }),
+        _ => Err(ApiError::Backend {
+            status: code,
+            message: extract_message(&body),
+        }),
+    }
+}
+
 /// Fetches `GET /api/v1/ci/rules` (`vericto rules list`) — the workspace's
 /// effective rule catalogue (standard + custom, override-merged). Read-only:
 /// does not spend the monthly CI-check allowance. Maps 401/403 to `Auth` and
