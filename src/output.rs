@@ -12,7 +12,7 @@
 
 use crate::api::{ApiKeyInfo, CheckResponse, QueryResult, RuleDetail, RuleSummary};
 use anstyle::{AnsiColor, Style};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 /// Output format for `vericto check`. clap renders these as kebab-case:
@@ -498,10 +498,33 @@ pub struct DocRow<'a> {
     pub category: &'a str,
 }
 
+/// Wraps `text` in an OSC 8 terminal hyperlink pointing at `url`, so the text
+/// itself is clickable without printing the URL. Format (per the spec):
+///   ESC ] 8 ; ; <url> ST   <text>   ESC ] 8 ; ; ST
+/// where ST is ESC \. Terminals that don't understand OSC 8 (Terminal.app, old
+/// emulators) ignore the escapes and render just `text` — so this degrades
+/// cleanly. The visible width is unchanged (the escapes are zero-width), which
+/// is why column padding must be computed on `text`, not on the wrapped string.
+fn osc8_link(url: &str, text: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
 /// `vericto docs` (text): the URL base once in the header, then topics grouped
 /// under their category heading with slugs aligned in a column (so blurbs line
 /// up and the eye can scan straight down). `base` is the shared docs URL prefix
 /// (e.g. `https://vericto.com/docs`); each slug is a path segment under it.
+///
+/// Each topic is a two-line block: the slug (aligned) + its blurb, then the
+/// full `<base>/<slug>` URL on its own dim, indented line marked with `↳`.
+/// Both the slug and the URL are OSC 8 hyperlinks when stdout is a TTY, so
+/// they're clickable in terminals that support it (iTerm2, WezTerm, kitty,
+/// VS Code, Windows Terminal, GNOME Terminal, …); elsewhere the URL is still
+/// visible plain text you can copy. On a pipe/redirect the hyperlink escapes
+/// are omitted, leaving clean plain text.
+///
+/// Category headings are bold with a blank line before and after; topics within
+/// a category are separated by a blank line — giving a clear three-level rhythm
+/// (section › topic › url).
 ///
 /// Rows are consumed in catalogue order; a new category prints its heading the
 /// first time it appears, so `DOC_TOPICS` must keep same-category topics
@@ -514,24 +537,53 @@ pub fn render_docs<'a>(base: &str, rows: impl Iterator<Item = DocRow<'a>>) {
     let rows: Vec<DocRow<'a>> = rows.collect();
     // Column width = the longest slug, so every blurb starts at the same column.
     let slug_w = rows.iter().map(|r| r.slug.len()).max().unwrap_or(0);
+    // The URL line is indented to line up under the blurb column: 4 (indent) +
+    // slug_w + 2 (gap). "↳ " then precedes the URL within that indent.
+    let url_indent = " ".repeat(4 + slug_w + 2);
+    // Only emit clickable links to an interactive terminal; a pipe/redirect gets
+    // plain text (no OSC 8 escapes in captured output).
+    let linkify = io::stdout().is_terminal();
 
-    let _ = writeln!(out, "{bold}Vericto docs{bold:#} {dim}· {base}{dim:#}\n");
+    let _ = writeln!(out, "{bold}Vericto docs{bold:#} {dim}· {base}{dim:#}");
 
     let mut current = "";
     for r in &rows {
         if r.category != current {
-            if !current.is_empty() {
-                let _ = writeln!(out); // blank line between groups
-            }
+            // Blank line before every category heading (incl. the first, which
+            // separates it from the header), bold heading, blank line after.
+            let _ = writeln!(out);
             let _ = writeln!(out, "  {bold}{}{bold:#}", r.category);
+            let _ = writeln!(out);
             current = r.category;
         }
-        let _ = writeln!(out, "    {:<slug_w$}  {}", r.slug, r.blurb);
+
+        // Line 1: slug (clickable) + blurb. Pad on the raw slug (visible width),
+        // THEN linkify — so the zero-width OSC 8 escapes don't shift the blurb.
+        let pad = " ".repeat(slug_w.saturating_sub(r.slug.len()));
+        let url = format!("{base}/{}", r.slug);
+        if linkify {
+            let slug_link = osc8_link(&url, r.slug);
+            let _ = writeln!(out, "    {slug_link}{pad}  {}", r.blurb);
+        } else {
+            let _ = writeln!(out, "    {}{pad}  {}", r.slug, r.blurb);
+        }
+
+        // Line 2: the URL, dim + "↳", indented under the blurb column. Clickable
+        // too when linkifying; otherwise plain text (still visible/copyable).
+        let url_shown = if linkify {
+            osc8_link(&url, &url)
+        } else {
+            url.clone()
+        };
+        let _ = writeln!(out, "{url_indent}{dim}↳ {url_shown}{dim:#}");
+
+        // Blank line between topics.
+        let _ = writeln!(out);
     }
 
     let _ = writeln!(
         out,
-        "\n{dim}Open one: vericto docs <topic>   ·   JSON: vericto docs --json{dim:#}"
+        "{dim}Open one: vericto docs <topic>   ·   JSON: vericto docs --json{dim:#}"
     );
 }
 
