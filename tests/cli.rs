@@ -1273,11 +1273,12 @@ async fn docs_list_shows_topics_grouped_with_base_url() {
     assert!(s.contains("enforcement"), "output: {s}");
     assert!(s.contains("Getting started"), "output: {s}");
     assert!(s.contains("Security & privacy"), "output: {s}");
-    // The URL base is shown once in the header — not repeated per row.
+    // The base is in the header, and each topic shows its full URL on its own
+    // line (piped output has no OSC 8 escapes, so the URL is plain text).
     assert!(s.contains("https://vericto.com/docs"), "output: {s}");
     assert!(
-        !s.contains("https://vericto.com/docs/enforcement"),
-        "per-row URLs should be gone: {s}"
+        s.contains("https://vericto.com/docs/enforcement"),
+        "each topic should show its full URL: {s}"
     );
     assert!(s.contains("vericto docs <topic>"), "output: {s}");
 }

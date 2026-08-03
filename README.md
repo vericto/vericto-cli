@@ -168,8 +168,11 @@ vericto docs --json          # machine-readable, for scripting
 ```
 
 The list groups topics by category (Getting started / Security & privacy /
-Workspace) with the URL base shown once in the header, so you scan slugs and
-open the one you want.
+Workspace). Each topic shows its name + a one-line blurb, with its full URL on
+an indented line below. In terminals that support OSC 8 hyperlinks (iTerm2,
+WezTerm, kitty, VS Code, Windows Terminal, GNOME Terminal, …) both the topic
+name and the URL are **clickable** — click either to open that doc; elsewhere
+the URL is shown as plain, copyable text.
 
 Purely local — no network, no auth, no config needed. Links point at
 `https://vericto.com/docs/<topic>`; override the base with `--app-url`
