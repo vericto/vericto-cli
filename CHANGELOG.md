@@ -4,6 +4,17 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-08-02
+
+### Changed
+- **`vericto docs`** got a readability pass: each topic is now a two-line block
+  (slug + blurb, then its full `<base>/<slug>` URL on a dim, indented `↳` line),
+  with a blank line between topics and bold category headings spaced above and
+  below. Both the slug **and** the URL are clickable terminal hyperlinks (OSC 8)
+  in terminals that support it (iTerm2, WezTerm, kitty, VS Code, Windows
+  Terminal, GNOME Terminal, …); elsewhere the URL is still shown as plain,
+  copyable text. Piped/redirected output stays plain (no escape bytes).
+
 ## [1.4.0] - 2026-08-02
 
 ### Added
@@ -111,6 +122,7 @@ SARIF / GitLab output formats, `doctor`, `init`, `verify-receipt`, and static
 API-key / env-based auth. Distributed as prebuilt binaries and the
 `@vericto/vericto-cli` npm package.
 
+[1.4.1]: https://github.com/vericto/vericto-cli/releases/tag/v1.4.1
 [1.4.0]: https://github.com/vericto/vericto-cli/releases/tag/v1.4.0
 [1.3.2]: https://github.com/vericto/vericto-cli/releases/tag/v1.3.2
 [1.3.1]: https://github.com/vericto/vericto-cli/releases/tag/v1.3.1
