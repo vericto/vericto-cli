@@ -18,7 +18,7 @@
 > (§6/§8) — all implemented. **Distribution (§9)**: cargo-dist Level 0 + Phase 1
 > (GitHub Releases with cross-compiled binaries + SHA-256 checksums + `curl | sh`
 > installer + distroless Docker image) ✅ implemented; keyless build attestations
-> are wired but gated off until the repo is public/org (§9 Notes), and package
+> on binaries and image ✅ (from v1.5.1, §9 Notes), and package
 > Phase 2 npm ✅ (the `@vericto/vericto-cli` package is built by the pipeline;
 > publishing needs an `NPM_TOKEN`), Homebrew/Scoop remain 🔜. Rationale in §14.
 
@@ -662,8 +662,8 @@ effort, so we layer them.
 > configured (`dist-workspace.toml`) and generates `.github/workflows/release.yml`,
 > which on every version tag cross-compiles all five targets, publishes them to
 > GitHub Releases with SHA-256 checksums, and generates the `vericto-cli-installer.sh`
-> `curl | sh` installer. (Keyless **build attestations** are wired but currently
-> gated off — see the signing note below.) The image channel is a thin distroless
+> `curl | sh` installer. (Keyless **build attestations** ship with every artifact
+> from v1.5.1 — see the signing note below.) The image channel is a thin distroless
 > `Dockerfile` (static musl binary) published multi-arch (amd64 + arm64) to GHCR
 > by a separate `.github/workflows/docker.yml` — separate because `dist generate`
 > owns and would overwrite `release.yml`. `dist plan`
@@ -716,16 +716,15 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
   provenance for every release artifact — the same trust model originally
   sketched as `cosign` (keyless, transparency-logged, no private key to manage),
   wired in natively by `cargo-dist` 0.32 so it stays config, not a hand-rolled
-  script. Verification would be `gh attestation verify <artifact> --repo
-  vericto/vericto-cli`. **Currently disabled**, though: GitHub artifact
-  attestations are not available for user-owned *private* repos (the first
-  `v0.1.0` release surfaced this — the Attest step fails with "Feature not
-  available for user-owned private repositories"). The repo is now public under
-  the `vericto` org, so the blocker is gone; until `github-attestations` is turned
-  back on, releases ship **SHA-256
-  checksums** (`sha256.sum` + per-artifact `.sha256`) for integrity; re-enabling
-  is a one-line config change + `dist generate`. Same story for the Docker image
-  attestation in `docker.yml`.
+  script. Verification: `gh attestation verify <artifact> --repo
+  vericto/vericto-cli`. **✅ On from v1.5.1.** It was off until then: GitHub
+  artifact attestations are not available for user-owned *private* repos (the
+  first `v0.1.0` release surfaced this — the Attest step failed with "Feature not
+  available for user-owned private repositories"), and the repo has since moved,
+  public, to the `vericto` org. The Docker image gets the same build provenance in
+  `docker.yml`, pushed to GHCR next to the image (`gh attestation verify
+  oci://ghcr.io/vericto/vericto-cli:<tag> --repo vericto/vericto-cli`). **SHA-256
+  checksums** (`sha256.sum` + per-artifact `.sha256`) still ship alongside.
 - **Versioning:** independent SemVer for the CLI. Every channel's package version
   tracks the CLI's git tag exactly.
 - **Backend compatibility check (✅ — implemented).** The CLI fails clearly on
@@ -853,8 +852,7 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   binaries + SHA-256 checksums to GitHub Releases with a `curl | sh` installer,
   plus a distroless multi-arch Docker image to GHCR (`docker.yml`), plus the
   `@vericto/vericto-cli` npm package (built on tag; publishing needs `NPM_TOKEN`).
-  Keyless build attestations are wired but gated off on a private repo (§9
-  Notes). **Homebrew + Scoop** remain 🔜 (need an external tap/bucket repo).
+  Keyless build attestations on binaries and image from v1.5.1 (§9 Notes). **Homebrew + Scoop** remain 🔜 (need an external tap/bucket repo).
 - **Rule catalogue — DONE (this revision):** `vericto rules list` / `vericto
   rules show <CODE>` (§15) — read-only lookups against the workspace's effective
   ruleset, using the same API key and scope as `check`.

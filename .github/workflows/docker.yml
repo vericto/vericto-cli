@@ -30,6 +30,8 @@ jobs:
     permissions:
       contents: read
       packages: write # push to GHCR
+      id-token: write # keyless signing of the attestation
+      attestations: write
     steps:
       - uses: actions/checkout@v5
 
@@ -72,8 +74,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # NOTE: image build-provenance attestation is intentionally omitted here
-      # for the same reason as the binary artifacts (see dist-workspace.toml):
-      # GitHub attestations aren't available for user-owned private repos. Add an
-      # `actions/attest-build-provenance` step (with `id-token`/`attestations`
-      # write permissions) once this repo is public or under an org.
+      # Build provenance for the pushed image (same mechanism release.yml uses for the
+      # binaries), stored in GHCR next to it. Verify with
+      # `gh attestation verify oci://ghcr.io/vericto/vericto-cli:<tag> --repo vericto/vericto-cli`.
+      - name: Attest
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

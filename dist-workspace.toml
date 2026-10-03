@@ -7,11 +7,11 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app. `npm` publishes an @vericto/cli package
-# whose postinstall fetches the matching prebuilt binary from the GitHub release
-# (§9 Phase 2) — zero-install in CI via `npx @vericto/cli` since runners have Node.
+# The installers to generate for each app. `npm` publishes an @vericto/vericto-cli
+# package whose postinstall fetches the matching prebuilt binary from the GitHub
+# release (§9 Phase 2) — zero-install in CI via `npx @vericto/vericto-cli`.
 installers = ["shell", "npm"]
-# npm scope for the generated package → published as @vericto/cli.
+# npm scope for the generated package → published as @vericto/vericto-cli.
 npm-scope = "@vericto"
 # Publish the npm package automatically as part of the release via a CUSTOM
 # publish job (.github/workflows/npm-publish.yml). Not the built-in "npm" job:
@@ -26,10 +26,10 @@ install-path = "CARGO_HOME"
 # Where to host releases
 hosting = "github"
 
-# NOTE: `github-attestations` (keyless build provenance, §9) is intentionally
-# OFF: GitHub artifact attestations are not available for user-owned PRIVATE
-# repos — the release job's Attest step fails with "Feature not available for
-# user-owned private repositories." Re-enable (add `github-attestations = true`
-# and re-run `dist generate`) once this repo is public or moved under an org.
-# Until then, releases ship SHA-256 checksums (`sha256.sum` + per-artifact
-# `.sha256`) for integrity.
+# Keyless build provenance (§9): each artifact gets a Sigstore-backed GitHub
+# attestation tying it to this repo, the workflow and the commit, verifiable with
+# `gh attestation verify <artifact> --repo vericto/vericto-cli`. Was off while
+# the repo was a user-owned private one, where GitHub does not offer the feature;
+# the repo is public under the vericto org since 2026-08-01. SHA-256 checksums
+# (`sha256.sum` + per-artifact `.sha256`) still ship alongside.
+github-attestations = true
