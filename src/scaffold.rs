@@ -149,7 +149,7 @@ jobs:
           fetch-depth: 0   # full history so --changed can diff the merge base
 
       - name: Install vericto
-        run: curl -fsSL https://github.com/donkan168/vericto-cli/releases/latest/download/vericto-cli-installer.sh | sh
+        run: curl -fsSL https://github.com/vericto/vericto-cli/releases/latest/download/vericto-cli-installer.sh | sh
 
       - name: Vericto check
         run: {check_line}{check_env}
@@ -172,7 +172,7 @@ pub fn gitlab_job(dialect: &str, auth: &AuthStyle) -> String {
             r#"# Managed by `vericto init`. Validates SQL changed in a merge request against
 # your Vericto workspace rules and surfaces findings as MR annotations.
 vericto-sql-check:
-  image: ghcr.io/donkan168/vericto-cli:latest
+  image: ghcr.io/vericto/vericto-cli:latest
   script:
     - vericto check --changed --dialect {dialect} --format gitlab-codequality --output gl-code-quality.json
   artifacts:
@@ -190,7 +190,7 @@ vericto-sql-check:
 # your Vericto workspace rules and surfaces findings as MR annotations.
 # Uses OIDC / workload-identity (§6.1): no long-lived VERICTO_API_KEY secret.
 vericto-sql-check:
-  image: ghcr.io/donkan168/vericto-cli:latest
+  image: ghcr.io/vericto/vericto-cli:latest
   id_tokens:
     VERICTO_ID_TOKEN:
       aud: vericto          # must match the workspace's OIDC trust policy audience
@@ -219,7 +219,7 @@ pub fn precommit_hook(dialect: &str) -> String {
 set -e
 
 if ! command -v vericto >/dev/null 2>&1; then
-  echo "vericto not found on PATH — skipping SQL check (install: https://github.com/donkan168/vericto-cli)" >&2
+  echo "vericto not found on PATH — skipping SQL check (install: https://github.com/vericto/vericto-cli)" >&2
   exit 0
 fi
 
