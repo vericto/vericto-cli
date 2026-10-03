@@ -4,6 +4,29 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Per-statement results.** Against a backend that advertises the
+  `check_files` capability (`GET /ci/config`), `check` and `baseline` send each
+  input as a whole file and the backend reports **every statement** with its
+  real line. Previously a file was evaluated as a single unit, so only its most
+  severe finding was reported and every annotation pointed at line 1. Now:
+  - text output and the failure summary show `path:line`;
+  - SARIF `region.startLine`, GitLab Code Quality `lines.begin`, GitLab SAST
+    `start_line` and GitHub `::error` annotations use the statement's line;
+  - `--format json` adds `file_index` to each result (`line` is then the
+    statement's line in that file).
+
+  A file still costs **one** check from the monthly allowance, whatever its
+  statement count. Against an older backend the CLI keeps the previous request
+  shape and output, unchanged.
+
+  **If you use a baseline:** fingerprints (rule, file, AST path) are unchanged,
+  so existing entries keep matching. Findings that were previously hidden behind
+  a file's most severe one can now surface as new; re-run `vericto baseline` to
+  accept them, or fix them.
+
 ## [1.4.2] - 2026-08-03
 
 ### Added

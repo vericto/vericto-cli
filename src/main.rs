@@ -1121,14 +1121,21 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     // values never leave the machine. Best-effort: if the config endpoint is
     // unavailable (older backend) we proceed unsanitized rather than block —
     // the check itself is the security gate.
+    // The same call tells us whether the backend reports per statement (see
+    // `per_statement_paths`).
+    let mut supports_files = false;
     match api::config(&api_url, &api_key, &transport).await {
-        Ok(cfg) if cfg.telemetry_query_mode.as_deref() == Some("sanitized") => {
-            for q in &mut queries {
-                q.sql = sanitize::sanitize(&q.sql, &dialect);
+        Ok(cfg) => {
+            supports_files = supports_check_files(&cfg);
+            if cfg.telemetry_query_mode.as_deref() == Some("sanitized") {
+                for q in &mut queries {
+                    q.sql = sanitize::sanitize(&q.sql, &dialect);
+                }
+                eprintln!(
+                    "note: workspace is in sanitized mode — literals normalized before sending."
+                );
             }
-            eprintln!("note: workspace is in sanitized mode — literals normalized before sending.");
         }
-        Ok(_) => {}
         Err(ApiError::Auth(e)) => {
             // A bad key surfaces here first — clearer than failing mid-check.
             eprintln!("error: {}", ApiError::Auth(e));
@@ -1154,6 +1161,8 @@ async fn run_check(args: CheckArgs) -> ExitCode {
             transport: transport.clone(),
             concurrency,
             receipt: args.receipt.is_some(),
+            // Inline --sql entries are already one statement each.
+            file_paths: (supports_files && args.sql.is_empty()).then(|| files.clone()),
         },
         queries,
     )
@@ -1300,7 +1309,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         .queries
         .iter()
         .filter(|q| {
-            let fp = output::fingerprint(q, &output::file_for(&files, q.line));
+            let fp = output::fingerprint(q, &output::file_of(&files, q));
             !suppressed.contains(&fp) && finding_fails(q, fail_on)
         })
         .collect();
@@ -1344,7 +1353,7 @@ fn suppressed_fingerprints(
         let mut n = 0;
         for q in resp.queries.iter().filter(|q| q.status != "ALLOWED") {
             if baseline::is_baselined(q, files, &set) {
-                suppressed.insert(output::fingerprint(q, &output::file_for(files, q.line)));
+                suppressed.insert(output::fingerprint(q, &output::file_of(files, q)));
                 n += 1;
             }
         }
@@ -1368,7 +1377,7 @@ fn suppressed_fingerprints(
         let Some(rule) = q.rule_code.as_deref() else {
             continue;
         };
-        let path = output::file_for(files, q.line);
+        let path = output::file_of(files, q);
         if path == "<stdin>" {
             continue; // can't re-read stdin
         }
@@ -1461,6 +1470,7 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
             dialect: &dialect,
             file_name: None,
             provenance: build_provenance(),
+            file_paths: per_statement_paths(&api_url, &api_key, &transport, &files).await,
             transport,
             concurrency: 4,
             receipt: false,
@@ -1564,6 +1574,7 @@ async fn run_baseline_prune(args: BaselinePruneArgs) -> ExitCode {
             dialect: &dialect,
             file_name: None,
             provenance: build_provenance(),
+            file_paths: per_statement_paths(&api_url, &api_key, &transport, &files).await,
             transport,
             concurrency: 4,
             receipt: false,
@@ -2686,6 +2697,28 @@ fn resolve_files(
 /// position (1-based `line`). Returns None if a file can't be read (message
 /// already printed) — the caller maps that to exit 2. Empty inputs are skipped;
 /// an all-empty set yields an empty Vec (the caller decides what that means).
+/// Whether the backend accepts whole files and reports every statement with its
+/// real line (`capabilities: ["check_files"]` on `GET /ci/config`).
+fn supports_check_files(cfg: &api::WorkspaceConfig) -> bool {
+    cfg.capabilities.iter().any(|c| c == "check_files")
+}
+
+/// The file list to send in per-statement mode, or `None` to keep the original
+/// one-result-per-file shape (older backend, or the config could not be read).
+/// `baseline` uses the same mode as `check`, so a baseline records the same
+/// findings a later check will compare against.
+async fn per_statement_paths(
+    api_url: &str,
+    api_key: &str,
+    transport: &api::Transport,
+    files: &[String],
+) -> Option<Vec<String>> {
+    match api::config(api_url, api_key, transport).await {
+        Ok(cfg) if supports_check_files(&cfg) => Some(files.to_vec()),
+        _ => None,
+    }
+}
+
 fn collect_queries(files: &[String]) -> Option<Vec<QueryInput>> {
     let mut queries = Vec::new();
     for (i, path) in files.iter().enumerate() {
@@ -2790,6 +2823,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, s)| QueryResult {
                     line: i as u32,
+                    file_index: None,
                     sql_preview: String::new(),
                     status: (*s).into(),
                     action: None,

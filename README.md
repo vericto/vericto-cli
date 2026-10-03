@@ -444,8 +444,10 @@ vericto-check:
 - Requires network access to the Vericto backend. No offline mode. The API key
   needs the `ci_dryrun:execute` scope; checks count against the plan's monthly
   CLI allowance (free tier included).
-- Each file is sent whole and reported at **file granularity** (the most severe
-  finding + its AST path), not per exact line.
+- Findings are reported **per statement, at their line**, when the backend
+  supports it (`check_files`). Against an older backend each file is evaluated
+  as one unit and reported at **file granularity** (its most severe finding,
+  annotated at line 1).
 
 ## License
 

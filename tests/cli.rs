@@ -1618,3 +1618,127 @@ async fn baseline_prune_empty_baseline_is_a_noop_without_network() {
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("nothing to prune"), "output: {s}");
 }
+
+// ── per-statement results (backend capability `check_files`) ────────────────
+
+/// Mounts a backend that advertises `check_files` and only answers check-key
+/// requests that carry whole `files` — so a CLI still sending `queries` fails.
+async fn mock_per_statement_backend(check: serde_json::Value) -> MockServer {
+    let server = MockServer::start().await;
+    let mut cfg = config_body("raw");
+    cfg["capabilities"] = serde_json::json!(["check_files"]);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(cfg))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/check-key"))
+        .and(wiremock::matchers::body_string_contains("\"files\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(check))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "api_version": "1.0.0", "min_cli_version": "0.1.0"
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+fn per_statement_body() -> serde_json::Value {
+    // Two files; the backend reports each statement with its real line and the
+    // (request-relative) file it came from.
+    serde_json::json!({
+        "summary": { "total": 3, "blocked": 1, "allowed": 2, "flagged": 0, "monitored": 0, "parse_errors": 0, "ruleset_version": "v1" },
+        "queries": [
+            { "line": 1, "file_index": 1, "sql_preview": "SELECT 1", "status": "ALLOWED" },
+            { "line": 2, "file_index": 1, "sql_preview": "SELECT 2", "status": "ALLOWED" },
+            { "line": 3, "file_index": 2, "sql_preview": "DELETE FROM users", "status": "BLOCKED",
+              "action": "block", "rule_code": "VERICTO-001", "severity": "critical",
+              "ast_node_path": "DeleteStmt > WhereClause = NULL" }
+        ],
+        "exit_code": 1,
+        "ci_checks_remaining": 997,
+        "telemetry_query_mode": "raw"
+    })
+}
+
+#[tokio::test]
+async fn check_per_statement_reports_the_real_file_and_line() {
+    let server = mock_per_statement_backend(per_statement_body()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.sql");
+    let b = dir.path().join("b.sql");
+    std::fs::write(&a, "SELECT 1;\nSELECT 2;").unwrap();
+    std::fs::write(&b, "-- cleanup\n\nDELETE FROM users;").unwrap();
+
+    let out = vericto()
+        .args([
+            "check",
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            "--no-color",
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = format!("{}:3", b.to_str().unwrap());
+    assert!(
+        stdout.contains(&expected),
+        "text output should point at {expected}:\n{stdout}"
+    );
+
+    let sarif_path = dir.path().join("out.sarif");
+    vericto()
+        .args([
+            "check",
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            "--format",
+            "sarif",
+            "--output",
+            sarif_path.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(1);
+    let sarif: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sarif_path).unwrap()).unwrap();
+    let loc = &sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"];
+    assert_eq!(loc["artifactLocation"]["uri"], b.to_str().unwrap());
+    assert_eq!(loc["region"]["startLine"], 3);
+}
+
+#[tokio::test]
+async fn check_against_an_older_backend_keeps_sending_queries() {
+    // No `capabilities` in /ci/config: the CLI must not send `files`.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(config_body("raw")))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/check-key"))
+        .and(wiremock::matchers::body_string_contains("\"queries\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(check_body(&["ALLOWED"])))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("ok.sql");
+    std::fs::write(&sql, "SELECT 1 LIMIT 1;").unwrap();
+
+    vericto()
+        .args(["check", sql.to_str().unwrap(), "--quiet"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0);
+}

@@ -48,6 +48,32 @@ pub(crate) fn file_for(files: &[String], line: u32) -> String {
     }
 }
 
+/// The source file a result belongs to: `file_index` in per-statement mode,
+/// otherwise `line`, which then is the input's index.
+pub(crate) fn file_of(files: &[String], q: &QueryResult) -> String {
+    file_for(files, q.file_index.unwrap_or(q.line))
+}
+
+/// The line to annotate: the statement's real line in per-statement mode; line 1
+/// otherwise, where a result covers the whole file.
+pub(crate) fn source_line(q: &QueryResult) -> u32 {
+    if q.file_index.is_some() {
+        q.line.max(1)
+    } else {
+        1
+    }
+}
+
+/// `path:line` in per-statement mode, `path` otherwise.
+fn location(files: &[String], q: &QueryResult) -> String {
+    let file = file_of(files, q);
+    if q.file_index.is_some() {
+        format!("{file}:{}", q.line)
+    } else {
+        file
+    }
+}
+
 /// Renders `resp` in `format`. When `output` is set, machine formats and text
 /// are written (plain, no ANSI) to that file; otherwise text/json go to stdout
 /// (text colored unless `color` is false). `files` maps result lines to source
@@ -113,6 +139,7 @@ fn render_json(resp: &CheckResponse) -> String {
         },
         "queries": resp.queries.iter().map(|q| serde_json::json!({
             "line": q.line,
+            "file_index": q.file_index,
             "status": q.status,
             "action": q.action,
             "rule_code": q.rule_code,
@@ -193,8 +220,8 @@ fn render_sarif(resp: &CheckResponse, files: &[String]) -> String {
                 "message": { "text": finding_message(q) },
                 "locations": [{
                     "physicalLocation": {
-                        "artifactLocation": { "uri": file_for(files, q.line) },
-                        "region": { "startLine": 1 }
+                        "artifactLocation": { "uri": file_of(files, q) },
+                        "region": { "startLine": source_line(q) }
                     }
                 }]
             })
@@ -254,20 +281,33 @@ pub(crate) fn fingerprint(q: &QueryResult, file: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// Report-issue identity for GitLab (Code Quality `fingerprint`, SAST `id`),
+/// which dedupes issues by it. In per-statement mode two identical findings in
+/// one file are distinct issues, so the line joins the identity. The baseline
+/// `fingerprint` deliberately stays line-free, so baselines keep matching as
+/// statements move within a file.
+fn issue_id(q: &QueryResult, file: &str) -> String {
+    if q.file_index.is_some() {
+        fingerprint(q, &format!("{file}:{}", q.line))
+    } else {
+        fingerprint(q, file)
+    }
+}
+
 fn render_gitlab_codequality(resp: &CheckResponse, files: &[String]) -> String {
     let issues: Vec<serde_json::Value> = resp
         .queries
         .iter()
         .filter(|q| is_finding(q))
         .map(|q| {
-            let file = file_for(files, q.line);
+            let file = file_of(files, q);
             let rule = q.rule_code.clone().unwrap_or_else(|| "VERICTO".to_string());
             serde_json::json!({
                 "description": finding_message(q),
                 "check_name": rule,
-                "fingerprint": fingerprint(q, &file),
+                "fingerprint": issue_id(q, &file),
                 "severity": gitlab_cq_severity(q),
-                "location": { "path": file, "lines": { "begin": 1 } },
+                "location": { "path": file, "lines": { "begin": source_line(q) } },
             })
         })
         .collect();
@@ -298,15 +338,15 @@ fn render_gitlab_sast(resp: &CheckResponse, files: &[String]) -> String {
         .iter()
         .filter(|q| is_finding(q))
         .map(|q| {
-            let file = file_for(files, q.line);
+            let file = file_of(files, q);
             let rule = q.rule_code.clone().unwrap_or_else(|| "VERICTO".to_string());
             serde_json::json!({
-                "id": fingerprint(q, &file),
+                "id": issue_id(q, &file),
                 "category": "sast",
                 "name": rule,
                 "message": finding_message(q),
                 "severity": gitlab_sast_severity(q),
-                "location": { "file": file, "start_line": 1 },
+                "location": { "file": file, "start_line": source_line(q) },
                 "identifiers": [{
                     "type": "vericto_rule",
                     "name": rule,
@@ -341,7 +381,7 @@ fn render_text_colored(resp: &CheckResponse, files: &[String], quiet: bool) {
     if !quiet {
         for q in resp.queries.iter().filter(|q| is_finding(q)) {
             let (mark, style) = status_style(&q.status);
-            let file = file_for(files, q.line);
+            let file = location(files, q);
             let rule = q.rule_code.as_deref().unwrap_or("");
             let sev = q.severity.as_deref().unwrap_or("");
             let _ = writeln!(
@@ -376,7 +416,7 @@ fn render_text_plain(resp: &CheckResponse, files: &[String], quiet: bool) -> Str
     let mut buf = String::new();
     if !quiet {
         for q in resp.queries.iter().filter(|q| is_finding(q)) {
-            let file = file_for(files, q.line);
+            let file = location(files, q);
             let rule = q.rule_code.as_deref().unwrap_or("");
             let sev = q.severity.as_deref().unwrap_or("");
             buf.push_str(&format!("{} {file}  {rule} {sev}\n", q.status));
@@ -432,12 +472,13 @@ pub fn render_ci_failure_summary(
     if failing.is_empty() {
         return;
     }
-    // GitHub annotations first (parsed from the raw log by the runner). Findings
-    // are file-granular (§12.3), so anchor at line 1 with the detail in-message.
+    // GitHub annotations first (parsed from the raw log by the runner). Anchored
+    // at the statement's line in per-statement mode, line 1 when a result covers
+    // the whole file (older backend).
     if on_github {
         let mut raw = io::stderr();
         for q in failing {
-            let file = file_for(files, q.line);
+            let file = file_of(files, q);
             let title = q
                 .rule_code
                 .as_deref()
@@ -445,7 +486,11 @@ pub fn render_ci_failure_summary(
                 .unwrap_or_else(|| format!("Vericto [{}]", q.status));
             // Workflow commands take a single line; encode newlines just in case.
             let msg = gha_encode(&finding_message(q));
-            let _ = writeln!(raw, "::error file={file},line=1,title={title}::{msg}");
+            let _ = writeln!(
+                raw,
+                "::error file={file},line={},title={title}::{msg}",
+                source_line(q)
+            );
         }
     }
 
@@ -464,7 +509,7 @@ pub fn render_ci_failure_summary(
     );
     for q in failing {
         let (mark, style) = status_style(&q.status);
-        let file = file_for(files, q.line);
+        let file = location(files, q);
         let rule = q.rule_code.as_deref().unwrap_or("");
         let sev = q.severity.as_deref().unwrap_or("");
         let _ = writeln!(
@@ -738,6 +783,7 @@ mod tests {
     fn q(status: &str, rule: Option<&str>, sev: Option<&str>) -> QueryResult {
         QueryResult {
             line: 1,
+            file_index: None,
             sql_preview: "DELETE FROM t".into(),
             status: status.into(),
             action: None,
@@ -841,6 +887,7 @@ mod tests {
         // read "VERICTO [PARSE_ERROR] — PARSE_ERROR".
         let pe = QueryResult {
             line: 1,
+            file_index: None,
             sql_preview: "COPY t FROM stdin".into(),
             status: "PARSE_ERROR".into(),
             action: None,
@@ -1075,5 +1122,32 @@ mod tests {
         ] {
             let _ = severity_style(sev);
         }
+    }
+
+    #[test]
+    fn gitlab_issue_ids_stay_distinct_per_statement() {
+        let mut a = q("BLOCKED", Some("VERICTO-001"), Some("critical"));
+        let mut b = q("BLOCKED", Some("VERICTO-001"), Some("critical"));
+        // Legacy (file-level) results keep the previous identity.
+        assert_eq!(issue_id(&a, "m.sql"), fingerprint(&a, "m.sql"));
+        a.file_index = Some(1);
+        a.line = 3;
+        b.file_index = Some(1);
+        b.line = 9;
+        assert_ne!(issue_id(&a, "m.sql"), issue_id(&b, "m.sql"));
+        // The baseline fingerprint ignores the line on purpose.
+        assert_eq!(fingerprint(&a, "m.sql"), fingerprint(&b, "m.sql"));
+    }
+
+    #[test]
+    fn per_statement_results_annotate_their_line() {
+        let mut r = q("BLOCKED", Some("VERICTO-001"), Some("critical"));
+        assert_eq!(source_line(&r), 1);
+        r.file_index = Some(2);
+        r.line = 7;
+        let files = vec!["a.sql".to_string(), "b.sql".to_string()];
+        assert_eq!(source_line(&r), 7);
+        assert_eq!(file_of(&files, &r), "b.sql");
+        assert_eq!(location(&files, &r), "b.sql:7");
     }
 }
