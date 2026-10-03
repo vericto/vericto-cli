@@ -18,7 +18,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }} # donkan168/vericto-cli
+  IMAGE_NAME: ${{ github.repository }} # vericto/vericto-cli
 
 concurrency:
   group: docker-${{ github.ref }}

@@ -5,8 +5,8 @@
 # — just the binary and CA certificates. rustls (see Cargo.toml) means there is
 # no system OpenSSL dependency, so `FROM scratch`-class bases work.
 #
-# Build:  docker build -t ghcr.io/donkan168/vericto-cli:latest .
-# Run:    docker run --rm -e VERICTO_API_KEY ghcr.io/donkan168/vericto-cli:latest \
+# Build:  docker build -t ghcr.io/vericto/vericto-cli:latest .
+# Run:    docker run --rm -e VERICTO_API_KEY ghcr.io/vericto/vericto-cli:latest \
 #             check migrations/*.sql
 #
 # The release pipeline (cargo-dist) publishes the prebuilt binaries; this image

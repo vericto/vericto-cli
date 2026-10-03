@@ -717,11 +717,12 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
   sketched as `cosign` (keyless, transparency-logged, no private key to manage),
   wired in natively by `cargo-dist` 0.32 so it stays config, not a hand-rolled
   script. Verification would be `gh attestation verify <artifact> --repo
-  donkan168/vericto-cli`. **Currently disabled**, though: GitHub artifact
+  vericto/vericto-cli`. **Currently disabled**, though: GitHub artifact
   attestations are not available for user-owned *private* repos (the first
   `v0.1.0` release surfaced this — the Attest step fails with "Feature not
-  available for user-owned private repositories"). Until the repo is public or
-  under an org, `github-attestations` is off and releases ship **SHA-256
+  available for user-owned private repositories"). The repo is now public under
+  the `vericto` org, so the blocker is gone; until `github-attestations` is turned
+  back on, releases ship **SHA-256
   checksums** (`sha256.sum` + per-artifact `.sha256`) for integrity; re-enabling
   is a one-line config change + `dist generate`. Same story for the Docker image
   attestation in `docker.yml`.
