@@ -4,7 +4,7 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-10-03
 
 ### Changed
 - **Per-statement results.** Against a backend that advertises the
@@ -28,6 +28,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   accept them, or fix them.
 
 ### Fixed
+- **`vericto init` templates pointed at an image that does not exist.** The
+  GitLab and Docker templates used `ghcr.io/donkan168/vericto-cli`; the image is
+  published as `ghcr.io/vericto/vericto-cli`. The installer URL in the GitHub
+  workflow and the pre-commit hook now use the `vericto` org too.
 - **One suppression no longer covers every look-alike finding.** Suppression was
   keyed on the finding's fingerprint (rule, file, AST path), so a single
   baseline entry or inline ignore also silenced every other finding with that
@@ -180,6 +184,8 @@ SARIF / GitLab output formats, `doctor`, `init`, `verify-receipt`, and static
 API-key / env-based auth. Distributed as prebuilt binaries and the
 `@vericto/vericto-cli` npm package.
 
+[1.5.0]: https://github.com/vericto/vericto-cli/releases/tag/v1.5.0
+[1.4.2]: https://github.com/vericto/vericto-cli/releases/tag/v1.4.2
 [1.4.1]: https://github.com/vericto/vericto-cli/releases/tag/v1.4.1
 [1.4.0]: https://github.com/vericto/vericto-cli/releases/tag/v1.4.0
 [1.3.2]: https://github.com/vericto/vericto-cli/releases/tag/v1.3.2
