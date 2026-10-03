@@ -195,9 +195,11 @@ vericto completions <shell>  Print a shell completion script (bash|zsh|fish|powe
 ## 5. Input handling
 
 - **Files:** `vericto check migrations/*.sql` — the shell expands the glob; each
-  file is read **whole** and sent as one `{line: N, sql: <file>}` item (no
-  client-side `;` splitting — see §12.3). One item per file, indexed by argument
-  position. Empty inputs are skipped.
+  file is read **whole** (no client-side `;` splitting — see §12.3). When the
+  backend advertises `check_files`, files are sent as `files: [{path, sql}]` and
+  the backend splits them, returning every statement with its `line` and
+  `file_index`; otherwise each file is one `{line: N, sql: <file>}` item indexed
+  by argument position. Empty inputs are skipped.
 - **stdin:** `vericto check - < migration.sql`, or `git show :file.sql | vericto
   check -` for pre-commit hooks.
 - **Batching (v0.2):** the endpoint accepts ≤500 queries per call. v0.1 sends one
@@ -946,10 +948,12 @@ turns the build red on day one — the fastest way to get uninstalled. So:
    `{line: 1, sql: <file>}` item; the engine already parses multi-statement SQL
    server-side, so no client-side `;` splitting (which breaks on `;` inside
    strings / `DO $$…$$`) and **no backend change** was needed — the existing
-   `sql` field accepts the full text. Tradeoff: findings are reported at
+   `sql` field accepts the full text. Tradeoff: findings were reported at
    **file granularity** (most severe finding + its AST path), not per exact
-   line. Acceptable for a CI gate; per-line mapping is a possible v0.2 refinement
-   (client tokenizer or a backend that returns per-statement offsets).
+   line. **Refined:** the backend now splits files itself (`files` request shape,
+   capability `check_files`) and returns every statement with its line, so the
+   CLI annotates exact lines without a client tokenizer; the whole-file shape
+   remains the fallback for older backends.
 4. **Backend availability in air-gapped CI — RESOLVED (won't fix).** A thin
    client can't run where the runner has no egress to `api.vericto.com`. This is an
    **accepted, permanent limitation**, documented as such. There is no local /

@@ -10,7 +10,7 @@
 //! them.
 
 use crate::api::{CheckResponse, QueryResult};
-use crate::output::{file_for, fingerprint};
+use crate::output::{file_of, fingerprint};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -44,7 +44,7 @@ impl Baseline {
             .iter()
             .filter(|q| q.status != "ALLOWED")
             .map(|q| {
-                let file = file_for(files, q.line);
+                let file = file_of(files, q);
                 Entry {
                     fingerprint: fingerprint(q, &file),
                     file,
@@ -95,7 +95,7 @@ pub fn is_baselined(q: &QueryResult, files: &[String], baselined: &BTreeSet<&str
     if q.status == "ALLOWED" {
         return false;
     }
-    let file = file_for(files, q.line);
+    let file = file_of(files, q);
     baselined.contains(fingerprint(q, &file).as_str())
 }
 
@@ -110,7 +110,7 @@ pub fn drifted<'a>(
         .queries
         .iter()
         .filter(|q| q.status != "ALLOWED")
-        .map(|q| fingerprint(q, &file_for(files, q.line)))
+        .map(|q| fingerprint(q, &file_of(files, q)))
         .collect();
     baseline
         .entries
@@ -175,6 +175,7 @@ mod tests {
     fn q(status: &str, rule: &str, path: &str) -> QueryResult {
         QueryResult {
             line: 1,
+            file_index: None,
             sql_preview: String::new(),
             status: status.into(),
             action: None,

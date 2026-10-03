@@ -31,10 +31,24 @@ pub struct Provenance {
     pub actor: Option<String>,
 }
 
-/// Request body for `POST /api/v1/ci/check-key`.
+/// One whole file for the per-statement request shape (`files`, backend
+/// capability `check_files`): the backend splits it into statements and reports
+/// each one with its real line.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub sql: String,
+}
+
+/// Request body for `POST /api/v1/ci/check-key`. Exactly one of `queries` or
+/// `files` is sent.
 #[derive(Debug, Serialize)]
 pub struct CheckRequest {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub queries: Vec<QueryInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FileInput>>,
     pub dialect: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
@@ -76,7 +90,13 @@ pub struct Receipt {
 /// Per-query verdict in the response.
 #[derive(Debug, Deserialize)]
 pub struct QueryResult {
+    /// Per-statement mode (`file_index` set): the statement's line in its file.
+    /// Legacy mode: the 1-based index of the input the result belongs to.
     pub line: u32,
+    /// Per-statement mode only: the 1-based index of the input file, already
+    /// translated to the run's file list (see `check_all`).
+    #[serde(default)]
+    pub file_index: Option<u32>,
     pub sql_preview: String,
     pub status: String, // BLOCKED | ALLOWED | FLAGGED | MONITORED | PARSE_ERROR
     #[serde(default)]
@@ -199,6 +219,10 @@ pub struct WorkspaceConfig {
     pub ci_checks_remaining: Option<i64>,
     #[serde(default)]
     pub ruleset_version: Option<String>,
+    /// Request shapes this backend accepts beyond the original one, e.g.
+    /// `check_files`. Absent on older backends → empty.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     // Note: the backend also returns api_version/min_cli_version here, but the
     // CLI's compatibility check uses the dedicated GET /version (§9), so we
     // don't duplicate those fields on this struct.
@@ -814,6 +838,81 @@ pub struct CheckParams<'a> {
     /// chunk requests it — the receipt covers that chunk's summary/queries; see
     /// `merge_responses` for why we don't ask every chunk.
     pub receipt: bool,
+    /// Per-statement mode: the run's file list (indexed by `QueryInput::line`).
+    /// When set, each input is sent as a whole file and the backend reports every
+    /// statement with its real line. `None` keeps the original request shape.
+    pub file_paths: Option<Vec<String>>,
+}
+
+/// Per-statement mode chunk limits. The backend accepts 500 files and 2000
+/// statements per call; files are grouped so a chunk stays well inside both,
+/// estimating statements by `;` count (the backend does the real split).
+pub const MAX_FILES_PER_CALL: usize = 100;
+const MAX_EST_STATEMENTS_PER_CALL: usize = 1500;
+
+/// One request's worth of input, plus — in per-statement mode — the run-level
+/// index of each file it carries, to translate the response's `file_index` back.
+struct Chunk {
+    queries: Vec<QueryInput>,
+    files: Option<Vec<FileInput>>,
+    file_lines: Vec<u32>,
+}
+
+fn chunk_queries(queries: Vec<QueryInput>) -> Vec<Chunk> {
+    queries
+        .chunks(MAX_QUERIES_PER_CALL)
+        .map(|c| Chunk {
+            queries: c.to_vec(),
+            files: None,
+            file_lines: Vec::new(),
+        })
+        .collect()
+}
+
+fn chunk_files(queries: Vec<QueryInput>, paths: &[String]) -> Vec<Chunk> {
+    let mut out = Vec::new();
+    let (mut files, mut lines, mut est) = (Vec::new(), Vec::new(), 0usize);
+    for q in queries {
+        let cost = q.sql.matches(';').count() + 1;
+        if !files.is_empty()
+            && (files.len() >= MAX_FILES_PER_CALL || est + cost > MAX_EST_STATEMENTS_PER_CALL)
+        {
+            out.push(Chunk {
+                queries: Vec::new(),
+                files: Some(std::mem::take(&mut files)),
+                file_lines: std::mem::take(&mut lines),
+            });
+            est = 0;
+        }
+        let path = paths
+            .get(q.line.saturating_sub(1) as usize)
+            .filter(|p| p.as_str() != "-")
+            .cloned();
+        lines.push(q.line);
+        files.push(FileInput { path, sql: q.sql });
+        est += cost;
+    }
+    if !files.is_empty() {
+        out.push(Chunk {
+            queries: Vec::new(),
+            files: Some(files),
+            file_lines: lines,
+        });
+    }
+    out
+}
+
+/// Rewrites a per-statement response's chunk-relative `file_index` to the run's
+/// file index, so `output::file_for` resolves it exactly like a legacy `line`.
+fn translate_file_index(resp: &mut CheckResponse, file_lines: &[u32]) {
+    for q in &mut resp.queries {
+        if let Some(i) = q.file_index {
+            q.file_index = file_lines
+                .get(i.saturating_sub(1) as usize)
+                .copied()
+                .or(Some(i));
+        }
+    }
 }
 
 /// Runs a full check, chunking `queries` into ≤`MAX_QUERIES_PER_CALL` batches and
@@ -837,32 +936,54 @@ pub async fn check_all(
         transport,
         concurrency,
         receipt,
+        file_paths,
     } = p;
     let client = build_client(&transport)?;
     let url = format!("{}/api/v1/ci/check-key", api_url.trim_end_matches('/'));
 
-    // Single chunk: no fan-out, no cloning of the shared fields.
-    if queries.len() <= MAX_QUERIES_PER_CALL {
-        let req = CheckRequest {
-            queries,
-            dialect: dialect.to_string(),
-            file_name,
-            output_format: "json".to_string(),
-            provenance,
-            receipt,
-        };
-        return check_with_client(&client, &url, api_key, &req).await;
+    let total_inputs = queries.len();
+    let mut chunks = match &file_paths {
+        Some(paths) => chunk_files(queries, paths),
+        None => chunk_queries(queries),
+    };
+    // Empty input must still reach the backend (which rejects it) rather than
+    // merge zero chunks into an empty, exit-0 response: fail closed (§5).
+    if chunks.is_empty() {
+        chunks.push(Chunk {
+            queries: Vec::new(),
+            files: None,
+            file_lines: Vec::new(),
+        });
+    }
+    let make_req = |c: &Chunk| CheckRequest {
+        queries: c.queries.clone(),
+        files: c.files.clone(),
+        dialect: dialect.to_string(),
+        file_name: file_name.clone(),
+        output_format: "json".to_string(),
+        provenance: provenance.clone(),
+        // Each chunk requests its own receipt so every query in the run is
+        // covered by a signature (one receipt per chunk; see merge_responses).
+        receipt,
+    };
+
+    // Single chunk: no fan-out.
+    if chunks.len() == 1 {
+        let chunk = &chunks[0];
+        let mut resp = check_with_client(&client, &url, api_key, &make_req(chunk)).await?;
+        translate_file_index(&mut resp, &chunk.file_lines);
+        return Ok(resp);
     }
 
-    let chunks: Vec<Vec<QueryInput>> = queries
-        .chunks(MAX_QUERIES_PER_CALL)
-        .map(|c| c.to_vec())
-        .collect();
     let total_chunks = chunks.len();
     eprintln!(
-        "note: {} queries exceed the {}-per-call limit; splitting into {} chunks (concurrency {})",
-        chunk_total(&chunks),
-        MAX_QUERIES_PER_CALL,
+        "note: {} {} exceed the per-call limit; splitting into {} chunks (concurrency {})",
+        total_inputs,
+        if file_paths.is_some() {
+            "files"
+        } else {
+            "queries"
+        },
         total_chunks,
         concurrency
     );
@@ -870,28 +991,17 @@ pub async fn check_all(
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
     let client = std::sync::Arc::new(client);
     let mut set = tokio::task::JoinSet::new();
+    let mut file_lines_by_chunk = Vec::with_capacity(total_chunks);
 
     for (idx, chunk) in chunks.into_iter().enumerate() {
         let sem = semaphore.clone();
         let client = client.clone();
         let url = url.clone();
         let api_key = api_key.to_string();
-        let dialect = dialect.to_string();
-        let file_name = file_name.clone();
-        let provenance = provenance.clone();
+        let req = make_req(&chunk);
+        file_lines_by_chunk.push(chunk.file_lines);
         set.spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore not closed");
-            let req = CheckRequest {
-                queries: chunk,
-                dialect,
-                file_name,
-                output_format: "json".to_string(),
-                provenance,
-                // Each chunk requests its own receipt so every query in the run
-                // is covered by a signature (one receipt per chunk; see
-                // merge_responses / all_receipts).
-                receipt,
-            };
             let res = check_with_client(&client, &url, &api_key, &req).await;
             (idx, res)
         });
@@ -931,12 +1041,10 @@ pub async fn check_all(
     }
 
     ok.sort_by_key(|(idx, _)| *idx);
+    for (idx, resp) in &mut ok {
+        translate_file_index(resp, &file_lines_by_chunk[*idx]);
+    }
     Ok(merge_responses(ok.into_iter().map(|(_, r)| r).collect()))
-}
-
-/// Total query count across chunks (for the split log line).
-fn chunk_total(chunks: &[Vec<QueryInput>]) -> usize {
-    chunks.iter().map(|c| c.len()).sum()
 }
 
 /// Merges per-chunk responses into one: summary counts add up, `exit_code` is 1
@@ -1129,6 +1237,7 @@ fn extract_message(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{backoff_delay, extract_message, BACKOFF_BASE};
+    use super::{chunk_files, translate_file_index, CheckResponse, MAX_EST_STATEMENTS_PER_CALL};
     use std::time::Duration;
 
     #[test]
@@ -1199,6 +1308,7 @@ mod tests {
             transport: transport(),
             concurrency: 4,
             receipt: false,
+            file_paths: None,
         }
     }
 
@@ -1545,5 +1655,83 @@ mod tests {
         assert_eq!(resp.summary.total, 2);
         assert_eq!(resp.summary.blocked, 2);
         assert_eq!(resp.exit_code, 1);
+    }
+
+    // ── per-statement mode: chunking and file_index translation ──────────────
+
+    fn qi(line: u32, sql: &str) -> QueryInput {
+        QueryInput {
+            line,
+            sql: sql.to_string(),
+        }
+    }
+
+    #[test]
+    fn chunk_files_keeps_run_level_indexes_and_skips_stdin_paths() {
+        let paths = vec!["a.sql".to_string(), "-".to_string(), "c.sql".to_string()];
+        // Input 2 (stdin) has no path; input indexes are kept per file.
+        let chunks = chunk_files(
+            vec![qi(1, "SELECT 1;"), qi(2, "SELECT 2;"), qi(3, "SELECT 3;")],
+            &paths,
+        );
+        assert_eq!(chunks.len(), 1);
+        let files = chunks[0].files.as_ref().unwrap();
+        assert_eq!(
+            files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+            vec![Some("a.sql".into()), None, Some("c.sql".into())]
+        );
+        assert_eq!(chunks[0].file_lines, vec![1, 2, 3]);
+        assert!(chunks[0].queries.is_empty());
+    }
+
+    #[test]
+    fn chunk_files_splits_on_file_count_and_estimated_statements() {
+        let paths: Vec<String> = (1..=250).map(|i| format!("f{i}.sql")).collect();
+        let many: Vec<QueryInput> = (1..=250).map(|i| qi(i, "SELECT 1;")).collect();
+        let chunks = chunk_files(many, &paths);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| c.file_lines.len())
+                .collect::<Vec<_>>(),
+            vec![100, 100, 50]
+        );
+        assert_eq!(chunks[2].file_lines[0], 201);
+
+        // One file heavy enough to fill a chunk on its own estimate.
+        let heavy = ";".repeat(MAX_EST_STATEMENTS_PER_CALL);
+        let chunks = chunk_files(
+            vec![qi(1, "SELECT 1;"), qi(2, &heavy), qi(3, "SELECT 1;")],
+            &paths,
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| c.file_lines.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![1], vec![2], vec![3]]
+        );
+    }
+
+    #[test]
+    fn translate_file_index_maps_chunk_positions_to_run_indexes() {
+        let mut resp: CheckResponse = serde_json::from_value(serde_json::json!({
+            "summary": { "total": 2, "blocked": 1, "allowed": 1, "flagged": 0, "monitored": 0, "parse_errors": 0, "ruleset_version": "v1" },
+            "queries": [
+                { "line": 4, "file_index": 1, "sql_preview": "", "status": "ALLOWED" },
+                { "line": 9, "file_index": 2, "sql_preview": "", "status": "BLOCKED" }
+            ],
+            "exit_code": 1
+        }))
+        .unwrap();
+        // This chunk carried run inputs 201 and 202.
+        translate_file_index(&mut resp, &[201, 202]);
+        assert_eq!(
+            resp.queries
+                .iter()
+                .map(|q| (q.file_index, q.line))
+                .collect::<Vec<_>>(),
+            vec![(Some(201), 4), (Some(202), 9)]
+        );
     }
 }
