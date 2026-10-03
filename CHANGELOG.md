@@ -4,6 +4,19 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-10-03
+
+### Added
+- **Build attestations on every release artifact.** Each binary archive now
+  ships with a Sigstore-backed GitHub attestation tying it to
+  `vericto/vericto-cli`, the release workflow and the source commit; verify one
+  with `gh attestation verify <artifact> --repo vericto/vericto-cli`. The Docker
+  image gets the same, pushed to GHCR next to it
+  (`gh attestation verify oci://ghcr.io/vericto/vericto-cli:<tag> --repo vericto/vericto-cli`). They were
+  wired in but off while the repository was a user-owned private one, where
+  GitHub does not offer attestations. SHA-256 checksums still ship alongside, so
+  nothing changes for anyone verifying that way.
+
 ## [1.5.0] - 2026-10-03
 
 ### Changed

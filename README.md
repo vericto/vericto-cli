@@ -57,12 +57,18 @@ per-artifact `.sha256` — for an integrity check:
 sha256sum -c vericto-cli-x86_64-unknown-linux-musl.tar.xz.sha256
 ```
 
-> **Keyless build attestations** (Sigstore-backed provenance tied to the GitHub
-> Actions identity that built the artifact, §9) are wired into the release
-> pipeline but **currently disabled**: GitHub artifact attestations aren't
-> available for user-owned _private_ repositories. Once this repo is public or
-> moves under an org, re-enable them (see `dist-workspace.toml`) and verification
-> becomes `gh attestation verify <artifact> --repo vericto/vericto-cli`.
+Releases from v1.5.1 on also carry **keyless build attestations** (§9):
+Sigstore-backed provenance that ties each artifact to this repository, the
+release workflow and the commit it was built from. Checksums show the download
+is intact; the attestation shows who built it and from what source:
+
+```bash
+# Requires the GitHub CLI (gh 2.49+)
+gh attestation verify vericto-cli-x86_64-unknown-linux-musl.tar.xz --repo vericto/vericto-cli
+
+# The Docker image carries the same, stored in GHCR
+gh attestation verify oci://ghcr.io/vericto/vericto-cli:1.5.1 --repo vericto/vericto-cli
+```
 
 
 ## Commands
