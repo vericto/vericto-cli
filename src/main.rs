@@ -1122,7 +1122,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     // unavailable (older backend) we proceed unsanitized rather than block —
     // the check itself is the security gate.
     // The same call tells us whether the backend reports per statement (see
-    // `per_statement_paths`).
+    // `preflight`, the equivalent for `baseline`).
     let mut supports_files = false;
     match api::config(&api_url, &api_key, &transport).await {
         Ok(cfg) => {
@@ -1300,7 +1300,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     // Suppression (§10): a finding does not fail the run if it is baselined or
     // carries an inline `-- vericto:ignore[RULE] reason`. Reporting still shows it;
     // only the exit code is affected.
-    let suppressed = suppressed_fingerprints(&resp, &files, baseline_path.as_deref());
+    let suppressed = suppressed_results(&resp, &files, baseline_path.as_deref());
     let suppressed = match suppressed {
         Ok(s) => s,
         Err(code) => return code,
@@ -1308,10 +1308,9 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     let failing: Vec<&api::QueryResult> = resp
         .queries
         .iter()
-        .filter(|q| {
-            let fp = output::fingerprint(q, &output::file_of(&files, q));
-            !suppressed.contains(&fp) && finding_fails(q, fail_on)
-        })
+        .enumerate()
+        .filter(|(i, q)| !suppressed.contains(i) && finding_fails(q, fail_on))
+        .map(|(_, q)| q)
         .collect();
     if !failing.is_empty() {
         // Always explain the failure on stderr — otherwise a machine `--format`
@@ -1328,17 +1327,26 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     }
 }
 
-/// Collects the set of finding fingerprints that should NOT fail the run:
-/// baselined entries (from `--baseline`) plus inline `-- vericto:ignore` matches.
-/// Prints what it suppressed (and any baseline drift) to stderr. Returns an
-/// ExitCode on a hard error (unreadable baseline).
-fn suppressed_fingerprints(
+/// Collects the results (by index into `resp.queries`) that should NOT fail the
+/// run: baselined findings (from `--baseline`) plus inline `-- vericto:ignore`
+/// matches. Per result, not per fingerprint: keying on the fingerprint let one
+/// suppression cover every finding that shared it — one inline ignore, or one
+/// baselined `DELETE`, silenced every other `DELETE` without `WHERE` in the
+/// file. Prints what it suppressed (and any baseline drift) to stderr. Returns
+/// an ExitCode on a hard error (unreadable baseline).
+fn suppressed_results(
     resp: &CheckResponse,
     files: &[String],
     baseline_path: Option<&std::path::Path>,
-) -> Result<std::collections::HashSet<String>, ExitCode> {
+) -> Result<std::collections::HashSet<usize>, ExitCode> {
     use std::collections::HashSet;
-    let mut suppressed: HashSet<String> = HashSet::new();
+    let mut suppressed: HashSet<usize> = HashSet::new();
+    let findings = || {
+        resp.queries
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| q.status != "ALLOWED")
+    };
 
     // 1) Baseline file.
     if let Some(path) = baseline_path {
@@ -1351,15 +1359,25 @@ fn suppressed_fingerprints(
         };
         let set = bl.set();
         let mut n = 0;
-        for q in resp.queries.iter().filter(|q| q.status != "ALLOWED") {
-            if baseline::is_baselined(q, files, &set) {
-                suppressed.insert(output::fingerprint(q, &output::file_of(files, q)));
+        for (i, q) in findings() {
+            if baseline::is_baselined(q, files, &bl, &set) {
+                suppressed.insert(i);
                 n += 1;
             }
         }
         if n > 0 {
             eprintln!(
                 "note: {n} finding(s) suppressed by baseline {}.",
+                path.display()
+            );
+        }
+        if bl.version < baseline::PER_STATEMENT_VERSION
+            && findings().any(|(_, q)| q.statement_hash.is_some())
+        {
+            eprintln!(
+                "note: {} is a v1 baseline: it matches findings by rule and file, so it also \
+                 hides new findings of a baselined rule in that file. Re-run `vericto baseline` \
+                 to key it per statement.",
                 path.display()
             );
         }
@@ -1372,8 +1390,11 @@ fn suppressed_fingerprints(
         }
     }
 
-    // 2) Inline `-- vericto:ignore[RULE] reason` in the source file.
-    for q in resp.queries.iter().filter(|q| q.status != "ALLOWED") {
+    // 2) Inline `-- vericto:ignore[RULE] reason` in the source file: scoped to
+    //    the statement when the backend reports per statement, file-wide when
+    //    a result covers the whole file (older backend).
+    let mut sources: std::collections::HashMap<String, Option<String>> = Default::default();
+    for (i, q) in findings() {
         let Some(rule) = q.rule_code.as_deref() else {
             continue;
         };
@@ -1381,11 +1402,33 @@ fn suppressed_fingerprints(
         if path == "<stdin>" {
             continue; // can't re-read stdin
         }
-        if let Ok(sql) = std::fs::read_to_string(&path) {
-            if let Some(reason) = baseline::inline_suppression(&sql, rule) {
-                suppressed.insert(output::fingerprint(q, &path));
-                eprintln!("note: {path}: {rule} suppressed inline — {reason}");
+        let Some(sql) = sources
+            .entry(path.clone())
+            .or_insert_with(|| std::fs::read_to_string(&path).ok())
+            .as_deref()
+        else {
+            continue;
+        };
+        let reason = match q.file_index {
+            Some(idx) => {
+                let next = resp
+                    .queries
+                    .iter()
+                    .filter(|o| o.file_index == Some(idx) && o.line > q.line)
+                    .map(|o| o.line)
+                    .min();
+                baseline::inline_suppression_scoped(sql, rule, q.line, next)
             }
+            None => baseline::inline_suppression(sql, rule),
+        };
+        if let Some(reason) = reason {
+            suppressed.insert(i);
+            let at = if q.file_index.is_some() {
+                format!("{path}:{}", q.line)
+            } else {
+                path.clone()
+            };
+            eprintln!("note: {at}: {rule} suppressed inline — {reason}");
         }
     }
 
@@ -1454,7 +1497,7 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
             return ExitCode::from(exit::USAGE);
         }
     };
-    let queries = match collect_queries(&files) {
+    let mut queries = match collect_queries(&files) {
         Some(q) if !q.is_empty() => q,
         Some(_) => {
             eprintln!("error: no SQL to baseline (all inputs were empty).");
@@ -1463,6 +1506,18 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
         None => return ExitCode::from(exit::USAGE),
     };
 
+    // Same preflight as `check`: sanitize when the workspace requires it, and
+    // use per-statement mode when the backend supports it — otherwise a
+    // baseline would key findings on SQL that `check` never sends.
+    let file_paths = preflight(
+        &api_url,
+        &api_key,
+        &transport,
+        &dialect,
+        &mut queries,
+        &files,
+    )
+    .await;
     let resp = match api::check_all(
         api::CheckParams {
             api_url: &api_url,
@@ -1470,7 +1525,7 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
             dialect: &dialect,
             file_name: None,
             provenance: build_provenance(),
-            file_paths: per_statement_paths(&api_url, &api_key, &transport, &files).await,
+            file_paths,
             transport,
             concurrency: 4,
             receipt: false,
@@ -1558,7 +1613,7 @@ async fn run_baseline_prune(args: BaselinePruneArgs) -> ExitCode {
             return ExitCode::from(exit::USAGE);
         }
     };
-    let queries = match collect_queries(&files) {
+    let mut queries = match collect_queries(&files) {
         Some(q) if !q.is_empty() => q,
         Some(_) => {
             eprintln!("error: no SQL to check (all inputs were empty).");
@@ -1567,6 +1622,18 @@ async fn run_baseline_prune(args: BaselinePruneArgs) -> ExitCode {
         None => return ExitCode::from(exit::USAGE),
     };
 
+    // Same preflight as `check`: sanitize when the workspace requires it, and
+    // use per-statement mode when the backend supports it — otherwise a
+    // baseline would key findings on SQL that `check` never sends.
+    let file_paths = preflight(
+        &api_url,
+        &api_key,
+        &transport,
+        &dialect,
+        &mut queries,
+        &files,
+    )
+    .await;
     let resp = match api::check_all(
         api::CheckParams {
             api_url: &api_url,
@@ -1574,7 +1641,7 @@ async fn run_baseline_prune(args: BaselinePruneArgs) -> ExitCode {
             dialect: &dialect,
             file_name: None,
             provenance: build_provenance(),
-            file_paths: per_statement_paths(&api_url, &api_key, &transport, &files).await,
+            file_paths,
             transport,
             concurrency: 4,
             receipt: false,
@@ -2703,19 +2770,38 @@ fn supports_check_files(cfg: &api::WorkspaceConfig) -> bool {
     cfg.capabilities.iter().any(|c| c == "check_files")
 }
 
-/// The file list to send in per-statement mode, or `None` to keep the original
-/// one-result-per-file shape (older backend, or the config could not be read).
-/// `baseline` uses the same mode as `check`, so a baseline records the same
-/// findings a later check will compare against.
-async fn per_statement_paths(
+/// `GET /ci/config` preflight for `baseline` and `baseline prune`, matching
+/// `check`'s: normalizes literals client-side when the workspace is in
+/// sanitized mode (§6.2) — `baseline` used to send raw SQL even then — and
+/// returns the file list for per-statement mode when the backend supports it.
+/// If the config can't be read, SQL is sent unsanitized with a warning (as
+/// `check` does) and the original request shape is kept.
+async fn preflight(
     api_url: &str,
     api_key: &str,
     transport: &api::Transport,
+    dialect: &str,
+    queries: &mut [QueryInput],
     files: &[String],
 ) -> Option<Vec<String>> {
     match api::config(api_url, api_key, transport).await {
-        Ok(cfg) if supports_check_files(&cfg) => Some(files.to_vec()),
-        _ => None,
+        Ok(cfg) => {
+            if cfg.telemetry_query_mode.as_deref() == Some("sanitized") {
+                for q in queries.iter_mut() {
+                    q.sql = sanitize::sanitize(&q.sql, dialect);
+                }
+                eprintln!(
+                    "note: workspace is in sanitized mode — literals normalized before sending."
+                );
+            }
+            supports_check_files(&cfg).then(|| files.to_vec())
+        }
+        Err(_) => {
+            eprintln!(
+                "note: could not read workspace config; proceeding without client-side sanitization."
+            );
+            None
+        }
     }
 }
 
@@ -2824,6 +2910,7 @@ mod tests {
                 .map(|(i, s)| QueryResult {
                     line: i as u32,
                     file_index: None,
+                    statement_hash: None,
                     sql_preview: String::new(),
                     status: (*s).into(),
                     action: None,

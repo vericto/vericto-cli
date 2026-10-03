@@ -97,6 +97,11 @@ pub struct QueryResult {
     /// translated to the run's file list (see `check_all`).
     #[serde(default)]
     pub file_index: Option<u32>,
+    /// Identity of the statement's text (backend `statement_hash`), so a
+    /// baseline can tell two findings of one rule in one file apart. Absent on
+    /// older backends.
+    #[serde(default)]
+    pub statement_hash: Option<String>,
     pub sql_preview: String,
     pub status: String, // BLOCKED | ALLOWED | FLAGGED | MONITORED | PARSE_ERROR
     #[serde(default)]

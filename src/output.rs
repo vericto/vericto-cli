@@ -784,6 +784,7 @@ mod tests {
         QueryResult {
             line: 1,
             file_index: None,
+            statement_hash: None,
             sql_preview: "DELETE FROM t".into(),
             status: status.into(),
             action: None,
@@ -888,6 +889,7 @@ mod tests {
         let pe = QueryResult {
             line: 1,
             file_index: None,
+            statement_hash: None,
             sql_preview: "COPY t FROM stdin".into(),
             status: "PARSE_ERROR".into(),
             action: None,

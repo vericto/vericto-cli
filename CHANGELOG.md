@@ -27,6 +27,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a file's most severe one can now surface as new; re-run `vericto baseline` to
   accept them, or fix them.
 
+### Fixed
+- **One suppression no longer covers every look-alike finding.** Suppression was
+  keyed on the finding's fingerprint (rule, file, AST path), so a single
+  baseline entry or inline ignore also silenced every other finding with that
+  fingerprint — e.g. baselining one `DELETE` without `WHERE` let any later one
+  in the same file pass. Suppression is now decided per result.
+- **Per-statement baselines (format v2).** With a backend that returns
+  `statement_hash`, `vericto baseline` keys each entry on the statement's text
+  as well (re-indenting a statement keeps its entry; changing its SQL does
+  not), and records the line for reviewers. v1 baselines are still matched as
+  before, with a note recommending `vericto baseline` to upgrade.
+- **Inline ignores apply to their statement.** In per-statement mode,
+  `-- vericto:ignore[RULE] reason` covers the statement it sits on or directly
+  above — not every statement in the file, as the failure hint already
+  described. Results that cover a whole file keep the file-wide behaviour.
+- **`baseline` and `baseline prune` honor sanitized mode.** They skipped the
+  `GET /ci/config` preflight and sent raw SQL even when the workspace requires
+  literals to be normalized client-side; they now sanitize exactly like `check`
+  (which also keeps baseline keys consistent with the SQL `check` sends).
+
 ## [1.4.2] - 2026-08-03
 
 ### Added
