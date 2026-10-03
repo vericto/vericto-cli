@@ -1742,3 +1742,162 @@ async fn check_against_an_older_backend_keeps_sending_queries() {
         .assert()
         .code(0);
 }
+
+// ── baseline privacy, per-statement baselines, statement-scoped ignores ─────
+
+/// Mounts a sanitized-mode, per-statement backend whose check-key answers 418
+/// to any body carrying the raw literal — so a client that skips sanitization
+/// fails the test instead of passing it.
+async fn mock_sanitized_backend(check: serde_json::Value, raw_literal: &str) -> MockServer {
+    let server = MockServer::start().await;
+    let mut cfg = config_body("sanitized");
+    cfg["capabilities"] = serde_json::json!(["check_files"]);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(cfg))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/check-key"))
+        .and(wiremock::matchers::body_string_contains(raw_literal))
+        .respond_with(ResponseTemplate::new(418))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/check-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(check))
+        .with_priority(5)
+        .mount(&server)
+        .await;
+    server
+}
+
+fn one_finding(line: u32, hash: &str) -> serde_json::Value {
+    serde_json::json!({
+        "summary": { "total": 1, "blocked": 1, "allowed": 0, "flagged": 0, "monitored": 0, "parse_errors": 0, "ruleset_version": "v1" },
+        "queries": [{ "line": line, "file_index": 1, "statement_hash": hash, "sql_preview": "DELETE FROM users",
+                      "status": "BLOCKED", "rule_code": "VERICTO-001", "severity": "critical",
+                      "ast_node_path": "DeleteStmt > WhereClause = NULL" }],
+        "exit_code": 1,
+        "telemetry_query_mode": "sanitized"
+    })
+}
+
+#[tokio::test]
+async fn baseline_sanitizes_literals_like_check_does() {
+    let server = mock_sanitized_backend(one_finding(1, "h1"), "alice@example.com").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(
+        &sql,
+        "DELETE FROM users WHERE email = 'alice@example.com' OR 1=1;",
+    )
+    .unwrap();
+    let out = dir.path().join("baseline.json");
+
+    vericto()
+        .args([
+            "baseline",
+            sql.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0);
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!(written["version"], 2);
+}
+
+#[tokio::test]
+async fn a_per_statement_baseline_does_not_hide_a_new_statement() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(&sql, "DELETE FROM users;").unwrap();
+    let bl = dir.path().join("baseline.json");
+
+    // Baseline the existing DELETE (hash h1)…
+    let server = mock_per_statement_backend(one_finding(1, "h1")).await;
+    vericto()
+        .args([
+            "baseline",
+            sql.to_str().unwrap(),
+            "--out",
+            bl.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0);
+
+    // …the same statement still passes…
+    vericto()
+        .args([
+            "check",
+            sql.to_str().unwrap(),
+            "--baseline",
+            bl.to_str().unwrap(),
+            "--quiet",
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0);
+
+    // …but a different DELETE without WHERE in the same file fails the run.
+    let server = mock_per_statement_backend(one_finding(3, "h2")).await;
+    vericto()
+        .args([
+            "check",
+            sql.to_str().unwrap(),
+            "--baseline",
+            bl.to_str().unwrap(),
+            "--quiet",
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(1);
+}
+
+#[tokio::test]
+async fn an_inline_ignore_covers_only_the_statement_below_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(
+        &sql,
+        "DELETE FROM sessions;\n-- vericto:ignore[VERICTO-001] approved purge, TICKET-42\nDELETE FROM orders;",
+    )
+    .unwrap();
+    let both = serde_json::json!({
+        "summary": { "total": 2, "blocked": 2, "allowed": 0, "flagged": 0, "monitored": 0, "parse_errors": 0, "ruleset_version": "v1" },
+        "queries": [
+            { "line": 1, "file_index": 1, "statement_hash": "s", "sql_preview": "DELETE FROM sessions", "status": "BLOCKED",
+              "rule_code": "VERICTO-001", "severity": "critical", "ast_node_path": "DeleteStmt > WhereClause = NULL" },
+            { "line": 3, "file_index": 1, "statement_hash": "o", "sql_preview": "DELETE FROM orders", "status": "BLOCKED",
+              "rule_code": "VERICTO-001", "severity": "critical", "ast_node_path": "DeleteStmt > WhereClause = NULL" }
+        ],
+        "exit_code": 1
+    });
+    let server = mock_per_statement_backend(both).await;
+    let out = vericto()
+        .args(["check", sql.to_str().unwrap(), "--no-color"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    // The ignore covers line 3 only; line 1 still fails the run.
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("m.sql:3: VERICTO-001 suppressed inline"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("m.sql:1: VERICTO-001 suppressed inline"),
+        "{stderr}"
+    );
+}

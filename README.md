@@ -117,12 +117,27 @@ Pass the same file set the baseline was originally recorded against — pruning
 against a smaller set would drop entries for files that simply weren't
 re-checked, not ones that were actually fixed.
 
+Baselines record each finding's **statement**, not just its rule and file
+(format v2, with a backend that reports per statement). Accepting one
+`DELETE` without `WHERE` does not accept the next one someone adds to the same
+file. A baseline from an older CLI (v1) keeps working as before; `check` notes
+that it hides new findings of a baselined rule in that file — re-run
+`vericto baseline` to upgrade it. In a workspace in sanitized mode, `baseline`
+normalizes literals before sending, exactly like `check`.
+
 Suppress a single finding inline (a **reason is required**, so it stays
-accountable):
+accountable). The comment applies to **its statement only**: put it directly
+above the statement (no blank line in between) or on one of its lines:
 
 ```sql
-DELETE FROM users; -- vericto:ignore[VERICTO-001] one-off backfill, tracked in JIRA-42
+-- vericto:ignore[VERICTO-001] one-off backfill, tracked in JIRA-42
+DELETE FROM users;
+
+DELETE FROM sessions; -- vericto:ignore[VERICTO-001] expired rows only, JIRA-43
 ```
+
+Against an older backend that reports one result per file, an inline ignore
+still applies to the whole file.
 
 ## Inspecting rules (`vericto rules`)
 
