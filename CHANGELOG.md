@@ -4,6 +4,22 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-10-04
+
+### Security
+- **rustls 0.23.41 → 0.23.45 (RUSTSEC-2026-0285)** and **h2 0.4.15 → 0.4.19
+  (RUSTSEC-2026-0258).** rustls accepted TLS 1.3 handshake messages across
+  encryption-level boundaries; h2 did not bound empty DATA frames. The CLI is a
+  client that only talks to the Vericto API, so the exposure was low, but every
+  HTTPS call goes through both crates. `chacha20` 0.10.1, a yanked version, is
+  also updated. Dependency-only release: no behaviour change; `cargo audit`
+  reports no vulnerabilities and no warnings.
+
+### Documentation
+- **Verifying attestations:** the README now downloads the artifact before
+  `gh attestation verify`, which checks a local file and failed with
+  "no such file or directory" when run as written.
+
 ## [1.5.1] - 2026-10-03
 
 ### Added
