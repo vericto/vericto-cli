@@ -131,7 +131,9 @@ Baselines record each finding's **statement**, not just its rule and file
 file. A baseline from an older CLI (v1) keeps working as before; `check` notes
 that it hides new findings of a baselined rule in that file — re-run
 `vericto baseline` to upgrade it. In a workspace in sanitized mode, `baseline`
-normalizes literals before sending, exactly like `check`.
+normalizes literals before sending, exactly like `check`. If the workspace
+config can't be read, both fail closed (exit 4) without sending any SQL, unless
+you pass `--allow-unsanitized`.
 
 Suppress a single finding inline (a **reason is required**, so it stays
 accountable). The comment applies to **its statement only**: put it directly
@@ -308,10 +310,13 @@ vericto verify-receipt vericto-receipt.json --show
   signature or payload doesn't check out, **exit 2** for a malformed file.
 - Archive the file as a CI artifact (GitHub/GitLab retention, or your own
   storage) — retention becomes *your* decision.
-- The public key is bundled in the binary; override with `--public-key <PEM|path>`
-  (or `$VERICTO_RECEIPT_PUBLIC_KEY`), fetched from
-  `GET /api/v1/meta/export-signing-key`. A large run split into chunks writes a
-  JSON array of per-chunk receipts (all must verify).
+- No public key is bundled in the binary yet, so pass it with
+  `--public-key <PEM|path>` (or `$VERICTO_RECEIPT_PUBLIC_KEY`). Get it once from
+  `GET /api/v1/meta/export-signing-key` (the `public_key` field; for a receipt
+  signed before a key rotation, add `?key_id=<the receipt's public_key_id>`)
+  and keep the `.pem` with your artifacts; verification itself stays offline.
+  Without a key, `verify-receipt` exits `3` and says so. A large run split
+  into chunks writes a JSON array of per-chunk receipts (all must verify).
 
 > If the deployment hasn't configured signing, `--receipt` prints a warning and
 > writes nothing — the check itself still runs and gates as usual.
@@ -393,6 +398,7 @@ vericto check schema.sql --monitor
 | `--concurrency <n>` | `4` | Max in-flight chunk requests, capped at 8 (`$VERICTO_CONCURRENCY`) |
 | `--ca-bundle <path>` | — | Extra CA PEM to trust (`$VERICTO_CA_BUNDLE`, then `$SSL_CERT_FILE`) |
 | `--allow-degraded <reason>` | off | Exit 0 (not 4) if the backend is unreachable; reason required |
+| `--allow-unsanitized` | off | If the workspace config can't be read, send the SQL as-is instead of failing (`$VERICTO_ALLOW_UNSANITIZED`) |
 | `--api-key` | `$VERICTO_API_KEY` / config | Vericto API key (`vtro_...`) |
 | `--api-url` | `https://api.vericto.com` | Backend URL (`$VERICTO_API_URL` / config) |
 | `--oidc` | off | Authenticate via CI workload-identity (§ OIDC above); auto-enabled when no key + a token is present |
@@ -429,8 +435,8 @@ default_dialect = "postgres"
 | `0` | Nothing at/above `--fail-on` |
 | `1` | A finding at/above `--fail-on` |
 | `2` | Usage error (bad args, unreadable file) |
-| `3` | Auth/config error (missing/invalid key, plan not entitled) |
-| `4` | Backend/network error |
+| `3` | Auth/config error (missing/invalid key, plan not entitled, monthly check allowance used up) |
+| `4` | Backend/network error (incl. a workspace config that can't be read — no SQL is sent) |
 
 Distinct non-zero codes let CI distinguish a real block from an outage.
 

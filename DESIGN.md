@@ -438,6 +438,14 @@ per-command choice.
   consistent with the engine's existing conservative-parsing stance).
 - One workspace setting, enforced consistently across `vericto-proxy` and
   `vericto-cli` — no per-tool drift.
+- **Fail closed when the setting is unknown.** If `GET /ci/config` can't be
+  read (after its retries), `check`, `baseline` and `baseline prune` send no
+  SQL and exit `4`: the CLI can't tell whether the workspace requires
+  sanitization, and sending raw literals is the one outcome that can't be
+  undone. `--allow-unsanitized` (`VERICTO_ALLOW_UNSANITIZED`) is the explicit
+  opt-out to send as-is. It is not a `--sanitize` switch — it can't turn
+  sanitization off when the config *is* read. A backend unreachable from this
+  first call still honors `--allow-degraded` (§6.5), which sends nothing.
 
 ### 6.3 Project-level config: `.vericto.toml` (🔜 — point 8)
 
@@ -492,8 +500,10 @@ be robust and not fail a build for a transient blip:
 - **Retries:** transient failures (connection reset, timeout, and `429`/`5xx`
   responses) are retried up to 3 times with exponential backoff + jitter. A `429`
   honors the `Retry-After` header. Auth (`401`/`403`) and validation (`4xx` other
-  than `429`) are **not** retried — they won't succeed on repeat. Exhausted
-  retries surface as exit `4` (backend/network), distinct from a real finding.
+  than `429`) are **not** retried — they won't succeed on repeat. Neither is a
+  `429` whose body is `QUOTA_EXCEEDED` (monthly allowance used up): it is a plan
+  limit, not a throttle, and exits `3`. Exhausted retries surface as exit `4`
+  (backend/network), distinct from a real finding.
 
 ### 6.5 Degraded-mode break-glass (🔜 — point 9)
 
@@ -642,8 +652,8 @@ published at `GET /api/v1/meta/export-signing-key`. CLI side (new):
 | `0` | No finding at/above `--fail-on` (default: nothing blocked) |
 | `1` | At least one finding at/above `--fail-on` |
 | `2` | Usage error (bad flag, unreadable file) |
-| `3` | Auth/config error (missing/invalid key, plan not entitled) |
-| `4` | Backend/network error (unreachable, 5xx, timeout) |
+| `3` | Auth/config error (missing/invalid key, plan not entitled, monthly check allowance used up — a `429` `QUOTA_EXCEEDED`) |
+| `4` | Backend/network error (unreachable, 5xx, timeout, unreadable `/ci/config`) |
 
 Distinct non-zero codes matter in CI so a network blip isn't confused with a real
 block. (`--monitor` forces `0` for findings but not for codes 2–4. `--allow-degraded`,
