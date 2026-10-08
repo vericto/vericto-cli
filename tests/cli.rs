@@ -404,6 +404,115 @@ async fn sanitized_mode_normalizes_before_send() {
         .code(0);
 }
 
+/// A backend whose `/ci/config` answers `config_status`, with a check-key mock
+/// that must be hit exactly `check_calls` times (verified on drop).
+async fn backend_with_config_status(config_status: u16, check_calls: u64) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(config_status))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/check-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(check_body(&["ALLOWED"])))
+        .expect(check_calls)
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn unreadable_config_fails_closed_without_sending_sql() {
+    // The CLI can't tell whether the workspace requires sanitized mode, so it
+    // must not send the raw literal: exit 4 and zero check-key calls.
+    let server = backend_with_config_status(404, 0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("s.sql");
+    std::fs::write(&sql, "SELECT * FROM t WHERE email = 'secret@x.com';").unwrap();
+
+    let out = vericto()
+        .args(["check", sql.to_str().unwrap(), "--quiet"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("No SQL was sent"), "{stderr}");
+}
+
+#[tokio::test]
+async fn unreadable_config_with_allow_unsanitized_sends_sql() {
+    let server = backend_with_config_status(404, 1).await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("s.sql");
+    std::fs::write(&sql, "SELECT 1 LIMIT 1;").unwrap();
+
+    vericto()
+        .args([
+            "check",
+            sql.to_str().unwrap(),
+            "--quiet",
+            "--allow-unsanitized",
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0);
+}
+
+#[tokio::test]
+async fn baseline_unreadable_config_fails_closed() {
+    let server = backend_with_config_status(404, 0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("s.sql");
+    std::fs::write(&sql, "DELETE FROM t WHERE email = 'secret@x.com';").unwrap();
+    let out = dir.path().join("bl.json");
+
+    vericto()
+        .args([
+            "baseline",
+            sql.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(4);
+    assert!(!out.exists());
+}
+
+#[tokio::test]
+async fn exhausted_quota_exits_3() {
+    // README/DESIGN exit codes: 3 = auth/config (plan not entitled), 4 =
+    // backend/network. An exhausted monthly allowance is a plan limit → 3.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(config_body("raw")))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/check-key"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+            "error": { "code": "QUOTA_EXCEEDED", "message": "Monthly SQL check quota reached (100/100)." }
+        })))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(&sql, "SELECT 1;").unwrap();
+
+    vericto()
+        .args(["check", sql.to_str().unwrap(), "--quiet"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(3);
+}
+
 #[tokio::test]
 async fn doctor_reports_ok_without_spending_check() {
     let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
@@ -733,6 +842,31 @@ async fn check_receipt_then_verify_roundtrip() {
         ])
         .assert()
         .code(0);
+}
+
+#[tokio::test]
+async fn verify_receipt_without_public_key_explains_how_to_get_it() {
+    // No official key is bundled (pubkeys::BUNDLED_KEYS is empty), so without
+    // --public-key verification can't succeed: exit 3, pointing at the endpoint.
+    use ed25519_dalek::SigningKey;
+
+    let signing = SigningKey::from_bytes(&[9u8; 32]);
+    let body = check_body_with_receipt(&signing, "test-key");
+    let dir = tempfile::tempdir().unwrap();
+    let receipt_path = dir.path().join("receipt.json");
+    std::fs::write(&receipt_path, body["receipt"].to_string()).unwrap();
+
+    let out = vericto()
+        .args(["verify-receipt", receipt_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--public-key"), "{stderr}");
+    assert!(
+        stderr.contains("/api/v1/meta/export-signing-key"),
+        "{stderr}"
+    );
 }
 
 #[tokio::test]

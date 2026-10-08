@@ -211,6 +211,11 @@ vericto-sql-check:
 /// Git pre-commit hook: check staged `*.sql` before a commit. Non-blocking if
 /// `vericto` isn't installed (so a missing binary doesn't wedge every commit);
 /// blocks the commit when a staged file is BLOCKED.
+///
+/// It checks the **staged** blob (`git show :path`, piped as stdin), not the
+/// working-tree file: after a partial `git add` the two differ, and the commit
+/// contains the staged one. Each file is one `vericto check -`, labelled by an
+/// echo since stdin has no name; the hook exits with the highest exit code.
 pub fn precommit_hook(dialect: &str) -> String {
     format!(
         r#"#!/bin/sh
@@ -226,8 +231,17 @@ fi
 staged=$(git diff --cached --name-only --diff-filter=d -- '*.sql')
 [ -z "$staged" ] && exit 0
 
-# shellcheck disable=SC2086
-echo "$staged" | xargs vericto check --dialect {dialect}
+# Check the staged content (what the commit will contain), not the working tree.
+rc=0
+while IFS= read -r f; do
+  echo "vericto: $f" >&2
+  s=0
+  git show ":$f" | vericto check --dialect {dialect} - || s=$?
+  if [ "$s" -gt "$rc" ]; then rc=$s; fi
+done <<EOF
+$staged
+EOF
+exit "$rc"
 "#
     )
 }
@@ -288,8 +302,72 @@ mod tests {
         let h = precommit_hook("oracle");
         assert!(h.starts_with("#!/bin/sh"));
         assert!(h.contains("--diff-filter=d"));
+        assert!(h.contains(r#"git show ":$f" | vericto check --dialect oracle -"#));
+        assert!(!h.contains("xargs")); // not the working-tree paths
         assert!(h.contains("--dialect oracle"));
         assert!(h.contains("command -v vericto")); // no-op when vericto absent
+    }
+
+    /// Runs the generated hook in a real repo where the staged and working-tree
+    /// versions of a file differ, with a stub `vericto` that records its stdin:
+    /// the hook must send the staged content.
+    #[cfg(unix)]
+    #[test]
+    fn precommit_hook_checks_staged_blob_not_working_tree() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("vericto-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(repo.join("db")).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let seen = dir.join("seen.sql");
+        // Stub: record stdin, exit 1 (as if BLOCKED) so the exit code is checked.
+        write_file(
+            &bin.join("vericto"),
+            &format!("#!/bin/sh\ncat >> '{}'\nexit 1\n", seen.display()),
+            false,
+            true,
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        // A space in the path: the old `xargs` hook split it into two args.
+        let file = repo.join("db/my migration.sql");
+        std::fs::write(&file, "DELETE FROM users;\n").unwrap();
+        git(&["add", "db/my migration.sql"]);
+        // Unstaged edit: the working tree now looks harmless.
+        std::fs::write(&file, "SELECT 1;\n").unwrap();
+
+        let hook = dir.join("pre-commit");
+        write_file(&hook, &precommit_hook("postgres"), false, true).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let status = Command::new(&hook)
+            .current_dir(&repo)
+            .env("PATH", path)
+            .status()
+            .unwrap();
+
+        assert_eq!(status.code(), Some(1), "hook must propagate the block");
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "DELETE FROM users;\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

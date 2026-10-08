@@ -4,6 +4,29 @@ All notable changes to the Vericto CLI are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **Fail closed when the workspace config can't be read.** If `GET /ci/config`
+  failed, `check`, `baseline` and `baseline prune` sent the SQL unsanitized,
+  even in a workspace that requires sanitized mode. They now send nothing and
+  exit 4; `--allow-unsanitized` (`VERICTO_ALLOW_UNSANITIZED`) opts out.
+- **Sanitization handles backslash escapes.** In MySQL and in Postgres
+  `E'...'` strings, `\'` doesn't end a literal; the sanitizer treated it as
+  the end, and the rest of the literal was sent verbatim.
+
+### Fixed
+- **An exhausted monthly allowance exits 3**, as the exit-code table says
+  ("plan not entitled"), instead of being retried as a rate limit and
+  exiting 4.
+- **The pre-commit hook checks the staged content** (`git show :path`), not
+  the working-tree file, and handles paths with spaces.
+
+### Documentation
+- The README said the receipt-signing public key is bundled; none is yet, so
+  `verify-receipt` needs `--public-key` (from
+  `GET /api/v1/meta/export-signing-key`).
+
 ## [1.5.2] - 2026-10-04
 
 ### Security

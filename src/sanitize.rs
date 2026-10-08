@@ -7,7 +7,10 @@
 //! payloads while preserving structure the rules care about.
 //!
 //! What it replaces with `?`:
-//!   - single-quoted string literals `'...'` (with `''` escape handling)
+//!   - single-quoted string literals `'...'` (with `''` escape handling). A
+//!     backslash also escapes the next character where the dialect says so:
+//!     always in MySQL (its default mode), and in Postgres `E'...'` strings.
+//!     Otherwise `'a\'b'` would end at `\'` and leak `b` verbatim.
 //!   - numeric literals (integers/decimals, incl. a leading sign after an operator)
 //!
 //! What it deliberately leaves intact (conservative — matches the engine's
@@ -120,10 +123,20 @@ pub fn sanitize(sql: &str, dialect: &str) -> String {
             continue;
         }
 
-        // Single-quoted string literal → `?`. Handles the `''` escape.
+        // Single-quoted string literal → `?`. Handles the `''` escape, and the
+        // backslash escape in MySQL and Postgres `E'...'` strings.
         if c == '\'' {
+            let e_string = dialect == "postgres" && is_e_prefix(&out);
+            if e_string {
+                out.pop(); // the `E` belongs to the literal: `E$1` wouldn't parse
+            }
+            let backslash = e_string || backslash_escapes(dialect);
             i += 1;
             while i < n {
+                if backslash && bytes[i] == b'\\' {
+                    i += 2; // escaped char (may be a quote) inside the string
+                    continue;
+                }
                 if bytes[i] == b'\'' {
                     if i + 1 < n && bytes[i + 1] == b'\'' {
                         i += 2; // escaped quote inside the string
@@ -159,6 +172,21 @@ pub fn sanitize(sql: &str, dialect: &str) -> String {
     }
 
     out
+}
+
+/// Whether backslash escapes apply inside every `'...'` string in this dialect.
+/// MySQL treats `\` as an escape unless `NO_BACKSLASH_ESCAPES` is set; if it is,
+/// we over-consume a literal, which only replaces more — never leaks.
+fn backslash_escapes(dialect: &str) -> bool {
+    dialect == "mysql"
+}
+
+/// Whether the token just emitted is a lone `E`/`e` prefix — the opening of a
+/// Postgres escape string `E'...'` (and not the end of an identifier like `name`).
+fn is_e_prefix(out: &str) -> bool {
+    let mut rev = out.chars().rev();
+    matches!(rev.next(), Some('E' | 'e'))
+        && !matches!(rev.next(), Some(p) if p.is_ascii_alphanumeric() || p == '_')
 }
 
 /// Whether the char just emitted allows a numeric literal to start here (i.e.
@@ -251,6 +279,55 @@ mod tests {
         assert_eq!(
             sanitize(r#"SELECT "user's col" FROM t"#, "postgres"),
             r#"SELECT "user's col" FROM t"#
+        );
+    }
+
+    #[test]
+    fn mysql_backslash_escaped_quote_does_not_leak() {
+        // Without backslash handling the literal ended at `\'` and
+        // `s secret-token` was sent verbatim.
+        assert_eq!(
+            sanitize(r"WHERE note = 'it\'s secret-token' AND id = 1", "mysql"),
+            "WHERE note = ? AND id = ?"
+        );
+    }
+
+    #[test]
+    fn mysql_escaped_backslash_before_closing_quote() {
+        // `\\` is one escaped backslash; the next `'` closes the literal.
+        assert_eq!(
+            sanitize(r"WHERE p = 'C:\\' AND q = 'x'", "mysql"),
+            "WHERE p = ? AND q = ?"
+        );
+    }
+
+    #[test]
+    fn postgres_e_string_backslash_escape_does_not_leak() {
+        assert_eq!(
+            sanitize(r"WHERE note = E'it\'s secret-token' AND id = 1", "postgres"),
+            "WHERE note = $1 AND id = $2"
+        );
+        assert_eq!(
+            sanitize(r"WHERE note = e'a\\' AND b = 'y'", "postgres"),
+            "WHERE note = $1 AND b = $2"
+        );
+    }
+
+    #[test]
+    fn postgres_standard_string_keeps_backslash_literal() {
+        // standard_conforming_strings: in a plain '...' a backslash is just a
+        // character, so `'C:\'` is complete and `'x'` is a second literal.
+        assert_eq!(
+            sanitize(r"WHERE p = 'C:\' AND q = 'x'", "postgres"),
+            "WHERE p = $1 AND q = $2"
+        );
+    }
+
+    #[test]
+    fn identifier_ending_in_e_is_not_an_e_string() {
+        assert_eq!(
+            sanitize("SELECT name FROM t WHERE type='a'", "postgres"),
+            "SELECT name FROM t WHERE type=$1"
         );
     }
 

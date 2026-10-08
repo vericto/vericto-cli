@@ -172,8 +172,9 @@ struct VerifyReceiptArgs {
     /// receipt object, or a JSON array of per-chunk receipts).
     file: std::path::PathBuf,
 
-    /// Public key PEM to verify against (or a path to a `.pem` file). Overrides
-    /// the bundled key. Fetch it from `GET /api/v1/meta/export-signing-key`.
+    /// Public key PEM to verify against (or a path to a `.pem` file). Required
+    /// until an official key is bundled (overrides it once one is). Fetch it
+    /// from `GET /api/v1/meta/export-signing-key`.
     #[arg(long, value_name = "PEM_OR_PATH", env = "VERICTO_RECEIPT_PUBLIC_KEY")]
     public_key: Option<String>,
 
@@ -223,6 +224,12 @@ struct BaselinePruneArgs {
     #[arg(long)]
     dry_run: bool,
 
+    /// If the workspace config (`GET /ci/config`) can't be read, send the SQL
+    /// as-is instead of failing with exit 4. Without it the CLI fails closed:
+    /// it can't know whether the workspace requires sanitized mode (§6.2).
+    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED")]
+    allow_unsanitized: bool,
+
     #[command(flatten)]
     auth: RulesAuthArgs,
 }
@@ -253,6 +260,12 @@ struct BaselineArgs {
     /// Where to write the baseline.
     #[arg(long, default_value = ".vericto-baseline.json")]
     out: std::path::PathBuf,
+
+    /// If the workspace config (`GET /ci/config`) can't be read, send the SQL
+    /// as-is instead of failing with exit 4. Without it the CLI fails closed:
+    /// it can't know whether the workspace requires sanitized mode (§6.2).
+    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED")]
+    allow_unsanitized: bool,
 
     /// Vericto API key (or set VERICTO_API_KEY, or `vericto login`).
     #[arg(long, env = "VERICTO_API_KEY", hide_env_values = true)]
@@ -763,6 +776,12 @@ struct CheckArgs {
     #[arg(long, env = "VERICTO_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<std::path::PathBuf>,
 
+    /// If the workspace config (`GET /ci/config`) can't be read, send the SQL
+    /// as-is instead of failing with exit 4. Without it the CLI fails closed:
+    /// it can't know whether the workspace requires sanitized mode (§6.2).
+    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED")]
+    allow_unsanitized: bool,
+
     /// Break-glass: if the backend is unreachable from the first request,
     /// exit 0 (don't fail the build) instead of the usual exit 4. Requires a
     /// reason, which is recorded locally for audit. Never bypasses a real
@@ -1118,9 +1137,8 @@ async fn run_check(args: CheckArgs) -> ExitCode {
 
     // Pre-flight (§6.2): learn the workspace's telemetry query mode BEFORE
     // sending any SQL. When 'sanitized', normalize literals client-side so raw
-    // values never leave the machine. Best-effort: if the config endpoint is
-    // unavailable (older backend) we proceed unsanitized rather than block —
-    // the check itself is the security gate.
+    // values never leave the machine. If the config can't be read we fail
+    // closed (see `config_unreadable`) unless --allow-unsanitized is given.
     // The same call tells us whether the backend reports per statement (see
     // `preflight`, the equivalent for `baseline`).
     let mut supports_files = false;
@@ -1136,15 +1154,19 @@ async fn run_check(args: CheckArgs) -> ExitCode {
                 );
             }
         }
-        Err(ApiError::Auth(e)) => {
+        Err(e) => {
+            // Unreachable from the very first request: the §6.5 break-glass
+            // applies here too, and it sends no SQL, so nothing can leak.
+            if let ApiError::Transport(_) = e {
+                if let Some(reason) = args.allow_degraded.as_deref() {
+                    eprintln!("error: {e}");
+                    return degraded_exit(reason, &files);
+                }
+            }
             // A bad key surfaces here first — clearer than failing mid-check.
-            eprintln!("error: {}", ApiError::Auth(e));
-            return ExitCode::from(exit::AUTH);
-        }
-        Err(_) => {
-            // Older backend without /ci/config, or a transient blip: proceed.
-            // If the workspace truly requires sanitization this is a gap, so warn.
-            eprintln!("note: could not read workspace config; proceeding without client-side sanitization.");
+            if let Some(code) = config_unreadable(&e, args.allow_unsanitized) {
+                return code;
+            }
         }
     }
 
@@ -1176,28 +1198,8 @@ async fn run_check(args: CheckArgs) -> ExitCode {
             // run (PartialFailure) always fails closed.
             if let ApiError::Transport(_) = e {
                 if let Some(reason) = args.allow_degraded.as_deref() {
-                    let reason = reason.trim();
-                    if reason.is_empty() {
-                        eprintln!("error: --allow-degraded requires a reason.");
-                        return ExitCode::from(exit::USAGE);
-                    }
                     eprintln!("error: {e}");
-                    // Write a local, append-only degraded-run record (§6.5) so the
-                    // bypass leaves an auditable trace even though the backend was
-                    // unreachable. Best-effort: a write failure must not turn the
-                    // break-glass back into a hard failure.
-                    let record_path = write_degraded_record(reason, &files);
-                    let where_str = record_path
-                        .as_deref()
-                        .map(|p| format!(" Recorded locally at {p}."))
-                        .unwrap_or_default();
-                    eprintln!(
-                        "⚠ DEGRADED: backend unreachable; proceeding due to --allow-degraded \
-                         (reason: {reason}). The SQL was NOT checked.{where_str} Archive this \
-                         record as a CI artifact — server-side reconciliation is not yet \
-                         available (see DESIGN §6.5)."
-                    );
-                    return ExitCode::from(exit::OK);
+                    return degraded_exit(reason, &files);
                 }
             }
             eprintln!("error: {e}");
@@ -1509,15 +1511,20 @@ async fn run_baseline(args: BaselineArgs) -> ExitCode {
     // Same preflight as `check`: sanitize when the workspace requires it, and
     // use per-statement mode when the backend supports it — otherwise a
     // baseline would key findings on SQL that `check` never sends.
-    let file_paths = preflight(
+    let file_paths = match preflight(
         &api_url,
         &api_key,
         &transport,
         &dialect,
         &mut queries,
         &files,
+        args.allow_unsanitized,
     )
-    .await;
+    .await
+    {
+        Ok(f) => f,
+        Err(code) => return code,
+    };
     let resp = match api::check_all(
         api::CheckParams {
             api_url: &api_url,
@@ -1625,15 +1632,20 @@ async fn run_baseline_prune(args: BaselinePruneArgs) -> ExitCode {
     // Same preflight as `check`: sanitize when the workspace requires it, and
     // use per-statement mode when the backend supports it — otherwise a
     // baseline would key findings on SQL that `check` never sends.
-    let file_paths = preflight(
+    let file_paths = match preflight(
         &api_url,
         &api_key,
         &transport,
         &dialect,
         &mut queries,
         &files,
+        args.allow_unsanitized,
     )
-    .await;
+    .await
+    {
+        Ok(f) => f,
+        Err(code) => return code,
+    };
     let resp = match api::check_all(
         api::CheckParams {
             api_url: &api_url,
@@ -2636,6 +2648,33 @@ fn build_provenance() -> Option<api::Provenance> {
     })
 }
 
+/// §6.5 break-glass for a backend unreachable from the first request: requires
+/// a non-empty reason, writes the local degraded-run record and exits 0. The
+/// SQL is never sent on this path.
+fn degraded_exit(reason: &str, files: &[String]) -> ExitCode {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        eprintln!("error: --allow-degraded requires a reason.");
+        return ExitCode::from(exit::USAGE);
+    }
+    // Write a local, append-only degraded-run record (§6.5) so the bypass
+    // leaves an auditable trace even though the backend was unreachable.
+    // Best-effort: a write failure must not turn the break-glass back into a
+    // hard failure.
+    let record_path = write_degraded_record(reason, files);
+    let where_str = record_path
+        .as_deref()
+        .map(|p| format!(" Recorded locally at {p}."))
+        .unwrap_or_default();
+    eprintln!(
+        "⚠ DEGRADED: backend unreachable; proceeding due to --allow-degraded \
+         (reason: {reason}). The SQL was NOT checked.{where_str} Archive this \
+         record as a CI artifact — server-side reconciliation is not yet \
+         available (see DESIGN §6.5)."
+    );
+    ExitCode::from(exit::OK)
+}
+
 /// Writes an append-only degraded-run record (§6.5) to `.vericto/degraded-runs.jsonl`
 /// when `--allow-degraded` waves through an unreachable backend, so the bypass
 /// leaves an auditable trace: reason, timestamp, the files that went unchecked,
@@ -2774,8 +2813,8 @@ fn supports_check_files(cfg: &api::WorkspaceConfig) -> bool {
 /// `check`'s: normalizes literals client-side when the workspace is in
 /// sanitized mode (§6.2) — `baseline` used to send raw SQL even then — and
 /// returns the file list for per-statement mode when the backend supports it.
-/// If the config can't be read, SQL is sent unsanitized with a warning (as
-/// `check` does) and the original request shape is kept.
+/// If the config can't be read it fails closed like `check` (`Err(exit code)`),
+/// unless `allow_unsanitized` — then SQL is sent as-is in the original shape.
 async fn preflight(
     api_url: &str,
     api_key: &str,
@@ -2783,7 +2822,8 @@ async fn preflight(
     dialect: &str,
     queries: &mut [QueryInput],
     files: &[String],
-) -> Option<Vec<String>> {
+    allow_unsanitized: bool,
+) -> Result<Option<Vec<String>>, ExitCode> {
     match api::config(api_url, api_key, transport).await {
         Ok(cfg) => {
             if cfg.telemetry_query_mode.as_deref() == Some("sanitized") {
@@ -2794,15 +2834,38 @@ async fn preflight(
                     "note: workspace is in sanitized mode — literals normalized before sending."
                 );
             }
-            supports_check_files(&cfg).then(|| files.to_vec())
+            Ok(supports_check_files(&cfg).then(|| files.to_vec()))
         }
-        Err(_) => {
-            eprintln!(
-                "note: could not read workspace config; proceeding without client-side sanitization."
-            );
-            None
-        }
+        Err(e) => match config_unreadable(&e, allow_unsanitized) {
+            Some(code) => Err(code),
+            None => Ok(None),
+        },
     }
+}
+
+/// What to do when the `GET /ci/config` pre-flight fails (§6.2). Without the
+/// config the CLI can't know whether the workspace requires sanitized mode,
+/// so sending the SQL could leak raw literals: fail closed (exit 3 for a bad
+/// key, 4 otherwise) — no SQL is sent. `--allow-unsanitized` is the explicit
+/// opt-out: warn and return None so the caller sends the SQL as-is.
+fn config_unreadable(e: &ApiError, allow_unsanitized: bool) -> Option<ExitCode> {
+    if let ApiError::Auth(_) = e {
+        eprintln!("error: {e}");
+        return Some(ExitCode::from(exit::AUTH));
+    }
+    if allow_unsanitized {
+        eprintln!(
+            "warning: could not read workspace config ({e}); sending SQL without \
+             client-side sanitization because of --allow-unsanitized."
+        );
+        return None;
+    }
+    eprintln!(
+        "error: could not read workspace config ({e}). No SQL was sent: the CLI can't \
+         tell whether this workspace requires sanitized mode. Retry, or pass \
+         --allow-unsanitized to send the SQL as-is."
+    );
+    Some(ExitCode::from(exit::BACKEND))
 }
 
 fn collect_queries(files: &[String]) -> Option<Vec<QueryInput>> {

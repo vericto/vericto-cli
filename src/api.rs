@@ -317,7 +317,8 @@ pub struct RuleDetail {
 /// Errors the client surfaces, mapped to CLI exit codes by the caller.
 #[derive(Debug)]
 pub enum ApiError {
-    /// Auth/entitlement problem (401/403) — bad key, missing scope, plan gate.
+    /// Auth/entitlement problem (401/403, or a 429 QUOTA_EXCEEDED) — bad key,
+    /// missing scope, plan gate, exhausted monthly allowance.
     Auth(String),
     /// Any other non-2xx from the backend.
     Backend { status: u16, message: String },
@@ -1040,6 +1041,13 @@ pub async fn check_all(
         } else {
             format!("chunk {}/{}", idx + 1, total_chunks)
         };
+        // Still fail closed, but keep an auth/plan error (e.g. the allowance ran
+        // out mid-run) as Auth so it exits 3 like it does for a single chunk.
+        if let ApiError::Auth(m) = e {
+            return Err(ApiError::Auth(format!(
+                "{which} failed, failing the run closed: {m}"
+            )));
+        }
         return Err(ApiError::PartialFailure(format!(
             "{which} failed, failing the run closed: {e}"
         )));
@@ -1187,6 +1195,16 @@ async fn try_once(
     };
 
     let body = resp.text().await.unwrap_or_default();
+    // An exhausted monthly allowance is also a 429, but it's a plan limit, not
+    // a throttle: retrying can't help, and it maps to exit 3 ("plan not
+    // entitled") per the documented exit codes — not 4 (backend/network).
+    if code == 429 && is_quota_exceeded(&body) {
+        return Err(Attempt {
+            err: ApiError::Auth(extract_message(&body)),
+            retryable: false,
+            retry_after_hint: None,
+        });
+    }
     let err = if code == 401 || code == 403 {
         ApiError::Auth(extract_message(&body))
     } else {
@@ -1214,6 +1232,20 @@ fn backoff_delay(attempt: u32) -> Duration {
         .map(|d| (d.subsec_millis() as u64) % 250)
         .unwrap_or(0);
     base + Duration::from_millis(jitter_ms)
+}
+
+/// Whether a 429 body is the backend's exhausted-quota error
+/// (`{"error": {"code": "QUOTA_EXCEEDED", ...}}`) rather than a rate limit.
+fn is_quota_exceeded(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")?
+                .get("code")?
+                .as_str()
+                .map(|c| c == "QUOTA_EXCEEDED")
+        })
+        .unwrap_or(false)
 }
 
 /// Pulls a human message out of a JSON error body, falling back to the raw
@@ -1508,6 +1540,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::Auth(_)));
+    }
+
+    #[tokio::test]
+    async fn check_all_quota_exceeded_is_auth_and_not_retried() {
+        // The backend's exhausted-allowance error is a 429 with QUOTA_EXCEEDED.
+        // It must map to Auth (exit 3) in one attempt — `expect(1)` fails the
+        // test if the CLI retries it like a rate limit.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "QUOTA_EXCEEDED",
+                    "message": "Monthly SQL check quota reached (100/100). Upgrade your plan to continue.",
+                    "used": 100, "limit": 100, "upgrade_url": "/pricing"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let queries = vec![QueryInput {
+            line: 1,
+            sql: "SELECT 1".into(),
+        }];
+        let err = check_all(params(&uri, "vtro_k"), queries)
+            .await
+            .unwrap_err();
+        match err {
+            ApiError::Auth(m) => assert!(m.contains("quota reached"), "{m}"),
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quota_exceeded_detection_ignores_rate_limits() {
+        assert!(super::is_quota_exceeded(
+            r#"{"error":{"code":"QUOTA_EXCEEDED","message":"x"}}"#
+        ));
+        assert!(!super::is_quota_exceeded(
+            r#"{"error":{"code":"RATE_LIMIT_EXCEEDED","message":"x"}}"#
+        ));
+        assert!(!super::is_quota_exceeded("too many requests"));
     }
 
     #[tokio::test]
