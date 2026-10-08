@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-08
+
+Minor rather than patch: a new flag (`--allow-unsanitized`) and two exit-code
+changes a CI script may depend on (a failed config read exits 4 without sending
+SQL; an exhausted allowance exits 3).
+
 ### Security
 - **Fail closed when the workspace config can't be read.** If `GET /ci/config`
   failed, `check`, `baseline` and `baseline prune` sent the SQL unsanitized,

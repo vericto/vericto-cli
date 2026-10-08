@@ -65,11 +65,11 @@ is intact; the attestation shows who built it and from what source:
 ```bash
 # Requires the GitHub CLI (gh 2.49+). Download the artifact first:
 # `gh attestation verify` checks a local file, not a URL.
-gh release download v1.5.2 --repo vericto/vericto-cli -p 'vericto-cli-x86_64-unknown-linux-musl.tar.xz'
+gh release download v1.6.0 --repo vericto/vericto-cli -p 'vericto-cli-x86_64-unknown-linux-musl.tar.xz'
 gh attestation verify vericto-cli-x86_64-unknown-linux-musl.tar.xz --repo vericto/vericto-cli
 
 # The Docker image carries the same, stored in GHCR (no download needed)
-gh attestation verify oci://ghcr.io/vericto/vericto-cli:1.5.2 --repo vericto/vericto-cli
+gh attestation verify oci://ghcr.io/vericto/vericto-cli:1.6.0 --repo vericto/vericto-cli
 ```
 
 
