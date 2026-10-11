@@ -17,6 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   key, login code or OIDC token to an `http://` API URL other than localhost
   (an `Auth` error, which `--allow-degraded` does not bypass), and follows
   redirects only within the same origin.
+- **The stored API key stays owner-only.** `vericto login` narrows an existing
+  `config.toml` to `0600` before writing the key (the mode used to apply only to
+  a new file), and creates the config directory as `0700`.
 
 ## [1.7.0] - 2026-10-11
 

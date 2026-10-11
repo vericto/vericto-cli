@@ -97,7 +97,7 @@ impl Config {
             )
         })?;
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            create_private_dir(dir)?;
         }
         let text = toml::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -106,19 +106,41 @@ impl Config {
     }
 }
 
+/// Creates the config directory (and missing parents) as `0700` on Unix, so a
+/// directory the CLI creates is not listable by other users.
+fn create_private_dir(dir: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
 /// Writes `contents` to `path` with owner-only (`0600`) permissions on Unix.
 /// On other platforms it writes normally (ACLs are the platform's concern).
+///
+/// `mode(0o600)` only applies when the file is created, so an existing file
+/// (written by hand, or by an older version) is narrowed to `0600` before the
+/// key is written into it.
 fn write_private(path: &std::path::Path, contents: &str) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
             .open(path)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         f.write_all(contents.as_bytes())?;
         Ok(())
     }
@@ -264,6 +286,30 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_narrows_an_existing_world_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vericto").join("config.toml");
+        create_private_dir(path.parent().unwrap()).unwrap();
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(dir_mode & 0o777, 0o700);
+
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, "api_key = \"vtro_x\"").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "api_key = \"vtro_x\""
+        );
+    }
 
     #[test]
     fn key_source_labels() {
