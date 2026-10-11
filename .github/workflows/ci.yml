@@ -18,6 +18,11 @@ env:
   # Fail the build on any warning across all jobs.
   RUSTFLAGS: "-D warnings"
 
+# Least privilege for the GITHUB_TOKEN (CodeQL actions/missing-workflow-permissions):
+# CI only checks out and builds, so it needs read access to the contents and nothing else.
+permissions:
+  contents: read
+
 jobs:
   fmt:
     name: Format (rustfmt)
