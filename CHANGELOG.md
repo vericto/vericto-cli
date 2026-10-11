@@ -13,6 +13,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does not match, or one it has no checksum for, before extracting anything.
   Downloads and their redirects must be `https://`. The package is published
   with npm provenance.
+- **Credentials go only to an `https://` API.** The CLI refuses to send an API
+  key, login code or OIDC token to an `http://` API URL other than localhost
+  (an `Auth` error, which `--allow-degraded` does not bypass), and follows
+  redirects only within the same origin.
 
 ## [1.7.0] - 2026-10-11
 
