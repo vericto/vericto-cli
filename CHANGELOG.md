@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-11
+
 ### Security
 - **The npm installer verifies the binary it downloads.** The published
   `@vericto/vericto-cli` package carries the SHA-256 of every platform archive,
@@ -24,8 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--oidc-token-env` / `.vericto.toml` `oidc_token_env` is used only when its
   value has the shape of a JWT, so a committed config cannot make the CLI send
   another CI secret to the API.
-
-## [1.7.0] - 2026-10-11
+- Docker base images pinned by digest; every GitHub Action pinned by SHA, including
+  release and publish; CI adds cargo-deny, cargo-audit and gitleaks; Dependabot
+  for Cargo, GitHub Actions and npm.
 
 ### Added
 - **`vericto rules simulate <file>`**: runs a candidate rule change (new or
