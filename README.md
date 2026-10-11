@@ -81,6 +81,7 @@ vericto baseline [files]   Record current findings to .vericto-baseline.json.
 vericto baseline prune     Remove baseline entries that no longer match any finding.
 vericto rules list         List the workspace's effective rule catalogue.
 vericto rules show <CODE>  Show one rule's detail (e.g. VERICTO-001), incl. its AST condition.
+vericto rules simulate <F> Run a candidate rule change against recorded production traffic.
 vericto keys list          List the workspace's API keys (read-only; manage them in the dashboard).
 vericto docs [topic]       List documentation links by topic, or open one in your browser.
 vericto feedback [msg]     Send feedback (bug/idea/other) to the Vericto team.
@@ -165,6 +166,59 @@ vericto rules list --format json   # machine-readable, for scripting
 Both are read-only and use the same `ci_dryrun:execute`-scoped API key as
 `check` — no extra scope or setup needed. Neither spends the monthly CLI
 check allowance.
+
+## Simulating a rule change (`vericto rules simulate`)
+
+Before you enforce a new or tightened rule, replay up to the last 30 days of the
+workspace's recorded traffic with it and see which legitimate flows it would
+have blocked. Nothing runs against your database and nothing is blocked; the
+backend decrypts and evaluates the recorded queries and returns masked samples
+only.
+
+```yaml
+# .vericto/rules/orders.yaml
+rules:
+  - name: protect-orders-delete
+    code: CUSTOM-004          # omit for a new rule
+    severity: high
+    dialect: postgres
+    ast_condition_yaml: |
+      rule: protect-orders-delete
+      node_type: DeleteStmt
+      condition:
+        relation: "shop_order"
+standard:
+  - code: VERICTO-050
+    severity: high
+```
+
+```bash
+vericto rules simulate .vericto/rules/orders.yaml --days 30 --fail-on-break 0
+vericto rules simulate rules.yaml --strict           # Inconclusive fails too
+vericto rules simulate rules.yaml --format json      # the API response, for PR comments
+```
+
+It needs an API key with the **`rules:simulate`** scope (create it in the
+dashboard; it is never a default), on Builder or above. Exit codes: `0` Pass or
+Warn, `1` Fail (more legitimate flows would break than `--fail-on-break`; with
+`--strict`, also Inconclusive), `2` bad file or rejected candidate, `3` key,
+scope or plan, `4` backend (also another simulation already running, or
+`--wait`, default `15m`, running out). The file may also be JSON with the same
+keys.
+
+In GitHub Actions, on the PRs that change rule files:
+
+```yaml
+- name: Simulate changed rule files against 30 days of production
+  env:
+    VERICTO_API_KEY: ${{ secrets.VERICTO_SIMULATE_KEY }}   # scope rules:simulate
+  run: |
+    for f in $(git diff --name-only origin/${{ github.base_ref }}... -- .vericto/rules/); do
+      npx -y @vericto/vericto-cli rules simulate "$f" --days 30 --fail-on-break 0
+    done
+```
+
+(`fetch-depth: 0` on checkout is needed for the diff.)
 
 ## Inspecting API keys (`vericto keys`)
 

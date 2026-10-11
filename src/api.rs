@@ -680,6 +680,84 @@ pub async fn rules_show(
     }
 }
 
+/// `POST /api/v1/ci/rules/simulate` (`vericto rules simulate`): queues a rule
+/// simulation. Needs the `rules:simulate` scope. Returns the job and the raw body.
+/// 401/403 (bad key, missing scope, plan below Builder) map to `Auth`; 400 (an
+/// invalid candidate), 409 (one already running), 429 and 503 to `Backend`.
+pub async fn rules_simulate(
+    api_url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    transport: &Transport,
+) -> Result<(crate::simulate::Simulation, serde_json::Value, Option<u64>), ApiError> {
+    let client = build_client(transport)?;
+    let url = format!("{}/api/v1/ci/rules/simulate", api_url.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .header("X-API-Key", api_key)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    simulation_response(resp).await
+}
+
+/// `GET /api/v1/ci/rules/simulations/:id`: the job, its findings once done, and the
+/// server's `Retry-After` (seconds) while it is queued or running.
+pub async fn rules_simulation(
+    api_url: &str,
+    api_key: &str,
+    simulation_id: &str,
+    transport: &Transport,
+) -> Result<(crate::simulate::Simulation, serde_json::Value, Option<u64>), ApiError> {
+    let client = build_client(transport)?;
+    let url = format!(
+        "{}/api/v1/ci/rules/simulations/{}",
+        api_url.trim_end_matches('/'),
+        urlencode_path_segment(simulation_id)
+    );
+    let resp = client
+        .get(&url)
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    simulation_response(resp).await
+}
+
+async fn simulation_response(
+    resp: reqwest::Response,
+) -> Result<(crate::simulate::Simulation, serde_json::Value, Option<u64>), ApiError> {
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let body = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        let value: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| ApiError::Backend {
+                status: status.as_u16(),
+                message: format!("invalid simulation body: {e}"),
+            })?;
+        let sim = serde_json::from_value(value.clone()).map_err(|e| ApiError::Backend {
+            status: status.as_u16(),
+            message: format!("invalid simulation body: {e}"),
+        })?;
+        return Ok((sim, value, retry_after));
+    }
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        Err(ApiError::Auth(extract_message(&body)))
+    } else {
+        Err(ApiError::Backend {
+            status: code,
+            message: extract_message(&body),
+        })
+    }
+}
+
 /// Percent-encodes a single path segment (just enough for a rule code: letters,
 /// digits, `-`/`_` pass through; anything else — notably `/` — is escaped so a
 /// crafted code can't smuggle an extra path segment into the URL).
