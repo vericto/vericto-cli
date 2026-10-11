@@ -17,7 +17,9 @@
 # `cargo build` yields a static musl binary for the image's architecture — no
 # `--target` needed. That keeps this Dockerfile architecture-agnostic, so
 # `docker buildx --platform linux/amd64,linux/arm64` builds each arch natively.
-FROM rust:1.88-alpine AS build
+# Base images are pinned by digest (multi-arch index) as well as tag, so a
+# re-pushed tag cannot change what is built; Dependabot (docker) bumps them.
+FROM rust:1.88-alpine@sha256:9dfaae478ecd298b6b5a039e1f2cc4fc040fc818a2de9aa78fa714dea036574d AS build
 # musl-dev provides the C runtime bits some crates' build scripts expect; the
 # final link is still fully static against musl.
 RUN apk add --no-cache musl-dev
@@ -35,7 +37,7 @@ RUN cargo build --release --locked \
 # ── Runtime stage: distroless static ────────────────────────────────────────
 # `static` includes CA certificates + tzdata but no shell/libc — minimal attack
 # surface for a binary that runs inside CI holding credentials (§6.1).
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /vericto /usr/local/bin/vericto
 # So `docker run <image> check ...` works without repeating the binary name.
 ENTRYPOINT ["/usr/local/bin/vericto"]
