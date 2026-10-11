@@ -34,6 +34,12 @@ hosting = "github"
 # (`sha256.sum` + per-artifact `.sha256`) still ship alongside.
 github-attestations = true
 
+# The custom npm publish job (.github/workflows/npm-publish.yml) checks out
+# npm-installer/ and publishes with npm provenance: it needs contents: read and
+# id-token: write, and nothing else (no packages: write; it publishes to npmjs).
+[dist.github-custom-job-permissions]
+"npm-publish" = { contents = "read", id-token = "write" }
+
 # Every action in the generated release.yml is pinned to a full commit SHA, not
 # a movable tag: dist writes these into the workflow on `dist generate`. Bump
 # them here (same major as dist expects) and regenerate; Dependabot does not

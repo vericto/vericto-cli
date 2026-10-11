@@ -1,0 +1,12 @@
+{
+  "name": "vericto-npm-installer",
+  "private": true,
+  "description": "Integrity checks for the @vericto/vericto-cli npm installer (see harden-package.js)",
+  "license": "Elastic-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **The npm installer verifies the binary it downloads.** The published
+  `@vericto/vericto-cli` package carries the SHA-256 of every platform archive,
+  taken from the release's checksums, and its installer refuses an archive that
+  does not match, or one it has no checksum for, before extracting anything.
+  Downloads and their redirects must be `https://`. The package is published
+  with npm provenance.
+
 ## [1.7.0] - 2026-10-11
 
 ### Added

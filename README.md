@@ -72,6 +72,13 @@ gh attestation verify vericto-cli-x86_64-unknown-linux-musl.tar.xz --repo verict
 gh attestation verify oci://ghcr.io/vericto/vericto-cli:1.6.0 --repo vericto/vericto-cli
 ```
 
+The npm package checks the binary it downloads on install: from the next
+release on, `@vericto/vericto-cli` carries the published SHA-256 of every
+platform archive and refuses to install one that does not match (or that it
+has no checksum for). It is published with npm provenance, so
+`npm audit signatures` verifies that it was built by this repository's release
+workflow.
+
 
 ## Commands
 
