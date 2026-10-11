@@ -20,6 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The stored API key stays owner-only.** `vericto login` narrows an existing
   `config.toml` to `0600` before writing the key (the mode used to apply only to
   a new file), and creates the config directory as `0700`.
+- **Only ID-token-shaped values are read as OIDC tokens.** The variable named by
+  `--oidc-token-env` / `.vericto.toml` `oidc_token_env` is used only when its
+  value has the shape of a JWT, so a committed config cannot make the CLI send
+  another CI secret to the API.
 
 ## [1.7.0] - 2026-10-11
 
