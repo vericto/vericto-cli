@@ -1,0 +1,53 @@
+# Keeps the SHA-pinned GitHub Actions, the Cargo dependencies, the npm
+# installer's manifest and the Docker base images current.
+#
+# release.yml is excluded: cargo-dist generates it, and a hand edit there makes
+# `dist plan` fail on the stale file. Its action pins live in
+# dist-workspace.toml ([dist.github-action-commits]); bump them there and run
+# `dist generate`.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    exclude-paths:
+      - .github/workflows/release.yml
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: chore(deps)
+    ignore:
+      # Major bumps change APIs; they are done by hand.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  # npm-installer/ has no dependencies today; this keeps it that way visibly
+  # and covers any that are added.
+  - package-ecosystem: npm
+    directory: /npm-installer
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore(deps)
+
+  # Base image digests in the Dockerfile. The Rust image stays on its 1.88
+  # line (the crate's rust-version); only its digest moves.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore(docker)
+    ignore:
+      - dependency-name: rust
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
