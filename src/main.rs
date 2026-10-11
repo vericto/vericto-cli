@@ -3,6 +3,9 @@
 //! Thin client: sends SQL to `POST /api/v1/ci/check-key` and mirrors the
 //! verdict as a process exit code, for pre-commit hooks and CI/CD gates.
 
+// No `unsafe` in the CLI; keep it that way without a reviewed opt-out.
+#![forbid(unsafe_code)]
+
 mod api;
 mod baseline;
 mod browser_login;
