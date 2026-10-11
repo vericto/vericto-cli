@@ -26,24 +26,52 @@ jobs:
     # Gates the publish behind the `prod` environment (required reviewer) and,
     # crucially, makes the environment-scoped NPM_TOKEN available to this job.
     environment: prod
+    # contents: read for the checkout of npm-installer/; id-token: write for
+    # npm provenance. Granted by the caller (dist-workspace.toml,
+    # github-custom-job-permissions), which bounds what this job can get.
+    permissions:
+      contents: read
+      id-token: write
     env:
       PLAN: ${{ inputs.plan }}
     steps:
-      - name: Fetch npm packages
-        uses: actions/download-artifact@v8
+      # Only npm-installer/ is used from the checkout: the integrity-checking
+      # installer and the script that puts it in the package.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: npm-installer
+      - name: Fetch npm packages and the release checksums
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
-          path: npm/
+          path: dist-artifacts/
           merge-multiple: true
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
+      - name: Test the installer
+        working-directory: npm-installer
+        run: npm test
+      # The generated package downloads the prebuilt binary on install. Before
+      # publishing, pin every platform archive by the SHA-256 the release
+      # publishes and swap in the installer that refuses a mismatch
+      # (npm-installer/harden-package.js). Fails the publish if any archive has
+      # no checksum.
+      - name: Pin the binaries by SHA-256
+        run: |
+          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
+            pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
+            node npm-installer/harden-package.js "./dist-artifacts/${pkg}" ./dist-artifacts
+          done
+      # --provenance publishes a Sigstore-signed statement that this package was
+      # built by this workflow from this commit (shown on npmjs.com).
       - name: Publish to npm
         run: |
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
             pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
-            npm publish --access public "./npm/${pkg}"
+            npm publish --access public --provenance "./dist-artifacts/${pkg}"
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

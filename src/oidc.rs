@@ -61,13 +61,31 @@ pub fn availability(token_env: &str) -> Option<Availability> {
     ) {
         return Some(Availability::GitHubEndpoint { url, request_token });
     }
-    if let Some(token) = env_nonempty(token_env) {
+    if let Some(token) = env_nonempty(token_env).filter(|t| looks_like_jwt(t)) {
         return Some(Availability::EnvToken {
             var: token_env.to_string(),
             token,
         });
     }
     None
+}
+
+/// Whether `value` has the shape of a compact JWT: three non-empty base64url
+/// segments separated by dots.
+///
+/// The name of the variable can come from `.vericto.toml` (`oidc_token_env`),
+/// a committed file a pull request can change. Without this check, such a PR
+/// could point the CLI at any variable of the CI job (a cloud key, a deploy
+/// token) and have its value sent to the API as an "ID token". Only values
+/// shaped like an ID token are ever read from the environment.
+pub fn looks_like_jwt(value: &str) -> bool {
+    let segments: Vec<&str> = value.split('.').collect();
+    segments.len() == 3
+        && segments.iter().all(|s| {
+            !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
 }
 
 /// Obtains an OIDC ID token for `audience`, given a detected [`Availability`].
@@ -204,6 +222,24 @@ mod tests {
                 other => panic!("expected EnvToken, got {other:?}"),
             }
         });
+    }
+
+    #[test]
+    fn env_values_not_shaped_like_a_jwt_are_never_read() {
+        with_clean_env(|| {
+            for value in [
+                "AKIAIOSFODNN7EXAMPLE",
+                "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+                "some.jwt",
+                "a.b.c.d",
+                "a..c",
+                "p@ss.w0rd.here",
+            ] {
+                std::env::set_var("VERICTO_ID_TOKEN", value);
+                assert_eq!(availability("VERICTO_ID_TOKEN"), None, "{value}");
+            }
+        });
+        assert!(looks_like_jwt("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"));
     }
 
     #[test]

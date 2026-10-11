@@ -2035,3 +2035,146 @@ async fn an_inline_ignore_covers_only_the_statement_below_it() {
         "{stderr}"
     );
 }
+
+// ── vericto rules simulate ───────────────────────────────────────────────────
+
+fn simulation_body(status: &str, verdict: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "simulation_id": "7f3c0000-0000-4000-8000-000000000001",
+        "status": status,
+        "summary": verdict.map(|v| serde_json::json!({
+            "verdict": v,
+            "headline": "Would have blocked 2 legitimate flows (9,442 executions) in the last 30 days.",
+            "window": { "start": "2026-09-10T00:00:00Z", "end": "2026-10-10T00:00:00Z", "days": 30 },
+            "events": 11355, "fingerprints": 8, "evaluated_statements": 10255, "budget": 200000,
+            "coverage": { "ratio": 1.0, "evaluated_executions": 11355, "inferred_executions": 0, "not_replayable_executions": 0 },
+            "categories": { "unchanged": { "fingerprints": 5, "executions": 1912 }, "drift": { "fingerprints": 3, "executions": 12 } },
+            "candidates": [],
+            "query_text_mode": "raw"
+        })),
+        "findings": []
+    })
+}
+
+fn write_rule_file(dir: &std::path::Path) -> std::path::PathBuf {
+    let p = dir.join("deletes.yaml");
+    std::fs::write(
+        &p,
+        "rules:\n  - name: no-physical-deletes\n    severity: high\n    dialect: postgres\n    ast_condition_yaml: |\n      rule: no-physical-deletes\n      node_type: DeleteStmt\n",
+    )
+    .unwrap();
+    p
+}
+
+#[tokio::test]
+async fn rules_simulate_waits_and_fails_on_legitimate_breakage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/rules/simulate"))
+        .and(wiremock::matchers::body_string_contains(
+            "\"kind\":\"custom_new\"",
+        ))
+        .respond_with(
+            ResponseTemplate::new(202)
+                .insert_header("Retry-After", "1")
+                .set_body_json(simulation_body("queued", None)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/v1/ci/rules/simulations/7f3c0000-0000-4000-8000-000000000001",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(simulation_body("succeeded", Some("fail"))),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_rule_file(dir.path());
+    let out = vericto()
+        .args(["rules", "simulate", file.to_str().unwrap(), "--days", "30"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("FAIL  Would have blocked 2 legitimate flows"),
+        "output: {s}"
+    );
+}
+
+#[tokio::test]
+async fn rules_simulate_exit_codes_for_scope_and_bad_file() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/rules/simulate"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "error": { "code": "FORBIDDEN", "message": "This API key lacks the required scope: rules:simulate" }
+        })))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_rule_file(dir.path());
+    vericto()
+        .args(["rules", "simulate", file.to_str().unwrap()])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(3);
+
+    let bad = dir.path().join("bad.yaml");
+    std::fs::write(&bad, "rules:\n  - name: x\n    sevrity: high\n").unwrap();
+    vericto()
+        .args(["rules", "simulate", bad.to_str().unwrap()])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(2);
+}
+
+#[tokio::test]
+async fn rules_simulate_pass_exits_zero_and_json_is_the_api_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/rules/simulate"))
+        .respond_with(
+            ResponseTemplate::new(202)
+                .insert_header("Retry-After", "1")
+                .set_body_json(simulation_body("running", None)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/v1/ci/rules/simulations/7f3c0000-0000-4000-8000-000000000001",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(simulation_body("succeeded", Some("warn"))),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_rule_file(dir.path());
+    let out = vericto()
+        .args([
+            "rules",
+            "simulate",
+            file.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["summary"]["verdict"], "warn");
+}

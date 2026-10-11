@@ -3,6 +3,9 @@
 //! Thin client: sends SQL to `POST /api/v1/ci/check-key` and mirrors the
 //! verdict as a process exit code, for pre-commit hooks and CI/CD gates.
 
+// No `unsafe` in the CLI; keep it that way without a reviewed opt-out.
+#![forbid(unsafe_code)]
+
 mod api;
 mod baseline;
 mod browser_login;
@@ -14,6 +17,7 @@ mod pubkeys;
 mod receipt;
 mod sanitize;
 mod scaffold;
+mod simulate;
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -434,6 +438,10 @@ enum RulesCommand {
     List(RulesListArgs),
     /// Show one rule's full detail, including the AST condition it matches.
     Show(RulesShowArgs),
+    /// Run a candidate rule change against recorded production traffic (needs
+    /// an API key with the `rules:simulate` scope). Exit 1 when it would block
+    /// legitimate flows.
+    Simulate(RulesSimulateArgs),
 }
 
 #[derive(Parser)]
@@ -646,6 +654,40 @@ struct RulesListArgs {
     /// Only list rules currently active (skip disabled ones).
     #[arg(long)]
     active_only: bool,
+}
+
+#[derive(Parser)]
+struct RulesSimulateArgs {
+    /// The rule file (YAML or JSON): `rules:` (custom, `code:` to edit one) and
+    /// `standard:` (`code`, `severity`, `is_active`).
+    file: std::path::PathBuf,
+
+    #[command(flatten)]
+    auth: RulesAuthArgs,
+
+    /// Days of history to replay (1-30, capped by the plan's retention).
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=30))]
+    days: u32,
+
+    /// Only this database's traffic (its ID). Default: every database.
+    #[arg(long, value_name = "ID")]
+    database: Option<String>,
+
+    /// Legitimate flows that may break before the run fails.
+    #[arg(long, default_value_t = 0)]
+    fail_on_break: u32,
+
+    /// Also exit 1 when the result is Inconclusive (short window, low coverage).
+    #[arg(long)]
+    strict: bool,
+
+    /// How long to wait for the result (e.g. 15m, 90s).
+    #[arg(long, default_value = "15m")]
+    wait: String,
+
+    /// Output format (`json` prints the API response, for PR comments).
+    #[arg(long, value_enum, default_value_t = RulesFormat::Text)]
+    format: RulesFormat,
 }
 
 #[derive(Parser)]
@@ -985,6 +1027,7 @@ async fn main() -> ExitCode {
         Command::Rules(args) => match args.command {
             RulesCommand::List(a) => run_rules_list(a).await,
             RulesCommand::Show(a) => run_rules_show(a).await,
+            RulesCommand::Simulate(a) => run_rules_simulate(a).await,
         },
         Command::Keys(args) => match args.command {
             KeysCommand::List(a) => run_keys_list(a).await,
@@ -2456,6 +2499,95 @@ async fn run_rules_list(args: RulesListArgs) -> ExitCode {
         }
     }
     ExitCode::from(exit::OK)
+}
+
+/// `vericto rules simulate <FILE>` — queue a rule simulation, wait for it, print
+/// the report. Exit codes: 0 Pass/Warn, 1 Fail (or Inconclusive with
+/// `--strict`), 2 bad file or rejected candidate, 3 auth / scope / plan, 4
+/// backend (incl. a simulation already running, or the wait running out).
+async fn run_rules_simulate(args: RulesSimulateArgs) -> ExitCode {
+    let wait = match simulate::parse_wait(&args.wait) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let text = match std::fs::read_to_string(&args.file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", args.file.display());
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let candidates = match simulate::parse_rule_file(&text) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}: {e}", args.file.display());
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+    let body = simulate::request_body(
+        &candidates,
+        args.days,
+        args.database.as_deref(),
+        args.fail_on_break,
+    );
+    let fail = |e: ApiError| -> ExitCode {
+        eprintln!("error: {e}");
+        ExitCode::from(match e {
+            ApiError::Auth(_) => exit::AUTH,
+            ApiError::Backend { status: 400, .. } | ApiError::Backend { status: 404, .. } => {
+                exit::USAGE
+            }
+            _ => exit::BACKEND,
+        })
+    };
+    let (mut sim, mut raw, retry) =
+        match api::rules_simulate(&api_url, &api_key, &body, &transport).await {
+            Ok(r) => r,
+            Err(e) => return fail(e),
+        };
+    let deadline = std::time::Instant::now() + wait;
+    let mut delay = retry.unwrap_or(5).clamp(1, 60);
+    while sim.status == "queued" || sim.status == "running" {
+        if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "error: simulation {} still {} after {}; see it in the dashboard (Rules → Simulations)",
+                sim.simulation_id, sim.status, args.wait
+            );
+            return ExitCode::from(exit::BACKEND);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        match api::rules_simulation(&api_url, &api_key, &sim.simulation_id, &transport).await {
+            Ok((s, v, retry)) => {
+                sim = s;
+                raw = v;
+                delay = retry.unwrap_or(5).clamp(1, 60);
+            }
+            Err(ApiError::Transport(e)) => {
+                eprintln!("warning: {e}; retrying");
+                delay = 10;
+            }
+            Err(e) => return fail(e),
+        }
+    }
+    match args.format {
+        RulesFormat::Json => println!("{}", serde_json::to_string_pretty(&raw).unwrap_or_default()),
+        RulesFormat::Text => print!("{}", simulate::render_text(&sim)),
+    }
+    let code = simulate::exit_for(&sim, args.strict);
+    if args.format == RulesFormat::Text && code == exit::FINDING {
+        eprintln!(
+            "exit 1 (would break legitimate flows above --fail-on-break {})",
+            args.fail_on_break
+        );
+    }
+    ExitCode::from(code)
 }
 
 /// `vericto rules show <CODE>` — print one rule's full detail, including the

@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **The npm installer verifies the binary it downloads.** The published
+  `@vericto/vericto-cli` package carries the SHA-256 of every platform archive,
+  taken from the release's checksums, and its installer refuses an archive that
+  does not match, or one it has no checksum for, before extracting anything.
+  Downloads and their redirects must be `https://`. The package is published
+  with npm provenance.
+- **Credentials go only to an `https://` API.** The CLI refuses to send an API
+  key, login code or OIDC token to an `http://` API URL other than localhost
+  (an `Auth` error, which `--allow-degraded` does not bypass), and follows
+  redirects only within the same origin.
+- **The stored API key stays owner-only.** `vericto login` narrows an existing
+  `config.toml` to `0600` before writing the key (the mode used to apply only to
+  a new file), and creates the config directory as `0700`.
+- **Only ID-token-shaped values are read as OIDC tokens.** The variable named by
+  `--oidc-token-env` / `.vericto.toml` `oidc_token_env` is used only when its
+  value has the shape of a JWT, so a committed config cannot make the CLI send
+  another CI secret to the API.
+
+## [1.7.0] - 2026-10-11
+
+### Added
+- **`vericto rules simulate <file>`**: runs a candidate rule change (new or
+  edited custom rules, standard rules enabled, disabled or re-severitied)
+  against up to 30 days of the workspace's recorded production traffic, waits
+  for the result and prints the report: the headline ("Would have blocked 2
+  legitimate flows (9,442 executions)"), newly blocked / flagged / no longer
+  blocked flows with identities and masked samples, and engine drift apart.
+  Exit 1 when legitimate flows would break (`--fail-on-break`, default 0; with
+  `--strict`, also Inconclusive). Needs an API key with the `rules:simulate`
+  scope (Builder or above). `--format json` prints the API response.
+
 ## [1.6.0] - 2026-10-08
 
 Minor rather than patch: a new flag (`--allow-unsanitized`) and two exit-code

@@ -371,6 +371,52 @@ pub struct Transport {
     pub ca_bundle: Option<std::path::PathBuf>,
 }
 
+/// The API base URL, without a trailing slash, for a request that carries a
+/// credential (API key, login code, OIDC token). It must be `https://`: plain
+/// `http://` is accepted only for a loopback host (a local backend, the tests),
+/// so a mistyped `--api-url` / `VERICTO_API_URL` never sends the key in clear
+/// text. Refused as an `Auth` error, which `--allow-degraded` cannot bypass.
+pub(crate) fn base_url(api_url: &str) -> Result<&str, ApiError> {
+    let trimmed = api_url.trim_end_matches('/');
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|e| ApiError::Auth(format!("invalid API URL {trimmed}: {e}")))?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    match url.scheme() {
+        "https" => Ok(trimmed),
+        "http" if loopback => Ok(trimmed),
+        _ => Err(ApiError::Auth(format!(
+            "refusing to send credentials to {trimmed}: the API URL must be https:// \
+             (http:// is accepted only for localhost)"
+        ))),
+    }
+}
+
+/// A redirect is followed only within the same origin (scheme, host, port).
+/// reqwest drops `Authorization` on a cross-host redirect but keeps custom
+/// headers such as `X-API-Key`, and by default follows https → http.
+fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| first.origin() == attempt.url().origin());
+        if attempt.previous().len() > 5 {
+            attempt.error("too many redirects")
+        } else if same_origin {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
 /// Builds the HTTP client used for every request. Honors `HTTP(S)_PROXY` /
 /// `NO_PROXY` (reqwest default). One client is shared across concurrent chunks.
 /// When `ca_bundle` is set, every PEM certificate in it is added to the trust
@@ -382,6 +428,7 @@ pub(crate) fn build_client(t: &Transport) -> Result<reqwest::Client, ApiError> {
     // conventional "<product>/<version>".
     let mut builder = reqwest::Client::builder()
         .timeout(t.timeout)
+        .redirect(same_origin_redirects())
         .user_agent(concat!("vericto-cli/", env!("CARGO_PKG_VERSION")));
 
     if let Some(path) = &t.ca_bundle {
@@ -413,7 +460,7 @@ pub(crate) fn build_client(t: &Transport) -> Result<reqwest::Client, ApiError> {
 /// as `Backend { status: 404, .. }` so the caller can treat it as "unknown".
 pub async fn version(api_url: &str, transport: &Transport) -> Result<VersionInfo, ApiError> {
     let client = build_client(transport)?;
-    let url = format!("{}/api/v1/version", api_url.trim_end_matches('/'));
+    let url = format!("{}/api/v1/version", base_url(api_url)?);
     let resp = client
         .get(&url)
         .send()
@@ -444,7 +491,7 @@ pub async fn config(
     transport: &Transport,
 ) -> Result<WorkspaceConfig, ApiError> {
     let client = build_client(transport)?;
-    let url = format!("{}/api/v1/ci/config", api_url.trim_end_matches('/'));
+    let url = format!("{}/api/v1/ci/config", base_url(api_url)?);
     // Retry 429/5xx (honoring Retry-After on a 429) so a transient throttle on
     // this pre-flight doesn't fall through to check's fail-open path — which
     // would send unsanitized literals when the workspace policy is 'sanitized'.
@@ -511,7 +558,7 @@ pub async fn keys_list(
     transport: &Transport,
 ) -> Result<KeysListResponse, ApiError> {
     let client = build_client(transport)?;
-    let url = format!("{}/api/v1/ci/keys", api_url.trim_end_matches('/'));
+    let url = format!("{}/api/v1/ci/keys", base_url(api_url)?);
     let resp = client
         .get(&url)
         .header("X-API-Key", api_key)
@@ -564,7 +611,7 @@ pub async fn feedback_submit(
     transport: &Transport,
 ) -> Result<FeedbackResponse, ApiError> {
     let client = build_client(transport)?;
-    let url = format!("{}/api/v1/ci/feedback", api_url.trim_end_matches('/'));
+    let url = format!("{}/api/v1/ci/feedback", base_url(api_url)?);
     let resp = client
         .post(&url)
         .header("X-API-Key", api_key)
@@ -607,7 +654,7 @@ pub async fn rules_list(
     transport: &Transport,
 ) -> Result<RulesListResponse, ApiError> {
     let client = build_client(transport)?;
-    let url = format!("{}/api/v1/ci/rules", api_url.trim_end_matches('/'));
+    let url = format!("{}/api/v1/ci/rules", base_url(api_url)?);
     let resp = client
         .get(&url)
         .header("X-API-Key", api_key)
@@ -649,7 +696,7 @@ pub async fn rules_show(
     let client = build_client(transport)?;
     let url = format!(
         "{}/api/v1/ci/rules/{}",
-        api_url.trim_end_matches('/'),
+        base_url(api_url)?,
         urlencode_path_segment(code)
     );
     let resp = client
@@ -675,6 +722,84 @@ pub async fn rules_show(
     } else {
         Err(ApiError::Backend {
             status: code_status,
+            message: extract_message(&body),
+        })
+    }
+}
+
+/// `POST /api/v1/ci/rules/simulate` (`vericto rules simulate`): queues a rule
+/// simulation. Needs the `rules:simulate` scope. Returns the job and the raw body.
+/// 401/403 (bad key, missing scope, plan below Builder) map to `Auth`; 400 (an
+/// invalid candidate), 409 (one already running), 429 and 503 to `Backend`.
+pub async fn rules_simulate(
+    api_url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    transport: &Transport,
+) -> Result<(crate::simulate::Simulation, serde_json::Value, Option<u64>), ApiError> {
+    let client = build_client(transport)?;
+    let url = format!("{}/api/v1/ci/rules/simulate", base_url(api_url)?);
+    let resp = client
+        .post(&url)
+        .header("X-API-Key", api_key)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    simulation_response(resp).await
+}
+
+/// `GET /api/v1/ci/rules/simulations/:id`: the job, its findings once done, and the
+/// server's `Retry-After` (seconds) while it is queued or running.
+pub async fn rules_simulation(
+    api_url: &str,
+    api_key: &str,
+    simulation_id: &str,
+    transport: &Transport,
+) -> Result<(crate::simulate::Simulation, serde_json::Value, Option<u64>), ApiError> {
+    let client = build_client(transport)?;
+    let url = format!(
+        "{}/api/v1/ci/rules/simulations/{}",
+        base_url(api_url)?,
+        urlencode_path_segment(simulation_id)
+    );
+    let resp = client
+        .get(&url)
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    simulation_response(resp).await
+}
+
+async fn simulation_response(
+    resp: reqwest::Response,
+) -> Result<(crate::simulate::Simulation, serde_json::Value, Option<u64>), ApiError> {
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let body = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        let value: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| ApiError::Backend {
+                status: status.as_u16(),
+                message: format!("invalid simulation body: {e}"),
+            })?;
+        let sim = serde_json::from_value(value.clone()).map_err(|e| ApiError::Backend {
+            status: status.as_u16(),
+            message: format!("invalid simulation body: {e}"),
+        })?;
+        return Ok((sim, value, retry_after));
+    }
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        Err(ApiError::Auth(extract_message(&body)))
+    } else {
+        Err(ApiError::Backend {
+            status: code,
             message: extract_message(&body),
         })
     }
@@ -707,10 +832,7 @@ pub async fn cli_login_exchange(
     transport: &Transport,
 ) -> Result<String, ApiError> {
     let client = build_client(transport)?;
-    let url = format!(
-        "{}/api/v1/auth/cli-login/exchange",
-        api_url.trim_end_matches('/')
-    );
+    let url = format!("{}/api/v1/auth/cli-login/exchange", base_url(api_url)?);
     let resp = client
         .post(&url)
         .json(&serde_json::json!({ "code": code }))
@@ -755,10 +877,7 @@ pub async fn oidc_exchange(
     transport: &Transport,
 ) -> Result<OidcExchangeResult, ApiError> {
     let client = build_client(transport)?;
-    let url = format!(
-        "{}/api/v1/auth/oidc-exchange",
-        api_url.trim_end_matches('/')
-    );
+    let url = format!("{}/api/v1/auth/oidc-exchange", base_url(api_url)?);
     let resp = client
         .post(&url)
         .json(&serde_json::json!({
@@ -945,7 +1064,7 @@ pub async fn check_all(
         file_paths,
     } = p;
     let client = build_client(&transport)?;
-    let url = format!("{}/api/v1/ci/check-key", api_url.trim_end_matches('/'));
+    let url = format!("{}/api/v1/ci/check-key", base_url(api_url)?);
 
     let total_inputs = queries.len();
     let mut chunks = match &file_paths {
@@ -1315,6 +1434,59 @@ mod tests {
             timeout: Duration::from_secs(5),
             ca_bundle: None,
         }
+    }
+
+    #[test]
+    fn credentials_go_only_to_https_or_loopback() {
+        use super::base_url;
+        assert_eq!(
+            base_url("https://api.vericto.com/").unwrap(),
+            "https://api.vericto.com"
+        );
+        assert!(base_url("http://127.0.0.1:4000").is_ok());
+        assert!(base_url("http://localhost:4000").is_ok());
+        assert!(base_url("http://[::1]:4000").is_ok());
+        assert!(matches!(
+            base_url("http://api.vericto.com"),
+            Err(ApiError::Auth(_))
+        ));
+        assert!(matches!(
+            base_url("api.vericto.com"),
+            Err(ApiError::Auth(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn plaintext_api_url_never_sends_the_key() {
+        // A non-loopback http URL is refused before any connection is made.
+        let err = config("http://api.example.invalid", "vtro_test", &transport())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Auth(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn api_key_does_not_follow_a_cross_origin_redirect() {
+        let other = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&other)
+            .await;
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/config"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("location", format!("{}/steal", other.uri()).as_str()),
+            )
+            .mount(&api)
+            .await;
+
+        let _ = config(&api.uri(), "vtro_test", &transport()).await;
+        assert!(
+            other.received_requests().await.unwrap().is_empty(),
+            "the request (and its X-API-Key) reached another origin"
+        );
     }
 
     fn ok_body(total: u32, blocked: u32, remaining: i64, mode: &str) -> serde_json::Value {
