@@ -96,6 +96,7 @@ async fn run_browser_login(
             "http://127.0.0.1:1",
         ])
         .env_clear()
+        .env("HOME", config_dir)
         .env("XDG_CONFIG_HOME", config_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -192,7 +193,33 @@ async fn browser_login_rejected_code_does_not_save() {
     );
 }
 
-fn vericto() -> Command {
+/// A `vericto` invocation with its own empty home, so a test never sees the
+/// developer's real `~/.config/vericto/config.toml` (a stored API key, API URL
+/// or dialect there changes exit codes). `env_clear()` alone is not enough:
+/// with `HOME` unset, `dirs::home_dir()` falls back to the passwd entry, which
+/// is the real home. `HOME` and `XDG_CONFIG_HOME` point at a per-test temp dir
+/// instead (`config_path()` honors `XDG_CONFIG_HOME` on every Unix, macOS
+/// included). A test that needs a config sets its own `XDG_CONFIG_HOME`, which
+/// overrides this one. The temp dir lives as long as the command.
+struct Vericto {
+    cmd: Command,
+    _home: tempfile::TempDir,
+}
+
+impl std::ops::Deref for Vericto {
+    type Target = Command;
+    fn deref(&self) -> &Command {
+        &self.cmd
+    }
+}
+
+impl std::ops::DerefMut for Vericto {
+    fn deref_mut(&mut self) -> &mut Command {
+        &mut self.cmd
+    }
+}
+
+fn vericto() -> Vericto {
     let mut c = Command::cargo_bin("vericto").unwrap();
     // Keep the ambient environment from leaking into the run (e.g. SSL_CERT_FILE
     // set by other tooling), but preserve coverage instrumentation so
@@ -206,7 +233,13 @@ fn vericto() -> Command {
     if let Some(d) = cov_dir {
         c.env("CARGO_LLVM_COV_TARGET_DIR", d);
     }
-    c
+    let home = tempfile::tempdir().unwrap();
+    c.env("HOME", home.path());
+    c.env("XDG_CONFIG_HOME", home.path().join(".config"));
+    Vericto {
+        cmd: c,
+        _home: home,
+    }
 }
 
 #[tokio::test]

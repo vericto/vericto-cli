@@ -39,5 +39,10 @@ RUN cargo build --release --locked \
 # surface for a binary that runs inside CI holding credentials (§6.1).
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /vericto /usr/local/bin/vericto
+# The license ships with the image, where distroless keeps package docs. The
+# label is set here too, so a local `docker build` carries it, not only the
+# image docker.yml publishes.
+COPY LICENSE /usr/share/doc/vericto/LICENSE
+LABEL org.opencontainers.image.licenses="Elastic-2.0"
 # So `docker run <image> check ...` works without repeating the binary name.
 ENTRYPOINT ["/usr/local/bin/vericto"]

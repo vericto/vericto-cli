@@ -541,4 +541,8 @@ vericto-check:
 
 ## License
 
-Elastic License 2.0.
+[Elastic License 2.0](LICENSE) (SPDX `Elastic-2.0`), the same license as the
+Vericto engine and proxy. The full text is in [LICENSE](LICENSE) and ships with
+every distribution: the release archives, the `@vericto/vericto-cli` npm package
+and the container image (`/usr/share/doc/vericto/LICENSE`, label
+`org.opencontainers.image.licenses=Elastic-2.0`).

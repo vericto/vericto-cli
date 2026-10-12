@@ -7,7 +7,9 @@
 //   2. replaces the generated binary-install.js with npm-installer/binary-install.js,
 //      which refuses to install an archive whose SHA-256 does not match.
 //
-// It fails, and so stops the publish, when an archive has no checksum or when
+// It fails, and so stops the publish, when an archive has no checksum, when the
+// package does not carry the LICENSE (cargo-dist copies it in from the repo
+// root, as it does README.md and CHANGELOG.md), or when
 // cargo-dist generated a binary-install.js other than the one ours was derived
 // from (then review the new upstream file, port its changes, and update
 // UPSTREAM_INSTALLER_SHA256).
@@ -74,6 +76,10 @@ function harden(tarball, artifactsDir, options = {}) {
         `cargo-dist generated a different binary-install.js (sha256 ${generatedSha}); ` +
           "port its changes to npm-installer/binary-install.js and update UPSTREAM_INSTALLER_SHA256",
       );
+    }
+
+    if (!fs.existsSync(path.join(pkgDir, "LICENSE"))) {
+      throw new Error("the npm package has no LICENSE file");
     }
 
     const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));

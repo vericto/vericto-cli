@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-10-12
+
+### Added
+- **LICENSE file.** The Elastic License 2.0 text (the same file as the Vericto
+  engine and proxy), which `Cargo.toml` already declared as `Elastic-2.0`. It
+  ships in the release archives, the `@vericto/vericto-cli` npm package (whose
+  publish step now refuses a package without it) and the container image
+  (`/usr/share/doc/vericto/LICENSE`, with the
+  `org.opencontainers.image.licenses=Elastic-2.0` label, empty in 1.7.0).
+
+### Changed
+- Dependencies: clap 4.6.7, clap_complete 4.6.11, tokio 1.53.2, serde 1.0.229,
+  serde_json 1.0.151.
+- CI actions: actions/setup-node 7.1.0, docker/setup-qemu-action 4.4.0,
+  docker/login-action 4.6.0, docker/metadata-action 6.2.0,
+  docker/build-push-action 7.4.0.
+
+### Fixed
+- The container image is tagged `latest` once, and only for a release:
+  prerelease tags no longer move `latest`.
+- A manual run of the Docker workflow on a branch builds the image instead of
+  failing; only a version tag publishes and attests it.
+- The integration tests no longer read the developer's own
+  `~/.config/vericto/config.toml`: each run of the binary gets an empty temp
+  `HOME` / `XDG_CONFIG_HOME`, so a stored login on macOS no longer fails them.
+
 ## [1.7.0] - 2026-10-11
 
 ### Security
