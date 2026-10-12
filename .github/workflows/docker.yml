@@ -7,7 +7,8 @@
 # Triggers on the same version tags as the release pipeline (e.g. v1.2.3 or
 # 1.2.3), and can be run manually. Publishes a multi-arch (amd64 + arm64) image
 # and attaches a keyless build attestation, matching the provenance story the
-# binary artifacts get in release.yml.
+# binary artifacts get in release.yml. Only a tag publishes: a manual run on a
+# branch builds both images as a check and pushes nothing.
 name: Docker
 
 on:
@@ -60,7 +61,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
           # metadata-action fills this label from the license GitHub detects for
           # the repo, which is never Elastic-2.0 (GitHub's license detection
           # does not know ELv2; 1.7.0 shipped it empty): set the SPDX id here.
@@ -73,7 +73,11 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          # Publish only from a version tag. A manual run on a branch has no
+          # semver tag to derive (so no image tags at all, which made the push
+          # fail): it builds and pushes nothing, so no untagged code reaches
+          # GHCR and `latest` cannot move off a release.
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache layers between runs to keep the (slow, emulated) arm64 build fast.
@@ -84,6 +88,8 @@ jobs:
       # binaries), stored in GHCR next to it. Verify with
       # `gh attestation verify oci://ghcr.io/vericto/vericto-cli:<tag> --repo vericto/vericto-cli`.
       - name: Attest
+        # Nothing to attest when nothing was pushed (branch run).
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
