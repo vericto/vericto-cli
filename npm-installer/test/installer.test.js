@@ -123,10 +123,13 @@ test("a package without a checksum installs nothing", async () => {
 });
 
 // A tarball shaped like cargo-dist's npm package, with the given installer.
-function makeNpmPackage(dir, installerSource) {
+function makeNpmPackage(dir, installerSource, { license = true } = {}) {
   const pkgDir = path.join(dir, "src", "package");
   fs.mkdirSync(pkgDir, { recursive: true });
   fs.writeFileSync(path.join(pkgDir, "binary-install.js"), installerSource);
+  if (license) {
+    fs.writeFileSync(path.join(pkgDir, "LICENSE"), "Elastic License 2.0\n");
+  }
   fs.writeFileSync(
     path.join(pkgDir, "package.json"),
     JSON.stringify({
@@ -188,6 +191,22 @@ test("harden-package refuses a missing checksum", () => {
     assert.throws(
       () => harden(tarball, artifacts, { upstreamInstallerSha256: sha256(Buffer.from(upstream)) }),
       /no published SHA-256 for vericto-cli-aarch64-apple-darwin/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("harden-package refuses a package without the LICENSE", () => {
+  const dir = tmpdir("nolicense");
+  try {
+    const upstream = "// generated installer\n";
+    const tarball = makeNpmPackage(dir, upstream, { license: false });
+    const artifacts = path.join(dir, "artifacts");
+    fs.mkdirSync(artifacts);
+    assert.throws(
+      () => harden(tarball, artifacts, { upstreamInstallerSha256: sha256(Buffer.from(upstream)) }),
+      /no LICENSE file/,
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
