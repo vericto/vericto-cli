@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-10-14
+
+### Security
+- `rustls` 0.23.45 → 0.23.46 for RUSTSEC-2026-0346 (`Debug` output of client
+  session values exposes TLS secrets), RUSTSEC-2026-0347 (buffered data sent to
+  the outer server after an ECH rejection), RUSTSEC-2026-0348 (Brotli
+  certificate decompression can allocate up to 1 GiB before authentication)
+  and RUSTSEC-2026-0349 (an unauthenticated ServerHello can downgrade later
+  connections to classical key exchange). rustls is the TLS stack of the CLI's
+  requests to the Vericto API.
+- `quinn-proto` 0.11.16 → 0.11.18 (merged after 1.7.1) for RUSTSEC-2026-0338
+  to RUSTSEC-2026-0343 (panics and memory-exhaustion guards in the QUIC
+  implementation).
+
+Lockfile only: no code or behaviour changes.
+
 ## [1.7.1] - 2026-10-12
 
 ### Added
