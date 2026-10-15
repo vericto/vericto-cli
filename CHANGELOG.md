@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-14
+
+### Added
+- **Snowflake and SQLite in the dialect list.** `--dialect` (and
+  `default_dialect` in `.vericto.toml`) documents `snowflake` and `sqlite`
+  next to `postgres`, `mysql`, `oracle` and `mssql`. The CLI passes the
+  dialect to the workspace as before; the server evaluates Snowflake since
+  vericto-engine 4.0.0 and SQLite since 4.1.0 (`vericto check --dialect sqlite
+  migrations/*.sql`, with the SQLite rules VERICTO-098 to VERICTO-101).
+
+### Fixed
+- **Sanitized mode** (a workspace whose telemetry query mode is `sanitized`):
+  - Snowflake and SQLite get `?` placeholders, as MySQL does (on Snowflake
+    `$1` is a staged file's first column, not a parameter; `?` is SQLite's
+    canonical bind form). SQLite `[name]` identifiers are copied as they are,
+    and `$name` is a bind parameter there, not a dollar quote.
+  - Bind parameters the client already wrote are kept: the digits of `$1`
+    and `?1` were read as a numeric literal, so `$1` became `$$1`, which then
+    read as the start of a dollar-quoted string.
+
 ## [1.7.2] - 2026-10-14
 
 ### Security
