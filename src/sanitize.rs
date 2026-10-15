@@ -20,7 +20,9 @@
 //!   - comments (`-- ...`, `/* ... */`) — left as-is
 //!
 //! Placeholder style is **dialect-aware** so the sanitized SQL still parses:
-//! Postgres/Oracle/MSSQL use numbered params (`$1, $2, …`), MySQL uses `?`.
+//! Postgres/Oracle/MSSQL use numbered params (`$1, $2, …`); MySQL, Snowflake and
+//! SQLite use `?`. On SQLite `$name` is a bind parameter (no dollar quoting) and
+//! `[name]` an identifier, both copied as they are.
 //! (A bare `?` is invalid Postgres syntax and would make the engine fail with a
 //! parse error — that's the whole reason this is dialect-aware.)
 //!
@@ -33,21 +35,25 @@
 enum Placeholder {
     /// `$1, $2, …` — Postgres (also accepted by our Oracle/MSSQL handling).
     Numbered,
-    /// `?` — MySQL.
+    /// `?` — MySQL, Snowflake (where `$1` is a staged file's first column, not a
+    /// parameter) and SQLite (its canonical bind form).
     Question,
 }
 
 fn placeholder_style(dialect: &str) -> Placeholder {
     match dialect {
-        "mysql" => Placeholder::Question,
+        "mysql" | "snowflake" | "sqlite" => Placeholder::Question,
         _ => Placeholder::Numbered, // postgres, oracle, mssql, unknown → safe default
     }
 }
 
 /// Returns the SQL with string and numeric literals replaced by dialect-correct
-/// placeholders (`$N` for Postgres-family, `?` for MySQL).
+/// placeholders (`$N` for Postgres-family, `?` for MySQL, Snowflake and SQLite).
 pub fn sanitize(sql: &str, dialect: &str) -> String {
     let style = placeholder_style(dialect);
+    // SQLite: no dollar quoting (`$name` is a bind parameter) and `[name]` is an
+    // identifier.
+    let sqlite = dialect == "sqlite";
     let mut counter: u32 = 0;
     // Emits the next placeholder token, advancing the numbered counter.
     let mut next_placeholder = |out: &mut String| match style {
@@ -91,7 +97,7 @@ pub fn sanitize(sql: &str, dialect: &str) -> String {
 
         // Dollar-quoted block ($$...$$ or $tag$...$tag$): copy verbatim. We do
         // NOT sanitize inside — consistent with the engine's conservative stance.
-        if c == '$' {
+        if c == '$' && !sqlite {
             if let Some((tag_end, tag)) = dollar_tag(bytes, i) {
                 // Find the matching closing tag.
                 if let Some(close) = find_from(sql, tag_end, &tag) {
@@ -104,6 +110,17 @@ pub fn sanitize(sql: &str, dialect: &str) -> String {
             // Not a valid dollar-quote opener — emit and move on.
             out.push('$');
             i += 1;
+            continue;
+        }
+
+        // SQLite `[name]` identifier: copy verbatim.
+        if sqlite && c == '[' {
+            let start = i;
+            while i < n && bytes[i] != b']' {
+                i += 1;
+            }
+            i = (i + 1).min(n);
+            out.push_str(&sql[start..i]);
             continue;
         }
 
@@ -194,7 +211,9 @@ fn is_e_prefix(out: &str) -> bool {
 fn prev_is_boundary(out: &str) -> bool {
     match out.chars().last() {
         None => true,
-        Some(p) => !(p.is_ascii_alphanumeric() || p == '_'),
+        // `$1` (Postgres, Snowflake, SQLite) and `?1` (SQLite) are bind
+        // parameters the client already wrote: their digits are not a literal.
+        Some(p) => !(p.is_ascii_alphanumeric() || p == '_' || p == '$' || p == '?'),
     }
 }
 
@@ -233,6 +252,45 @@ mod tests {
         assert_eq!(
             sanitize("SELECT * FROM users WHERE email = 'a@b.com'", "postgres"),
             "SELECT * FROM users WHERE email = $1"
+        );
+    }
+
+    #[test]
+    fn sqlite_uses_question_mark_and_keeps_its_identifiers() {
+        assert_eq!(
+            sanitize(
+                "SELECT [it's], `a` FROM t WHERE x = $id AND y = 'O''Brien' AND z = 7",
+                "sqlite"
+            ),
+            "SELECT [it's], `a` FROM t WHERE x = $id AND y = ? AND z = ?"
+        );
+        // No backslash escapes on SQLite: `'C:\'` is a complete literal.
+        assert_eq!(
+            sanitize(r"WHERE p = 'C:\' AND q = 'x'", "sqlite"),
+            "WHERE p = ? AND q = ?"
+        );
+    }
+
+    #[test]
+    fn existing_bind_parameters_are_kept() {
+        assert_eq!(
+            sanitize("SELECT a FROM t WHERE id = $1 AND name = $2", "postgres"),
+            "SELECT a FROM t WHERE id = $1 AND name = $2"
+        );
+        assert_eq!(
+            sanitize(
+                "SELECT a FROM t WHERE id = ?1 AND b = ?2 AND n = 5",
+                "sqlite"
+            ),
+            "SELECT a FROM t WHERE id = ?1 AND b = ?2 AND n = ?"
+        );
+    }
+
+    #[test]
+    fn snowflake_uses_question_mark() {
+        assert_eq!(
+            sanitize("SELECT $1 FROM @stage WHERE a = 'x'", "snowflake"),
+            "SELECT $1 FROM @stage WHERE a = ?"
         );
     }
 

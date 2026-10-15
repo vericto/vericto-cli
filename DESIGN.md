@@ -63,7 +63,7 @@ The CLI consumes the existing batch endpoint — no backend work required for v0
   ```json
   {
     "queries": [ { "line": 12, "sql": "DELETE FROM users" } ],   // 1..500 items
-    "dialect": "postgres",          // postgres|mysql|oracle|mssql (default postgres)
+    "dialect": "postgres",          // postgres|mysql|oracle|mssql|snowflake|sqlite (default postgres)
     "file_name": "migration.sql",   // optional, for the audit record
     "output_format": "json",         // text|json (we always request json; see §7)
     "provenance": {                  // 🔜 new — CI run metadata, see §2.1
@@ -172,7 +172,7 @@ vericto completions <shell>  Print a shell completion script (bash|zsh|fish|powe
 | `--changed` | off | Check only files changed vs the CI merge base (§10) |
 | `--since <ref>` | — | Explicit base ref for changed-file selection (§10) |
 | `--stdin-file-list` | off | Read the file paths to check from stdin, one per line (§10) |
-| `--dialect <d>` | `postgres` | `postgres` \| `mysql` \| `oracle` \| `mssql` |
+| `--dialect <d>` | `postgres` | `postgres` \| `mysql` \| `oracle` \| `mssql` \| `snowflake` \| `sqlite` |
 | `--format <f>` | `text` | `text` \| `json` \| `sarif` \| `gitlab-codequality` \| `gitlab-sast` |
 | `--baseline <f>` | — | Ignore findings recorded in the baseline file (§10) |
 | `--output <f>` | stdout | Write the report to a file (for CI artifacts) |

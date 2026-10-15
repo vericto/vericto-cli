@@ -448,7 +448,7 @@ vericto check schema.sql --monitor
 | `--changed` | off | Check only `*.sql` changed vs the CI merge base |
 | `--since <ref>` | — | Explicit base ref for changed-file selection |
 | `--stdin-file-list` | off | Read file paths from stdin, one per line (e.g. `git diff --name-only ... \| vericto check --stdin-file-list`) |
-| `--dialect` | `postgres` | `postgres` \| `mysql` \| `oracle` \| `mssql` |
+| `--dialect` | `postgres` | `postgres` \| `mysql` \| `oracle` \| `mssql` \| `snowflake` \| `sqlite` |
 | `--format` | `text` | `text` \| `json` \| `sarif` \| `gitlab-codequality` \| `gitlab-sast` |
 | `--output <file>` | stdout | Write the report to a file (CI artifacts) |
 | `--receipt <file>` | — | Request a signed run receipt and write it to `<file>` (verify with `vericto verify-receipt`) |
