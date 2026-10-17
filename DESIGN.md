@@ -20,7 +20,9 @@
 > installer + distroless Docker image) ✅ implemented; keyless build attestations
 > on binaries and image ✅ (from v1.5.1, §9 Notes), and package
 > Phase 2 npm ✅ (the `@vericto/vericto-cli` package is built by the pipeline;
-> publishing needs an `NPM_TOKEN`), Homebrew/Scoop remain 🔜. Rationale in §14.
+> publishing needs an `NPM_TOKEN`), Homebrew ✅ (`brew install vericto/tap/vericto`,
+> published to the `vericto/homebrew-tap` tap on each release), Scoop remains 🔜.
+> Rationale in §14.
 
 ## 1. What it is
 
@@ -678,7 +680,7 @@ effort, so we layer them.
 > by a separate `.github/workflows/docker.yml` — separate because `dist generate`
 > owns and would overwrite `release.yml`. `dist plan`
 > validates the artifact set. **Phase 2:** npm ✅ (built by the pipeline as
-> `@vericto/vericto-cli`; publishing needs `NPM_TOKEN`), Homebrew/Scoop 🔜.
+> `@vericto/vericto-cli`; publishing needs `NPM_TOKEN`), Homebrew ✅, Scoop 🔜.
 
 ### Level 0 — the base (everything else depends on it)
 
@@ -698,7 +700,7 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
   `cargo-dist` (the installer and release workflow are generated; the Docker
   image is a thin `FROM scratch`/`distroless` wrapper over the static musl
   binary).
-- **Phase 2 (adoption): npm ✅, Homebrew + Scoop 🔜.** Cover the Node ecosystem,
+- **Phase 2 (adoption): npm ✅, Homebrew ✅, Scoop 🔜.** Cover the Node ecosystem,
   macOS, and Windows.
   - **npm — done (this revision):** `cargo-dist`'s `npm` installer
     (`installers = ["shell", "npm"]`, `npm-scope = "@vericto"`) generates the
@@ -710,10 +712,23 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
     `NPM_TOKEN` (a `npm publish` step or `dist`'s publish job) — the one manual
     setup left. (Package name is `@vericto/vericto-cli`, derived from the crate;
     not `@vericto/cli`.)
-  - **Homebrew + Scoop — 🔜:** `cargo-dist` makes these nearly free but each
-    needs an external repo you own (a Homebrew *tap* and a Scoop *bucket*); add
-    `"homebrew"`/`tap = "..."` and a Scoop bucket to `dist-workspace.toml` once
-    those repos exist.
+  - **Homebrew — done (this revision):** `cargo-dist`'s `homebrew` installer
+    (`tap = "vericto/homebrew-tap"`, `formula = "vericto"`) builds a `vericto.rb`
+    formula on every tag: macOS arm64/x86_64 and Linux arm64/x86_64 (the static
+    musl archives), each URL pinned by its SHA-256. Users run `brew install
+    vericto/tap/vericto`. The formula is pushed to the tap by a **custom**
+    publish job (`./homebrew-publish`), not the built-in one, for the same
+    reason as npm: `HOMEBREW_TAP_TOKEN` (write access to the tap only) lives in
+    the reviewer-gated `prod` environment and only a job that declares
+    `environment: prod` can read it. That job also adds the `test do` block the
+    cargo-dist 0.32 template lacks, drops the `version` line `brew audit
+    --strict` calls redundant, and refuses a formula whose SHA-256 are not the
+    release's `sha256.sum`. The tap's own CI audits, installs and tests the
+    formula on all four platforms. homebrew-core is not a target: it accepts
+    only OSI/DFSG-licensed software built from source, and Elastic-2.0 is
+    neither.
+  - **Scoop — 🔜:** needs an external *bucket* repo; add it to
+    `dist-workspace.toml` once it exists.
 
 ### Notes
 
@@ -862,7 +877,7 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   binaries + SHA-256 checksums to GitHub Releases with a `curl | sh` installer,
   plus a distroless multi-arch Docker image to GHCR (`docker.yml`), plus the
   `@vericto/vericto-cli` npm package (built on tag; publishing needs `NPM_TOKEN`).
-  Keyless build attestations on binaries and image from v1.5.1 (§9 Notes). **Homebrew + Scoop** remain 🔜 (need an external tap/bucket repo).
+  Keyless build attestations on binaries and image from v1.5.1 (§9 Notes). **Homebrew** ✅ (`vericto/homebrew-tap`, custom `./homebrew-publish` job); **Scoop** remains 🔜 (needs an external bucket repo).
 - **Rule catalogue — DONE (this revision):** `vericto rules list` / `vericto
   rules show <CODE>` (§15) — read-only lookups against the workspace's effective
   ruleset, using the same API key and scope as `check`.
@@ -873,7 +888,7 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   default for `vericto login`) and fail-closed verification of a manually
   provided `--api-key` (§6.0.1) — an unverified credential is never persisted
   either way.
-- **Still 🔜:** distribution Homebrew/Scoop; npm registry publish (`NPM_TOKEN`);
+- **Still 🔜:** distribution Scoop; npm registry publish (`NPM_TOKEN`);
   keyless attestations (repo must be public/org); watch/dev ergonomics. Backend
   now exposes API-key-gated CI run history (`GET /api/v1/ci/reports[/:id]`) —
   a future `vericto reports list`/`show` CLI command could consume it, but

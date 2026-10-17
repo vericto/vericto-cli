@@ -3,8 +3,9 @@ name = "vericto-cli"
 version = "1.8.0"
 edition = "2021"
 rust-version = "1.88"
-description = "Vericto CLI — validate SQL against your workspace's security rules before it runs"
+description = "Validate SQL against your Vericto workspace's security rules before it runs"
 license = "Elastic-2.0"
+homepage = "https://vericto.com"
 repository = "https://github.com/vericto/vericto-cli"
 
 # The installed command is `vericto`, not `vericto-cli`.

@@ -18,10 +18,22 @@ version tag, each with SHA-256 checksums (see _Verifying a download_ below).
 Every other channel serves those same binaries.
 
 ```bash
-# Phase 1 — shell installer (Linux/macOS)
+# Homebrew (macOS arm64/x86_64, Linux arm64/x86_64)
+brew install vericto/tap/vericto
+brew upgrade vericto           # later releases
+brew uninstall vericto         # and `brew untap vericto/tap` to drop the tap
+```
+
+```bash
+# npm (great in CI: runners already have Node)
+npm install -g @vericto/vericto-cli      # or, zero-install: npx @vericto/vericto-cli check ...
+```
+
+```bash
+# Shell installer (Linux/macOS)
 curl -fsSL https://github.com/vericto/vericto-cli/releases/latest/download/vericto-cli-installer.sh | sh
 
-# Phase 1 — Docker (CI runners that prefer an image step)
+# Docker (CI runners that prefer an image step)
 docker run --rm -e VERICTO_API_KEY ghcr.io/vericto/vericto-cli:latest check migrations/*.sql
 
 # Or download a prebuilt binary directly:
@@ -29,20 +41,26 @@ docker run --rm -e VERICTO_API_KEY ghcr.io/vericto/vericto-cli:latest check migr
 ```
 
 ```bash
-# Phase 2 — npm (great in CI: runners already have Node)
-npm install -g @vericto/vericto-cli      # or: npx @vericto/vericto-cli check ...
-```
-
-```bash
 # From source
 cargo install --path .
 ```
 
+> **Homebrew:** the formula lives in the
+> [`vericto/homebrew-tap`](https://github.com/vericto/homebrew-tap) tap and is
+> published by the release pipeline on every version tag, starting with the
+> first release after 1.8.0. It installs the same prebuilt binaries as every
+> other channel (on Linux, the static musl ones), each pinned by its SHA-256;
+> Homebrew refuses a download that does not match. `brew install
+> vericto/tap/vericto` names the tap explicitly, which also tells Homebrew to
+> trust that formula. If `vericto` is already installed with
+> `npm install -g`, remove that one first (`npm uninstall -g
+> @vericto/vericto-cli`): both put a `vericto` in the same `bin` directory
+> under a Homebrew-managed Node.
+>
 > **npm:** the release pipeline builds **and publishes** `@vericto/vericto-cli`
-> to the registry on every version tag. **Homebrew/Scoop remain planned** —
-> `brew install vericto/vericto/vericto`, `scoop install vericto` — pending a tap /
-> bucket repo. Until those are live, use npm, the shell installer, Docker image,
-> or `cargo install`.
+> to the registry on every version tag. **Scoop remains planned**
+> (`scoop install vericto`), pending a bucket repo; on Windows, use npm or the
+> prebuilt binary.
 
 > The CLI is a network-only thin client — it always evaluates against your live
 > Vericto workspace. There is no offline/local mode.
@@ -70,6 +88,13 @@ gh attestation verify vericto-cli-x86_64-unknown-linux-musl.tar.xz --repo verict
 
 # The Docker image carries the same, stored in GHCR (no download needed)
 gh attestation verify oci://ghcr.io/vericto/vericto-cli:1.6.0 --repo vericto/vericto-cli
+```
+
+Homebrew checks the SHA-256 pinned in the formula before it installs
+anything. To check the attestation of the archive it downloaded:
+
+```bash
+gh attestation verify "$(brew --cache vericto/tap/vericto)" --repo vericto/vericto-cli
 ```
 
 The npm package checks the binary it downloads on install: from the next

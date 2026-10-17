@@ -10,7 +10,15 @@ ci = "github"
 # The installers to generate for each app. `npm` publishes an @vericto/vericto-cli
 # package whose postinstall fetches the matching prebuilt binary from the GitHub
 # release (§9 Phase 2) — zero-install in CI via `npx @vericto/vericto-cli`.
-installers = ["shell", "npm"]
+# `homebrew` builds a `vericto.rb` formula (macOS arm64/x86_64 and Linux
+# arm64/x86_64, the latter served by the static musl archives) pinned to the
+# release's SHA-256 checksums: `brew install vericto/tap/vericto`.
+installers = ["shell", "npm", "homebrew"]
+# The tap the formula is published to (github.com/vericto/homebrew-tap, tapped
+# as `vericto/tap`), and the formula name: `vericto`, the installed command,
+# rather than the crate name `vericto-cli`.
+tap = "vericto/homebrew-tap"
+formula = "vericto"
 # npm scope for the generated package → published as @vericto/vericto-cli.
 npm-scope = "@vericto"
 # Publish the npm package automatically as part of the release via a CUSTOM
@@ -18,7 +26,14 @@ npm-scope = "@vericto"
 # NPM_TOKEN lives in the `prod` GitHub Environment (reviewer-gated, public repo),
 # and only a job that declares `environment: prod` can read it — which the
 # built-in job doesn't. Replaces the manual `npm publish` after each release.
-publish-jobs = ["./npm-publish"]
+# The Homebrew formula is pushed to the tap the same way, by a CUSTOM job
+# (.github/workflows/homebrew-publish.yml) rather than the built-in "homebrew"
+# one: HOMEBREW_TAP_TOKEN, which can write to the tap, lives in `prod` too, and
+# the built-in job declares no environment, so it could only read a repository
+# secret that any workflow in this public repo can reach. (With the tap set and
+# the built-in job off, `dist plan` warns that the Homebrew publish job is
+# disabled; that is expected.)
+publish-jobs = ["./npm-publish", "./homebrew-publish"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
 # Path that installers should place binaries in
@@ -39,6 +54,10 @@ github-attestations = true
 # id-token: write, and nothing else (no packages: write; it publishes to npmjs).
 [dist.github-custom-job-permissions]
 "npm-publish" = { contents = "read", id-token = "write" }
+# The custom Homebrew job (.github/workflows/homebrew-publish.yml) only reads
+# this run's artifacts and pushes to the tap with HOMEBREW_TAP_TOKEN; it needs
+# nothing from the workflow's GITHUB_TOKEN beyond contents: read.
+"homebrew-publish" = { contents = "read" }
 
 # Every action in the generated release.yml is pinned to a full commit SHA, not
 # a movable tag: dist writes these into the workflow on `dist generate`. Bump
