@@ -19,7 +19,7 @@ Include:
 - A description of the vulnerability and its impact.
 - Steps to reproduce.
 - The affected version (`vericto --version`) and how it was installed
-  (npm, shell installer, Docker image, `cargo install`).
+  (Homebrew, npm, shell installer, Docker image, `cargo install`).
 - Any suggested remediation.
 
 You will receive an acknowledgement within **48 hours** and a status update
@@ -33,8 +33,8 @@ High-priority issues for the CLI include:
   logged or sent anywhere other than the configured Vericto API over TLS.
 - **Gate bypass**: a path where `vericto check` reports success for SQL it did
   not evaluate, outside an explicit `--allow-degraded`.
-- **Supply chain**: a way to make an installer (npm, shell, Docker) run a binary
-  other than the one the release published.
+- **Supply chain**: a way to make an installer (Homebrew, npm, shell, Docker)
+  run a binary other than the one the release published.
 
 Issues in the SQL evaluation itself belong to
 [vericto-engine](https://github.com/vericto/vericto-engine/security).

@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Homebrew.** `brew install vericto/tap/vericto` on macOS (arm64 and x86_64)
+  and Linux (arm64 and x86_64, the static musl binaries). Every release now
+  builds a `vericto` formula with cargo-dist's Homebrew installer and pushes it
+  to the new [`vericto/homebrew-tap`](https://github.com/vericto/homebrew-tap)
+  repository, so the tap gets its first formula with the next release. The
+  formula installs the same archives as the other channels, each pinned by the
+  SHA-256 in the release's `sha256.sum`, and its `test do` block runs
+  `vericto --version`. The binary is unchanged.
+
+### Changed
+- **The formula is published by a custom job, not cargo-dist's built-in one.**
+  Pushing to the tap needs a token with write access to it
+  (`HOMEBREW_TAP_TOKEN`). The built-in `homebrew` publish job declares no
+  GitHub Environment, so it could only read that token as a repository secret,
+  which any workflow in this public repository can reach. As with
+  `NPM_TOKEN`, the token lives in the reviewer-gated `prod` environment
+  instead, and `.github/workflows/homebrew-publish.yml` (wired in as
+  `publish-jobs = ["./npm-publish", "./homebrew-publish"]`) is the only job
+  that declares it. The job does not persist the token in its checkout of the
+  tap or hand it to the `brew` steps, and refuses to push a formula
+  whose URLs are not this release's four macOS/Linux archives or whose SHA-256
+  are not in `sha256.sum`. It also adds the `test do` block the cargo-dist
+  0.32 template lacks and drops the `version` line that `brew audit --strict`
+  rejects as redundant with the URLs. If the token is missing or expired the
+  job fails, and the GitHub release is not announced until it is fixed and
+  the job re-run: the same failure mode as the npm job. `dist plan` warns that
+  a tap is set while the built-in Homebrew job is off; that is intended.
+- `Cargo.toml`: `description` no longer starts with "Vericto CLI" (Homebrew
+  rejects a description that starts with the formula name; it is also the npm
+  package description) and `homepage` is https://vericto.com.
+
 ## [1.8.0] - 2026-10-14
 
 ### Added
