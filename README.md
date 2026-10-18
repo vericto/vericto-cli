@@ -564,6 +564,12 @@ vericto-check:
   as one unit and reported at **file granularity** (its most severe finding,
   annotated at line 1).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the checks CI
+runs and how releases are cut. Report vulnerabilities as described in
+[SECURITY.md](SECURITY.md), not in public issues.
+
 ## License
 
 [Elastic License 2.0](LICENSE) (SPDX `Elastic-2.0`), the same license as the
