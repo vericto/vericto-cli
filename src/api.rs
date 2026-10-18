@@ -1986,4 +1986,340 @@ mod tests {
             vec![(Some(201), 4), (Some(202), 9)]
         );
     }
+
+    // ── error paths: transport, malformed bodies, partial runs ───────────────
+
+    fn one_query() -> Vec<QueryInput> {
+        vec![qi(1, "SELECT 1")]
+    }
+
+    /// A port nothing listens on: every request fails at connect.
+    fn dead_url() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", l.local_addr().unwrap())
+    }
+
+    fn with_ca(path: std::path::PathBuf) -> Transport {
+        Transport {
+            timeout: Duration::from_secs(5),
+            ca_bundle: Some(path),
+        }
+    }
+
+    /// A CA bundle that can't be used is a transport error naming the file, raised
+    /// before any request (so no SQL leaves the machine on a misconfigured trust).
+    #[tokio::test]
+    async fn an_unusable_ca_bundle_fails_before_any_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+
+        let missing = dir.path().join("missing.pem");
+        let err = version(&server.uri(), &with_ca(missing.clone()))
+            .await
+            .unwrap_err();
+        match err {
+            ApiError::Transport(m) => {
+                assert!(m.contains("cannot read CA bundle"), "{m}");
+                assert!(m.contains("missing.pem"), "{m}");
+            }
+            other => panic!("expected Transport, got {other:?}"),
+        }
+
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "no certificates in here\n").unwrap();
+        let err = config(&server.uri(), "vtro_k", &with_ca(empty))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Transport(m) if m.contains("CA bundle")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_2xx_body_is_a_backend_error_not_retried() {
+        let server = MockServer::start().await;
+        for p in ["/api/v1/version", "/api/v1/ci/config"] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(200).set_body_string("<html>"))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{\"summary\": 1}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let err = version(&uri, &transport()).await.unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { status: 200, message } if message.contains("invalid version body")),
+            "{err:?}"
+        );
+        let err = config(&uri, "vtro_k", &transport()).await.unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { message, .. } if message.contains("invalid config body")),
+            "{err:?}"
+        );
+        let err = check_all(params(&uri, "vtro_k"), one_query())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { message, .. } if message.contains("invalid response body")),
+            "{err:?}"
+        );
+    }
+
+    /// A 4xx other than auth (an invalid request) is final: one call, the
+    /// backend's message surfaced.
+    #[tokio::test]
+    async fn a_client_error_is_returned_without_retrying() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": { "code": "BAD_REQUEST", "message": "dialect not supported" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let err = check_all(params(&uri, "vtro_k"), one_query())
+            .await
+            .unwrap_err();
+        match err {
+            ApiError::Backend { status, message } => {
+                assert_eq!(status, 400);
+                assert_eq!(message, "dialect not supported");
+            }
+            other => panic!("expected Backend, got {other:?}"),
+        }
+    }
+
+    /// A throttle (429 that is not the quota error) is retried, honoring
+    /// `Retry-After`; after the last retry the 429 is returned.
+    #[tokio::test]
+    async fn a_throttle_is_retried_with_retry_after_then_given_up() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "0")
+                    .set_body_json(serde_json::json!({
+                        "error": { "code": "RATE_LIMITED", "message": "slow down" }
+                    })),
+            )
+            .expect(u64::from(super::MAX_RETRIES) + 1)
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let started = std::time::Instant::now();
+        let err = check_all(params(&uri, "vtro_k"), one_query())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { status: 429, message } if message == "slow down"),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() < BACKOFF_BASE,
+            "Retry-After: 0 replaces the exponential backoff"
+        );
+    }
+
+    /// An unreachable backend is a Transport error (the only kind
+    /// `--allow-degraded` may wave through), for every endpoint.
+    #[tokio::test]
+    async fn an_unreachable_backend_is_a_transport_error() {
+        let url = dead_url();
+        assert!(matches!(
+            version(&url, &transport()).await,
+            Err(ApiError::Transport(_))
+        ));
+        assert!(matches!(
+            super::keys_list(&url, "vtro_k", &transport()).await,
+            Err(ApiError::Transport(_))
+        ));
+        assert!(matches!(
+            super::rules_list(&url, "vtro_k", &transport()).await,
+            Err(ApiError::Transport(_))
+        ));
+        assert!(matches!(
+            super::rules_show(&url, "vtro_k", "VERICTO-001", &transport()).await,
+            Err(ApiError::Transport(_))
+        ));
+        assert!(matches!(
+            super::feedback_submit(&url, "vtro_k", "bug", "hi", &transport()).await,
+            Err(ApiError::Transport(_))
+        ));
+        assert!(matches!(
+            super::oidc_exchange(&url, "ws", "tok", &transport()).await,
+            Err(ApiError::Transport(_))
+        ));
+        assert!(matches!(
+            super::cli_login_exchange(&url, "code", &transport()).await,
+            Err(ApiError::Transport(_))
+        ));
+    }
+
+    /// The read-only endpoints map 401/403 to Auth (exit 3), other errors to
+    /// Backend with the server's message, and a body of the wrong shape to Backend.
+    #[tokio::test]
+    async fn read_only_endpoints_map_statuses_and_bad_bodies() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/keys"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": { "message": "missing scope" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/rules"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/rules/VERICTO-001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([1, 2])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/feedback"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/oidc-exchange"))
+            .respond_with(ResponseTemplate::new(502).set_body_string("bad gateway"))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+
+        let err = super::keys_list(&uri, "vtro_k", &transport())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Auth(m) if m == "missing scope"),
+            "{err:?}"
+        );
+        let err = super::rules_list(&uri, "vtro_k", &transport())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { status: 500, message } if message == "boom"),
+            "{err:?}"
+        );
+        let err = super::rules_show(&uri, "vtro_k", "VERICTO-001", &transport())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { message, .. } if message.contains("invalid rule detail body")),
+            "{err:?}"
+        );
+        let err = super::feedback_submit(&uri, "vtro_k", "idea", "more rules", &transport())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { status: 429, message } if message.contains("rate limited")),
+            "{err:?}"
+        );
+        let err = super::oidc_exchange(&uri, "ws", "tok", &transport())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { status: 502, .. }),
+            "{err:?}"
+        );
+    }
+
+    /// The rule-simulation endpoints keep the server's Retry-After and map an
+    /// invalid candidate (400) to Backend, a missing scope to Auth.
+    #[tokio::test]
+    async fn rule_simulation_endpoints_map_statuses() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/rules/simulate"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": { "message": "invalid YAML condition" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/rules/simulations/denied"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/rules/simulations/garbled"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let err = super::rules_simulate(&uri, "vtro_k", &serde_json::json!({}), &transport())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { status: 400, message } if message == "invalid YAML condition"),
+            "{err:?}"
+        );
+        let err = super::rules_simulation(&uri, "vtro_k", "denied", &transport())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Auth(_)));
+        let err = super::rules_simulation(&uri, "vtro_k", "garbled", &transport())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { message, .. } if message.contains("invalid simulation body")),
+            "{err:?}"
+        );
+        assert!(matches!(
+            super::rules_simulate(&dead_url(), "vtro_k", &serde_json::json!({}), &transport())
+                .await,
+            Err(ApiError::Transport(_))
+        ));
+    }
+
+    /// A chunked run where one chunk fails is failed closed as a whole: never a
+    /// partial report. A plan/auth failure mid-run stays Auth (exit 3).
+    #[tokio::test]
+    async fn a_chunked_run_with_a_failed_chunk_fails_closed() {
+        for (status, auth) in [(400u16, false), (401u16, true)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/ci/check-key"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(1, 0, 500, "raw")))
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/ci/check-key"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("nope"))
+                .with_priority(2)
+                .mount(&server)
+                .await;
+            let uri = server.uri();
+            let mut p = params(&uri, "vtro_k");
+            p.concurrency = 1;
+            let queries: Vec<QueryInput> = (0..600).map(|i| qi(i + 1, "SELECT 1")).collect();
+            let err = check_all(p, queries).await.unwrap_err();
+            match (auth, err) {
+                (false, ApiError::PartialFailure(m)) | (true, ApiError::Auth(m)) => {
+                    assert!(m.contains("chunk 2/2 failed"), "{m}");
+                    assert!(m.contains("failing the run closed"), "{m}");
+                }
+                (_, other) => panic!("status {status}: unexpected {other:?}"),
+            }
+        }
+    }
 }

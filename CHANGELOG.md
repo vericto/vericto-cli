@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Tests
+- Unit and integration test line coverage from 85.7% to 91.2% (cargo-llvm-cov;
+  production lines only, without the in-file test modules: 81.3% to 88.8%).
+  New tests cover every `--format` written to `--output` with the exit code
+  kept, GitHub `::error` annotations and the provenance sent from GitHub
+  Actions and GitLab CI, `--fail-on` thresholds and `.vericto.toml` defaults,
+  the rejection of a `.vericto.toml` carrying `api_key` or `allow_degraded`,
+  empty / missing input, `--since` / `--changed` against a real git repository
+  (only changed `.sql` files, empty diff, unknown or undetectable base), backend
+  refusals and an unreachable backend mapped to exit codes 3 and 4, an
+  incompatible backend major version, the quota and upgrade nudges staying on
+  stderr, an unusable CA bundle failing before any request, retries honoring
+  `Retry-After`, a chunked run failing closed on one failed chunk, the GitHub
+  OIDC token endpoint and exchange failures, and the remaining `doctor`,
+  `logout` and `init` branches. No change to the binary.
+
 ## [1.8.1] - 2026-10-18
 
 ### Added

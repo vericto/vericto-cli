@@ -2211,3 +2211,1009 @@ async fn rules_simulate_pass_exits_zero_and_json_is_the_api_response() {
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["summary"]["verdict"], "warn");
 }
+
+// ── check: output formats, CI integration, exit codes, input boundaries ──────
+
+/// Writes `body` to `dir/name` and returns the path as a string.
+fn write_sql(dir: &std::path::Path, name: &str, body: &str) -> String {
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    p.to_str().unwrap().to_string()
+}
+
+/// A `vericto check ...` against `api_url` with a static key.
+fn check_against(api_url: &str, args: &[&str]) -> Vericto {
+    let mut v = vericto();
+    v.arg("check")
+        .args(args)
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", api_url);
+    v
+}
+
+fn stderr_of(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn stdout_of(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The JSON bodies the mock received on `POST /ci/check-key`.
+async fn check_requests(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path() == "/api/v1/ci/check-key")
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect()
+}
+
+/// Every output format writes a parseable report to `--output`, nothing to
+/// stdout, and the run still fails on the blocked finding with the reason on
+/// stderr.
+#[tokio::test]
+async fn every_output_format_writes_its_report_and_keeps_the_exit_code() {
+    let server = mock_backend(check_body(&["BLOCKED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = write_sql(dir.path(), "m.sql", "DELETE FROM users;");
+    for format in ["text", "json", "sarif", "gitlab-codequality", "gitlab-sast"] {
+        let report = dir.path().join(format!("report-{format}"));
+        let out = check_against(
+            &server.uri(),
+            &[
+                &sql,
+                "--format",
+                format,
+                "--output",
+                report.to_str().unwrap(),
+                "--no-color",
+            ],
+        )
+        .output()
+        .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{format}: {}", stderr_of(&out));
+        assert!(
+            stdout_of(&out).is_empty(),
+            "{format}: report goes to the file"
+        );
+        assert!(
+            stderr_of(&out).contains("Vericto blocked 1 statement"),
+            "{format}: {}",
+            stderr_of(&out)
+        );
+        let body = std::fs::read_to_string(&report).unwrap();
+        match format {
+            "text" => assert!(body.contains("VERICTO-001"), "{body}"),
+            _ => {
+                let v: serde_json::Value = serde_json::from_str(&body)
+                    .unwrap_or_else(|e| panic!("{format} is not JSON ({e}): {body}"));
+                match format {
+                    "json" => assert_eq!(v["summary"]["blocked"], 1),
+                    "sarif" => {
+                        assert_eq!(v["version"], "2.1.0");
+                        assert_eq!(v["runs"][0]["results"][0]["ruleId"], "VERICTO-001");
+                    }
+                    "gitlab-codequality" => {
+                        assert_eq!(v.as_array().map(Vec::len), Some(1), "{v}")
+                    }
+                    _ => assert!(v["vulnerabilities"].is_array(), "{v}"),
+                }
+            }
+        }
+    }
+}
+
+/// The default text report on stdout names the file and the rule.
+#[tokio::test]
+async fn text_report_names_the_file_and_the_rule() {
+    let server = mock_backend(check_body(&["BLOCKED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = write_sql(dir.path(), "drop_users.sql", "DELETE FROM users;");
+    let out = check_against(&server.uri(), &[&sql, "--no-color"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = stdout_of(&out);
+    assert!(stdout.contains("drop_users.sql"), "{stdout}");
+    assert!(stdout.contains("VERICTO-001"), "{stdout}");
+    assert!(!stdout.contains('\u{1b}'), "--no-color: no ANSI escapes");
+}
+
+/// On GitHub Actions a failing run prints `::error` workflow commands, so the
+/// finding shows up as an annotation on the PR, and the request carries the
+/// run's provenance (never a credential).
+#[tokio::test]
+async fn on_github_actions_findings_become_annotations_and_provenance_is_sent() {
+    let server = mock_backend(check_body(&["BLOCKED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = write_sql(dir.path(), "m.sql", "DELETE FROM users;");
+    let out = check_against(&server.uri(), &["m.sql", "--no-color"])
+        .current_dir(dir.path())
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_SERVER_URL", "https://github.com")
+        .env("GITHUB_REPOSITORY", "acme/shop")
+        .env("GITHUB_RUN_ID", "4242")
+        .env("GITHUB_ACTOR", "octocat")
+        .env("GITHUB_REF", "refs/pull/7/merge")
+        .output()
+        .unwrap();
+    let _ = sql;
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = stderr_of(&out);
+    assert!(
+        stderr.contains("::error file=m.sql,line=1,title=Vericto VERICTO-001 [BLOCKED]::"),
+        "{stderr}"
+    );
+
+    let reqs = check_requests(&server).await;
+    assert_eq!(reqs.len(), 1);
+    let prov = &reqs[0]["provenance"];
+    assert_eq!(prov["ci_provider"], "github");
+    assert_eq!(
+        prov["ci_run_url"],
+        "https://github.com/acme/shop/actions/runs/4242"
+    );
+    assert_eq!(prov["actor"], "octocat");
+    assert_eq!(prov["git_ref"], "refs/pull/7/merge");
+    assert!(
+        !reqs[0].to_string().contains("vtro_k"),
+        "no key in the body"
+    );
+}
+
+/// On GitLab the provenance names the job URL and the user.
+#[tokio::test]
+async fn on_gitlab_ci_the_provenance_names_the_job() {
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    write_sql(dir.path(), "ok.sql", "SELECT 1 LIMIT 1;");
+    check_against(&server.uri(), &["ok.sql", "--quiet"])
+        .current_dir(dir.path())
+        .env("GITLAB_CI", "true")
+        .env("CI_JOB_URL", "https://gitlab.com/acme/shop/-/jobs/9")
+        .env("GITLAB_USER_LOGIN", "gluser")
+        .env("CI_COMMIT_REF_NAME", "feature/x")
+        .assert()
+        .code(0);
+    let reqs = check_requests(&server).await;
+    let prov = &reqs[0]["provenance"];
+    assert_eq!(prov["ci_provider"], "gitlab");
+    assert_eq!(prov["ci_run_url"], "https://gitlab.com/acme/shop/-/jobs/9");
+    assert_eq!(prov["actor"], "gluser");
+    assert_eq!(prov["git_ref"], "feature/x");
+}
+
+/// `--fail-on` decides which findings fail the run: block (default) lets a
+/// FLAGGED finding pass, flag fails it; any also fails on MONITORED.
+#[tokio::test]
+async fn fail_on_thresholds_set_the_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql = write_sql(dir.path(), "q.sql", "SELECT * FROM users;");
+
+    let flagged = mock_backend(check_body(&["FLAGGED"]), "raw").await;
+    for (args, code) in [
+        (vec![], 0),
+        (vec!["--fail-on", "block"], 0),
+        (vec!["--fail-on", "flag"], 1),
+        (vec!["--fail-on", "any"], 1),
+    ] {
+        let mut all = vec![sql.as_str(), "--quiet"];
+        all.extend(args.iter().copied());
+        check_against(&flagged.uri(), &all).assert().code(code);
+    }
+
+    let monitored = mock_backend(check_body(&["MONITORED"]), "raw").await;
+    check_against(&monitored.uri(), &[&sql, "--quiet", "--fail-on", "flag"])
+        .assert()
+        .code(0);
+    check_against(&monitored.uri(), &[&sql, "--quiet", "--fail-on", "any"])
+        .assert()
+        .code(1);
+}
+
+/// `.vericto.toml` (the committed project config) sets the defaults a PR can
+/// review: fail_on and the dialect sent to the backend. A flag still wins.
+#[tokio::test]
+async fn project_config_sets_fail_on_and_dialect() {
+    let server = mock_backend(check_body(&["FLAGGED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    write_sql(dir.path(), "q.sql", "SELECT * FROM users;");
+    std::fs::write(
+        dir.path().join(".vericto.toml"),
+        "fail_on = \"flag\"\ndefault_dialect = \"mysql\"\n",
+    )
+    .unwrap();
+    check_against(&server.uri(), &["q.sql", "--quiet"])
+        .current_dir(dir.path())
+        .assert()
+        .code(1);
+    check_against(&server.uri(), &["q.sql", "--quiet", "--fail-on", "block"])
+        .current_dir(dir.path())
+        .assert()
+        .code(0);
+    let reqs = check_requests(&server).await;
+    assert!(reqs.iter().all(|r| r["dialect"] == "mysql"), "{reqs:?}");
+}
+
+/// `.vericto.toml` is committed and reviewable, so it may not carry a secret or
+/// the break-glass, and a malformed one is a hard usage error — never ignored.
+#[tokio::test]
+async fn an_unsafe_or_malformed_project_config_is_a_usage_error() {
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    for (body, needle) in [
+        ("api_key = \"vtro_leaked\"\n", "must not contain api_key"),
+        (
+            "allow_degraded = \"outage\"\n",
+            "must not set allow_degraded",
+        ),
+        ("fail_on = [unclosed\n", "invalid .vericto.toml"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write_sql(dir.path(), "q.sql", "SELECT 1 LIMIT 1;");
+        std::fs::write(dir.path().join(".vericto.toml"), body).unwrap();
+        let out = check_against(&server.uri(), &["q.sql", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{body}");
+        assert!(stderr_of(&out).contains(needle), "{}", stderr_of(&out));
+        assert!(
+            !stderr_of(&out).contains("vtro_leaked"),
+            "the key is not echoed"
+        );
+    }
+    assert!(check_requests(&server).await.is_empty(), "no SQL was sent");
+}
+
+/// A malformed user config file is a warning, not a failure: the run proceeds
+/// with the key from the environment.
+#[tokio::test]
+async fn a_malformed_user_config_warns_and_the_run_proceeds() {
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = write_sql(dir.path(), "ok.sql", "SELECT 1 LIMIT 1;");
+    let cfg_dir = dir.path().join("xdg/vericto");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(cfg_dir.join("config.toml"), "api_key = = broken").unwrap();
+    let out = check_against(&server.uri(), &[&sql, "--quiet"])
+        .env("XDG_CONFIG_HOME", dir.path().join("xdg"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("warning: invalid config at"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// Empty or missing input is a usage error (exit 2), before any SQL is sent.
+#[tokio::test]
+async fn empty_or_missing_input_is_a_usage_error() {
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let empty = write_sql(dir.path(), "empty.sql", "  \n\t\n");
+    let missing = dir.path().join("missing.sql");
+    let cases: Vec<(Vec<String>, Option<&str>, &str)> = vec![
+        (vec![empty.clone()], None, "no SQL to check"),
+        (vec!["-".into()], Some("   \n"), "no SQL to check"),
+        (vec![missing.to_str().unwrap().into()], None, "cannot read"),
+        (vec!["--sql".into(), "   ".into()], None, "--sql was empty"),
+        (vec![], None, "no files given"),
+        (
+            vec!["--stdin-file-list".into(), empty.clone()],
+            None,
+            "--stdin-file-list can't be combined",
+        ),
+        (
+            vec!["--since".into(), "origin/main".into(), empty.clone()],
+            None,
+            "not both",
+        ),
+    ];
+    for (args, stdin, needle) in cases {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut cmd = check_against(&server.uri(), &args);
+        if let Some(input) = stdin {
+            cmd.write_stdin(input);
+        }
+        let out = cmd.output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr_of(&out));
+        assert!(
+            stderr_of(&out).contains(needle),
+            "{args:?}: {}",
+            stderr_of(&out)
+        );
+    }
+    assert!(check_requests(&server).await.is_empty(), "no SQL was sent");
+}
+
+/// Several files in one run: one query per file, labelled by its path, and an
+/// empty file among them is skipped rather than failing the run.
+#[tokio::test]
+async fn several_files_are_checked_in_one_request_and_empty_ones_skipped() {
+    let server = mock_backend(check_body(&["ALLOWED", "ALLOWED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_sql(dir.path(), "a.sql", "SELECT 1 LIMIT 1;");
+    let empty = write_sql(dir.path(), "b.sql", "");
+    let c = write_sql(dir.path(), "c.sql", "SELECT 2 LIMIT 1;");
+    check_against(&server.uri(), &[&a, &empty, &c, "--quiet"])
+        .assert()
+        .code(0);
+    let reqs = check_requests(&server).await;
+    let queries = reqs[0]["queries"].as_array().unwrap();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0]["line"], 1);
+    assert_eq!(
+        queries[1]["line"], 3,
+        "the index of the file, not of the query"
+    );
+}
+
+/// A report path that cannot be written is a usage error, not a silent pass.
+#[tokio::test]
+async fn an_unwritable_output_path_is_a_usage_error() {
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = write_sql(dir.path(), "ok.sql", "SELECT 1 LIMIT 1;");
+    let report = dir.path().join("no/such/dir/report.json");
+    let out = check_against(
+        &server.uri(),
+        &[
+            &sql,
+            "--format",
+            "json",
+            "--output",
+            report.to_str().unwrap(),
+        ],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr_of(&out).contains("could not write output"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// The backend's errors map to the documented exit codes: a rejected key is 3,
+/// any other refusal is 4, and neither prints a report.
+#[tokio::test]
+async fn backend_refusals_map_to_exit_codes() {
+    for (status, code) in [(401u16, 3), (403, 3), (400, 4), (404, 4)] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ci/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(config_body("raw")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/check-key"))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                    "error": { "code": "X", "message": format!("refused with {status}") }
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let out = check_against(&server.uri(), &["-", "--quiet"])
+            .write_stdin("SELECT 1;")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(code), "HTTP {status}");
+        assert!(
+            stderr_of(&out).contains(&format!("refused with {status}")),
+            "{}",
+            stderr_of(&out)
+        );
+        assert!(stdout_of(&out).is_empty());
+    }
+}
+
+/// A key rejected at the pre-flight fails with 3 before any SQL is sent.
+#[tokio::test]
+async fn a_key_rejected_at_preflight_exits_3_without_sending_sql() {
+    let server = backend_with_config_status(401, 0).await;
+    check_against(&server.uri(), &["-", "--quiet"])
+        .write_stdin("SELECT 1;")
+        .assert()
+        .code(3);
+}
+
+/// Without `--allow-degraded`, an unreachable backend fails the build (4).
+#[tokio::test]
+async fn an_unreachable_backend_fails_closed_without_the_break_glass() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql = write_sql(dir.path(), "m.sql", "DELETE FROM users;");
+    let out = check_against("http://127.0.0.1:1", &[&sql, "--timeout", "1", "--quiet"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert!(
+        stderr_of(&out).contains("No SQL was sent"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(!dir.path().join(".vericto").exists(), "no degraded record");
+}
+
+/// `--allow-degraded` needs a reason; an empty one is a usage error.
+#[tokio::test]
+async fn the_break_glass_requires_a_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql = write_sql(dir.path(), "m.sql", "DELETE FROM users;");
+    check_against(
+        "http://127.0.0.1:1",
+        &[&sql, "--timeout", "1", "--allow-degraded", "  ", "--quiet"],
+    )
+    .current_dir(dir.path())
+    .assert()
+    .code(2);
+}
+
+/// A backend of another major API version may answer in a shape this CLI
+/// misreads: the run fails (4) instead of reporting a guess.
+#[tokio::test]
+async fn an_incompatible_backend_major_version_fails_the_run() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(config_body("raw")))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/check-key"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("X-Vericto-Api-Version", "2.0.0")
+                .set_body_json(check_body(&["ALLOWED"])),
+        )
+        .mount(&server)
+        .await;
+    let out = check_against(&server.uri(), &["-"])
+        .write_stdin("SELECT 1;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert!(
+        stderr_of(&out).contains("incompatible backend api 2.0.0"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// Low allowance and an outdated CLI are nudged on stderr only, so a JSON
+/// report on stdout stays parseable; neither changes the exit code.
+#[tokio::test]
+async fn quota_and_upgrade_nudges_go_to_stderr_only() {
+    let mut body = check_body(&["ALLOWED"]);
+    body["ci_checks_remaining"] = serde_json::json!(7);
+    body["min_cli_version"] = serde_json::json!("999.0.0");
+    let server = mock_backend(body, "raw").await;
+    let out = check_against(&server.uri(), &["-", "--format", "json"])
+        .write_stdin("SELECT 1;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = stderr_of(&out);
+    assert!(stderr.contains("7 CLI checks left this month"), "{stderr}");
+    assert!(
+        stderr.contains("older than the minimum supported 999.0.0"),
+        "{stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(v["summary"]["total"], 1);
+}
+
+/// `--receipt` against a deployment that doesn't sign: a warning, no file, and
+/// the check's own result stands.
+#[tokio::test]
+async fn a_receipt_requested_from_a_non_signing_backend_warns_and_writes_nothing() {
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let dir = tempfile::tempdir().unwrap();
+    let receipt = dir.path().join("receipt.json");
+    let out = check_against(
+        &server.uri(),
+        &["-", "--quiet", "--receipt", receipt.to_str().unwrap()],
+    )
+    .write_stdin("SELECT 1;")
+    .output()
+    .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        stderr_of(&out).contains("returned no receipt"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(!receipt.exists());
+    let reqs = check_requests(&server).await;
+    assert_eq!(reqs[0]["receipt"], true, "the receipt was requested");
+}
+
+// ── check --changed / --since (git diff selection) ───────────────────────────
+
+/// Runs git in `dir` with a fixed identity; panics on failure.
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Vericto Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git is installed");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A repo with `main` holding a.sql, and a `feature` branch that changes a.sql,
+/// adds b.sql and a non-SQL file, and deletes old.sql.
+fn feature_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    git(d, &["init", "-q"]);
+    std::fs::write(d.join("a.sql"), "SELECT 1 LIMIT 1;").unwrap();
+    std::fs::write(d.join("old.sql"), "SELECT 0 LIMIT 1;").unwrap();
+    git(d, &["add", "."]);
+    git(d, &["commit", "-q", "-m", "base"]);
+    git(d, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(d.join("a.sql"), "DELETE FROM users;").unwrap();
+    std::fs::write(d.join("b.sql"), "SELECT 2 LIMIT 1;").unwrap();
+    std::fs::write(d.join("notes.md"), "not SQL").unwrap();
+    std::fs::remove_file(d.join("old.sql")).unwrap();
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-q", "-m", "feature"]);
+    dir
+}
+
+/// A `check` in `dir` with PATH kept, so the CLI can run git.
+fn check_in_repo(dir: &std::path::Path, api_url: &str, args: &[&str]) -> Vericto {
+    let mut v = check_against(api_url, args);
+    v.current_dir(dir)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    v
+}
+
+/// `--since <ref>` checks only the .sql files changed vs the merge base:
+/// modified and added ones, never deleted or non-SQL files.
+#[tokio::test]
+async fn since_checks_only_the_changed_sql_files() {
+    let server = mock_backend(check_body(&["BLOCKED", "ALLOWED"]), "raw").await;
+    let repo = feature_repo();
+    check_in_repo(repo.path(), &server.uri(), &["--since", "main", "--quiet"])
+        .assert()
+        .code(1);
+    let reqs = check_requests(&server).await;
+    let sqls: Vec<&str> = reqs[0]["queries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| q["sql"].as_str().unwrap())
+        .collect();
+    assert_eq!(sqls, vec!["DELETE FROM users;", "SELECT 2 LIMIT 1;"]);
+}
+
+/// No changed SQL is a pass (0) with a message, and nothing is sent.
+#[tokio::test]
+async fn no_changed_sql_is_a_pass_without_a_request() {
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let repo = feature_repo();
+    let out = check_in_repo(repo.path(), &server.uri(), &["--since", "feature"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        stdout_of(&out).contains("No changed .sql files vs feature"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(check_requests(&server).await.is_empty());
+}
+
+/// A base ref that does not exist, or no base to detect at all, is a usage
+/// error naming the problem — never a silent "nothing to check".
+#[tokio::test]
+async fn an_unknown_or_undetectable_base_ref_is_a_usage_error() {
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let repo = feature_repo();
+
+    let out = check_in_repo(repo.path(), &server.uri(), &["--since", "no-such-ref"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr_of(&out).contains("git diff against 'no-such-ref' failed"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    // Locally, without an origin remote, --changed has no base to use.
+    let out = check_in_repo(repo.path(), &server.uri(), &["--changed"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr_of(&out).contains("could not determine a base ref"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    // On a GitHub pull request the base comes from GITHUB_BASE_REF.
+    let out = check_in_repo(repo.path(), &server.uri(), &["--changed"])
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_BASE_REF", "main")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr_of(&out).contains("'origin/main'"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(check_requests(&server).await.is_empty());
+}
+
+// ── OIDC (workload identity) failure modes ───────────────────────────────────
+
+/// A JWT-shaped token in the GitLab variable but no workspace anywhere: exit 3
+/// naming the missing workspace, before any request.
+#[tokio::test]
+async fn oidc_token_without_a_workspace_names_the_missing_workspace() {
+    let out = vericto()
+        .args(["check", "-", "--oidc", "--quiet"])
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .env("VERICTO_ID_TOKEN", "header.payload.signature")
+        .write_stdin("SELECT 1;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        stderr_of(&out).contains("needs a workspace"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// GitHub Actions: the token is fetched from the runner's endpoint with the
+/// requested audience, exchanged, and the minted key is used for the check.
+#[tokio::test]
+async fn github_actions_oidc_token_is_fetched_exchanged_and_used() {
+    use wiremock::matchers::{header, query_param};
+    let server = mock_backend_with_oidc(check_body(&["ALLOWED"])).await;
+    Mock::given(method("GET"))
+        .and(path("/gh-token"))
+        .and(query_param("audience", "vericto"))
+        .and(header("Authorization", "Bearer runner-request-token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "value": "gh.jwt.token" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let out = vericto()
+        .args(["check", "-", "--workspace", "ws_1", "--quiet"])
+        .env("VERICTO_API_URL", server.uri())
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            format!("{}/gh-token", server.uri()),
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "runner-request-token")
+        .write_stdin("SELECT 1;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("authenticated via OIDC (github-actions)"),
+        "{}",
+        stderr_of(&out)
+    );
+    let used_minted = server.received_requests().await.unwrap().iter().any(|r| {
+        r.url.path() == "/api/v1/ci/check-key"
+            && r.headers.get("x-api-key").map(|v| v.as_bytes()) == Some(b"vtro_minted")
+    });
+    assert!(used_minted, "the check used the minted key");
+}
+
+/// A token endpoint that fails, or an exchange the backend refuses, is exit 3;
+/// an exchange that fails for another reason is exit 4.
+#[tokio::test]
+async fn oidc_token_and_exchange_failures_map_to_exit_codes() {
+    // Token endpoint refuses.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/gh-token"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("no id-token permission"))
+        .mount(&server)
+        .await;
+    let out = vericto()
+        .args(["check", "-", "--workspace", "ws_1", "--quiet"])
+        .env("VERICTO_API_URL", server.uri())
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            format!("{}/gh-token", server.uri()),
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "t")
+        .write_stdin("SELECT 1;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        stderr_of(&out).contains("could not obtain an OIDC ID token"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    // Exchange refused (no trust policy matched) → 3; exchange broken → 4.
+    for (status, code) in [(403u16, 3), (500, 4)] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/oidc-exchange"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("exchange says no"))
+            .mount(&server)
+            .await;
+        let out = vericto()
+            .args(["check", "-", "--workspace", "ws_1", "--quiet"])
+            .env("VERICTO_API_URL", server.uri())
+            .env("VERICTO_ID_TOKEN", "header.payload.signature")
+            .write_stdin("SELECT 1;")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(code), "exchange HTTP {status}");
+        assert!(
+            stderr_of(&out).contains("OIDC token exchange failed"),
+            "{}",
+            stderr_of(&out)
+        );
+    }
+}
+
+/// `login --oidc` inside CI verifies the exchange right away: success is 0, a
+/// refused exchange is 3, and either way no secret is written.
+#[tokio::test]
+async fn login_oidc_in_ci_verifies_the_exchange() {
+    for (status, code) in [(200u16, 0), (403, 3)] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/oidc-exchange"))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                    "api_key": "vtro_minted", "expires_at": "2026-10-18T00:15:00Z"
+                })),
+            )
+            .mount(&server)
+            .await;
+        let home = tempfile::tempdir().unwrap();
+        let out = vericto()
+            .args([
+                "login",
+                "--oidc",
+                "--workspace",
+                "ws_9",
+                "--audience",
+                "vericto-ci",
+                "--api-url",
+                &server.uri(),
+            ])
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("VERICTO_ID_TOKEN", "header.payload.signature")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(code), "{}", stderr_of(&out));
+        let saved = std::fs::read_to_string(home.path().join("vericto/config.toml")).unwrap();
+        assert!(
+            saved.contains("ws_9") && saved.contains("vericto-ci"),
+            "{saved}"
+        );
+        assert!(
+            !saved.contains("vtro_minted"),
+            "the minted key is never stored"
+        );
+    }
+}
+
+#[test]
+fn login_oidc_requires_a_workspace() {
+    let out = vericto().args(["login", "--oidc"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr_of(&out).contains("requires --workspace"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+// ── doctor, logout, init: the remaining branches ─────────────────────────────
+
+/// `doctor` fails on a backend of another major version, and reports a
+/// rejected key as an auth problem (3) without spending a check.
+#[tokio::test]
+async fn doctor_flags_an_incompatible_backend_and_a_rejected_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "api_version": "3.1.0"
+        })))
+        .mount(&server)
+        .await;
+    let out = vericto()
+        .arg("doctor")
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert!(
+        stdout_of(&out).contains("incompatible backend"),
+        "{}",
+        stdout_of(&out)
+    );
+
+    // No /version (older backend) is not fatal; the auth probe decides.
+    let server = backend_with_config_status(401, 0).await;
+    let out = vericto()
+        .arg("doctor")
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let stdout = stdout_of(&out);
+    assert!(stdout.contains("version endpoint unavailable"), "{stdout}");
+    assert!(stdout.contains("auth/entitlement failed"), "{stdout}");
+
+    // A backend error other than auth is 4.
+    let server = backend_with_config_status(404, 0).await;
+    vericto()
+        .arg("doctor")
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(4);
+}
+
+#[test]
+fn doctor_without_any_credential_exits_3() {
+    let out = vericto()
+        .arg("doctor")
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        stdout_of(&out).contains("authentication unavailable"),
+        "{}",
+        stdout_of(&out)
+    );
+}
+
+#[test]
+fn logout_without_stored_credentials_is_a_no_op() {
+    let home = tempfile::tempdir().unwrap();
+    let logout = || {
+        let out = vericto()
+            .arg("logout")
+            .env("XDG_CONFIG_HOME", home.path())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        stdout_of(&out)
+    };
+    assert!(logout().contains("No stored credentials."));
+
+    // A config with preferences but no key keeps the file as it is.
+    let cfg = home.path().join("vericto");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(cfg.join("config.toml"), "default_dialect = \"mysql\"\n").unwrap();
+    assert!(logout().contains("No stored API key."));
+    assert_eq!(
+        std::fs::read_to_string(cfg.join("config.toml")).unwrap(),
+        "default_dialect = \"mysql\"\n"
+    );
+}
+
+/// GitLab scaffolding never touches `.gitlab-ci.yml`: it writes an include file
+/// and says how to wire it; `--hook` adds an executable pre-commit hook.
+/// Existing files are skipped unless `--force`.
+#[test]
+fn init_gitlab_with_hook_writes_the_include_and_the_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
+    let out = vericto()
+        .args(["init", "--target", "gitlab", "--hook", "--dialect", "mysql"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    assert!(
+        stdout.contains("- local: .vericto/gitlab-ci.yml"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("masked CI/CD variable"), "{stdout}");
+    let job = std::fs::read_to_string(dir.path().join(".vericto/gitlab-ci.yml")).unwrap();
+    assert!(job.contains("mysql"), "{job}");
+    let hook = dir.path().join(".git/hooks/pre-commit");
+    assert!(hook.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0, "the hook is executable: {mode:o}");
+    }
+
+    // A second run skips both; --force rewrites them.
+    let again = vericto()
+        .args(["init", "--target", "gitlab", "--hook"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(again.status.code(), Some(0));
+    assert_eq!(stdout_of(&again).matches("exists, skipped").count(), 2);
+    let forced = vericto()
+        .args(["init", "--target", "gitlab", "--hook", "--force"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(stdout_of(&forced).matches("created").count(), 2);
+}
+
+#[test]
+fn init_gitlab_oidc_explains_the_trust_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = vericto()
+        .args([
+            "init",
+            "--target",
+            "gitlab",
+            "--oidc",
+            "--workspace",
+            "ws_3",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        stdout_of(&out).contains("issuer https://gitlab.com"),
+        "{}",
+        stdout_of(&out)
+    );
+    let job = std::fs::read_to_string(dir.path().join(".vericto/gitlab-ci.yml")).unwrap();
+    assert!(job.contains("ws_3"), "{job}");
+}
+
+/// Without --target and nothing to detect the provider from, init refuses
+/// rather than guessing.
+#[test]
+fn init_without_a_detectable_provider_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = vericto()
+        .arg("init")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr_of(&out).contains("--target github|gitlab"),
+        "{}",
+        stderr_of(&out)
+    );
+}
