@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-10-18
+
 ### Added
 - **Homebrew.** `brew install vericto/tap/vericto` on macOS (arm64 and x86_64)
   and Linux (arm64 and x86_64, the static musl binaries). Every release now

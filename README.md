@@ -47,8 +47,8 @@ cargo install --path .
 
 > **Homebrew:** the formula lives in the
 > [`vericto/homebrew-tap`](https://github.com/vericto/homebrew-tap) tap and is
-> published by the release pipeline on every version tag, starting with the
-> first release after 1.8.0. It installs the same prebuilt binaries as every
+> published by the release pipeline on every version tag, starting with
+> 1.8.1. It installs the same prebuilt binaries as every
 > other channel (on Linux, the static musl ones), each pinned by its SHA-256;
 > Homebrew refuses a download that does not match. `brew install
 > vericto/tap/vericto` names the tap explicitly, which also tells Homebrew to
