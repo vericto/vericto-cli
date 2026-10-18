@@ -163,6 +163,40 @@ pub struct CheckResponse {
     /// body — set from the header in `try_once`. `None` on older backends.
     #[serde(skip)]
     pub api_version_header: Option<String>,
+    /// Where the verdict came from. Not on the wire: every response the backend
+    /// sends is `Online`; `offline::check` builds `Offline` ones.
+    #[serde(skip)]
+    pub mode: RunMode,
+}
+
+/// Where a check was evaluated (DESIGN §13). Rendered in every output
+/// format, so an offline result can never pass for a workspace verdict.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RunMode {
+    /// The workspace's live ruleset and policy, via `POST /ci/check-key`.
+    #[default]
+    Online,
+    /// The embedded engine and its standard rules, no network.
+    Offline {
+        engine_version: &'static str,
+        rules: usize,
+    },
+}
+
+impl RunMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunMode::Online => "online",
+            RunMode::Offline { .. } => "offline",
+        }
+    }
+
+    pub fn engine_version(self) -> Option<&'static str> {
+        match self {
+            RunMode::Online => None,
+            RunMode::Offline { engine_version, .. } => Some(engine_version),
+        }
+    }
 }
 
 impl CheckResponse {
@@ -1238,6 +1272,7 @@ fn merge_responses(mut parts: Vec<CheckResponse>) -> CheckResponse {
         receipt: None,
         merged_receipts,
         api_version_header,
+        mode: RunMode::Online,
     }
 }
 

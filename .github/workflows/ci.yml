@@ -45,7 +45,11 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # libclang for pg_query's bindgen (the `offline` feature embeds the engine).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev clang
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # The Windows build has no engine: keep the feature-off code warning-free.
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
 
   test:
     name: Build & test
@@ -56,8 +60,41 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev clang
       - run: cargo build --locked --all-targets
       - run: cargo test --locked
+      # The Windows-shaped build (no engine): `--offline` must exit 2 there.
+      - run: cargo test --locked --no-default-features
+
+  # Informational, NOT required: does the embedded engine (pg_query: libpg_query
+  # C sources + bindgen) build and pass on Windows? The release ships Windows
+  # online-only; `--cfg vericto_windows_offline` lifts the Cargo.toml target
+  # gate for this job only. `continue-on-error` keeps a failure here from
+  # failing the workflow; do not add this job to the required checks. Once it
+  # is green, drop the gate (Cargo.toml, src/offline.rs, tests/cli.rs) and this
+  # job's RUSTFLAGS, and Windows gets offline mode in the next release.
+  windows-offline:
+    name: Windows offline mode (informational)
+    runs-on: windows-2022
+    continue-on-error: true
+    env:
+      RUSTFLAGS: "-D warnings --cfg vericto_windows_offline"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The runner image ships LLVM (libclang) and MSVC, as pg_query's own
+      # Windows CI relies on.
+      - name: Build with the engine
+        run: cargo build --locked --all-targets
+      # The offline tests first (unit + integration, incl. deep nesting against
+      # Windows' 1 MiB main-thread stack), then the whole suite.
+      - name: Offline tests
+        run: cargo test --locked offline
+      - name: Full test suite
+        run: cargo test --locked
 
   # The npm installer's integrity checks (npm-installer/): node:test, no
   # dependencies to install.

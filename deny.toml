@@ -41,7 +41,9 @@ exceptions = [
 [bans]
 # Duplicate versions are reported, not failed.
 multiple-versions = "warn"
-wildcards = "deny"
+# A git dependency (the engine, for offline mode) counts as a wildcard; the
+# sources section below restricts it to the engine's repository, by tag.
+wildcards = "warn"
 allow-wildcard-paths = true
 # TLS is rustls only (see Cargo.toml): no OpenSSL in the binary.
 deny = [
@@ -50,8 +52,10 @@ deny = [
 ]
 
 [sources]
-# Crates come from crates.io only: no other registry, no git dependencies.
+# Crates come from crates.io, plus the engine (offline mode) from its public
+# repository, pinned by tag — as in vericto-proxy.
 unknown-registry = "deny"
 unknown-git = "deny"
+required-git-spec = "tag"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/vericto/vericto-engine"]

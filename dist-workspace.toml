@@ -40,6 +40,16 @@ targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-ap
 install-path = "CARGO_HOME"
 # Where to host releases
 hosting = "github"
+# On a pull request, build every target and upload the archives as workflow
+# artifacts (nothing is published or released): each PR is a release dry run.
+# The default, "plan", only runs `dist plan`, which never compiles anything, so
+# a toolchain break (libclang on the musl runners, pg_query on a new target)
+# would first show up after the tag. Set back to "plan" to save runner time.
+pr-run-mode = "upload"
+# "upload" turns on build caching, which adds an unpinned rust-cache action to
+# release.yml. Release builds stay uncached: every artifact is built from
+# clean, and every action in release.yml stays pinned to a SHA (see below).
+cache-builds = false
 
 # Keyless build provenance (§9): each artifact gets a Sigstore-backed GitHub
 # attestation tying it to this repo, the workflow and the commit, verifiable with
@@ -48,6 +58,14 @@ hosting = "github"
 # the repo is public under the vericto org since 2026-08-01. SHA-256 checksums
 # (`sha256.sum` + per-artifact `.sha256`) still ship alongside.
 github-attestations = true
+
+# Offline mode (DESIGN §13) embeds vericto-engine, whose pg_query runs
+# bindgen at build time: the Linux runners need libclang and clang's own headers
+# (`stdbool.h`; libclang-dev alone lacks them, seen in a Debian builder), macOS
+# runners get both with Xcode. Windows builds without the engine, see Cargo.toml.
+[dist.dependencies.apt]
+libclang-dev = { version = "*", targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] }
+clang = { version = "*", targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] }
 
 # The custom npm publish job (.github/workflows/npm-publish.yml) checks out
 # npm-installer/ and publishes with npm provenance: it needs contents: read and
