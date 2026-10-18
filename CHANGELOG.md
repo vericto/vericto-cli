@@ -6,6 +6,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-10-18
+
+Offline mode moves to `vericto-engine` 4.2.0 and takes its rules, version and
+decision from the engine. Offline verdicts are unchanged; online checks are
+unchanged.
+
+### Changed
+
+- **Engine 4.2.0 in the binary.** `vericto check --offline` evaluates with
+  `vericto-engine` 4.2.0 (was 4.1.3), pinned by tag. Every offline result says
+  so: `engine 4.2.0` and `ruleset_version` `standard@engine-4.2.0`, in the
+  same format as 1.9.0.
+- **The engine's standard ruleset and decision.** The 42 rules now come from
+  the engine's `standard_rules()` and the version from its `ENGINE_VERSION`,
+  so the CLI no longer keeps its own copy of the rule table. Engine 4.2.0
+  decides by the strongest resolved action across all violations, which is
+  what 1.9.0 corrected locally for engine 4.1.3 (a capped `DROP TABLE` no
+  longer hides a WHERE-less `UPDATE` in the same file); that local correction
+  is gone. The tests that pin the outcome stay. The same offline inputs give
+  the same status, rule, severity, action and fix as 1.9.0: compared on 3,427
+  inputs (the engine's test and corpus SQL, alone and combined into
+  multi-statement files) in each of the six dialects, with no difference.
+
+### Fixed
+
+- **The Windows offline CI job.** Its integration tests clear the environment
+  of the `vericto` process they start, which on Windows also removed
+  `SystemRoot`; without it Winsock cannot initialize, so the process could not
+  reach the local mock API (`a_key_without_offline_stays_online_and_says_so`
+  failed with "error sending request"). The test helpers now keep
+  `SystemRoot`, `windir` and `SystemDrive`. Test-only: the binary is
+  unchanged, and the Windows binary stays online-only in this release.
+
 ## [1.9.0] - 2026-10-18
 
 **Offline mode.** `vericto check --offline` checks SQL on your machine with the

@@ -24,15 +24,14 @@
 //! in the backend (sql-split.ts). Moving that splitter into the engine would
 //! give offline mode exact lines too.
 //!
-//! Engine 4.1.3 workarounds, removed with engine 4.2.0: 4.1.3 exports no
-//! standard ruleset and no version constant, and its winner is severity-first.
-//! So this module carries its own copy of the standard-rules table
-//! (`engine::STANDARD_RULES`), its own `ENGINE_VERSION`, and a local
-//! strongest-action correction (`engine::strongest_action_wins`). Engine 4.2.0
-//! fixes the winner and exports `standard_rules()` plus version constants; the
-//! release after 1.9.0 moves to it and drops all three. Until then the tests
-//! below keep the table equal to the engine README and the version equal to
-//! Cargo.lock.
+//! The rule table, the version and the decision are the engine's: the 42
+//! rules come from `vericto_engine::standard_rules()`, the version from
+//! `vericto_engine::ENGINE_VERSION`, and the verdict is the engine's own
+//! decision, which since engine 4.2.0 is the strongest resolved action across
+//! all violations (so a capped DROP TABLE never hides a blocking UPDATE in the
+//! same file). Until CLI 1.9.1 this module carried its own copy of all three,
+//! because engine 4.1.3 exported none of them and picked its winner by
+//! severity first.
 //!
 //! Windows: the engine is not built for Windows in this release (see
 //! Cargo.toml), so `AVAILABLE` is false there and `--offline` exits 2. The
@@ -48,16 +47,25 @@ pub const AVAILABLE: bool = cfg!(all(
     any(not(windows), vericto_windows_offline)
 ));
 
-/// Version of the embedded `vericto-engine`. Engine 4.1.3 exports no version
-/// constant, so it is written here and a test keeps it equal to Cargo.lock.
-/// With engine 4.2.0 this becomes the engine's own constant.
-pub const ENGINE_VERSION: &str = "4.1.3";
+/// Version of the embedded `vericto-engine`: the engine's own constant.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+pub const ENGINE_VERSION: &str = vericto_engine::ENGINE_VERSION;
+/// A build with no engine never reports an offline result (`check` fails with
+/// `Unavailable` first), so this only keeps the type the same.
+#[cfg(not(all(feature = "offline", any(not(windows), vericto_windows_offline))))]
+pub const ENGINE_VERSION: &str = "none";
 
-/// Number of standard rules evaluated offline (the engine catalogue).
-pub const STANDARD_RULE_COUNT: usize = 42;
+/// Number of standard rules evaluated offline: the engine's standard ruleset.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+pub const STANDARD_RULE_COUNT: usize = vericto_engine::STANDARD_RULES.len();
+/// No engine, no rules (never reported, see `ENGINE_VERSION`).
+#[cfg(not(all(feature = "offline", any(not(windows), vericto_windows_offline))))]
+pub const STANDARD_RULE_COUNT: usize = 0;
 
 /// The `ruleset_version` an offline result reports: the standard set is a
-/// function of the engine version alone, so the version names both.
+/// function of the engine version alone, so the version names both. The
+/// format (`standard@engine-X.Y.Z`) is the one 1.9.0 shipped, so baselines and
+/// dashboards that read it keep working.
 pub fn ruleset_version() -> String {
     format!("standard@engine-{ENGINE_VERSION}")
 }
@@ -160,8 +168,7 @@ mod engine {
     use crate::api::{QueryInput, QueryResult};
     use vericto_engine::parser::{parser_for, Dialect};
     use vericto_engine::{
-        Decision, EnforcementAction, EnforcementPolicy, EvaluationOutcome, Rule, RuleEngine,
-        RuleType, Severity,
+        standard_rules, Decision, EnforcementAction, EnforcementPolicy, RuleEngine,
     };
 
     /// Largest input evaluated. Online, the sidecar refuses analysis past
@@ -193,74 +200,6 @@ mod engine {
         }
     }
 
-    /// (code, severity, default action): vericto-proxy's built-in ruleset
-    /// (`evaluator::default_ruleset`, the R13 table), which is the engine's
-    /// catalogue. Kept equal to the engine README by `matches_engine_catalogue`.
-    ///
-    /// A local copy only because engine 4.1.3 exports no ruleset. The next
-    /// release moves to engine 4.2.0's `standard_rules()` and deletes this
-    /// table (keep the catalogue test until then).
-    pub(super) const STANDARD_RULES: &[(&str, Severity, EnforcementAction)] = &[
-        ("VERICTO-001", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-003", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-010", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-011", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-012", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-030", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-042", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-090", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-080", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-081", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-086", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-091", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-092", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-093", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-100", Severity::Critical, EnforcementAction::Block),
-        ("VERICTO-002", Severity::High, EnforcementAction::Block),
-        ("VERICTO-013", Severity::High, EnforcementAction::Block),
-        ("VERICTO-015", Severity::High, EnforcementAction::Block),
-        ("VERICTO-016", Severity::High, EnforcementAction::Block),
-        ("VERICTO-017", Severity::High, EnforcementAction::Block),
-        ("VERICTO-018", Severity::High, EnforcementAction::Block),
-        ("VERICTO-019", Severity::High, EnforcementAction::Block),
-        ("VERICTO-031", Severity::High, EnforcementAction::Block),
-        ("VERICTO-033", Severity::High, EnforcementAction::Block),
-        ("VERICTO-040", Severity::High, EnforcementAction::Block),
-        ("VERICTO-070", Severity::High, EnforcementAction::Block),
-        ("VERICTO-082", Severity::High, EnforcementAction::Block),
-        ("VERICTO-083", Severity::High, EnforcementAction::Block),
-        ("VERICTO-084", Severity::High, EnforcementAction::Block),
-        // Engine-driven: acts only on sensitive-column tags and agent
-        // allowlists, which offline mode never has; listed so the set is whole.
-        ("VERICTO-085", Severity::High, EnforcementAction::Block),
-        ("VERICTO-087", Severity::High, EnforcementAction::Block),
-        ("VERICTO-094", Severity::High, EnforcementAction::Block),
-        ("VERICTO-095", Severity::High, EnforcementAction::Block),
-        ("VERICTO-096", Severity::High, EnforcementAction::Block),
-        ("VERICTO-097", Severity::High, EnforcementAction::Block),
-        ("VERICTO-098", Severity::High, EnforcementAction::Block),
-        ("VERICTO-099", Severity::High, EnforcementAction::Block),
-        ("VERICTO-101", Severity::High, EnforcementAction::Block),
-        ("VERICTO-050", Severity::Medium, EnforcementAction::Flag),
-        ("VERICTO-051", Severity::Medium, EnforcementAction::Flag),
-        ("VERICTO-061", Severity::Medium, EnforcementAction::Flag),
-        ("VERICTO-060", Severity::Low, EnforcementAction::Monitor),
-    ];
-
-    pub(super) fn standard_ruleset() -> Vec<Rule> {
-        STANDARD_RULES
-            .iter()
-            .map(|(code, severity, default_action)| Rule {
-                rule_id: code.to_string(),
-                code: code.to_string(),
-                severity: *severity,
-                default_action: *default_action,
-                rule_type: RuleType::Standard,
-                ast_condition_yaml: None,
-            })
-            .collect()
-    }
-
     /// The policy a CI check runs under in a workspace with no overrides: the
     /// engine default plus the CI channel's schema-migration cap (FLAG).
     pub(super) fn ci_policy() -> EnforcementPolicy {
@@ -278,53 +217,13 @@ mod engine {
         }
     }
 
-    /// The engine ranks violations by severity, then rule code, and takes the
-    /// decision from that winner alone, with the CI cap already applied to its
-    /// action. Offline evaluates a whole file at once, so a capped DROP TABLE
-    /// (Critical, FLAG) outranks a WHERE-less UPDATE later in the same file
-    /// (Critical, BLOCK) and the file would pass. Online per-statement mode
-    /// never meets this (each statement is evaluated alone). Report the
-    /// violation with the strongest resolved action instead; the engine's
-    /// order breaks ties, so a single-statement outcome never changes.
-    ///
-    /// Every output format and the exit code read the status this produces,
-    /// so they all agree. A local workaround for engine 4.1.3: engine 4.2.0
-    /// picks an action-aware winner itself, and the next release drops this
-    /// function (keep its tests, which then guard the engine's behavior).
-    fn strongest_action_wins(o: &mut EvaluationOutcome) {
-        let Some(top) = o
-            .violations
-            .iter()
-            .enumerate()
-            .max_by_key(|(i, v)| (v.action, std::cmp::Reverse(*i)))
-            .map(|(_, v)| v.clone())
-        else {
-            return;
-        };
-        if o.action.is_some_and(|a| a >= top.action) {
-            return;
-        }
-        o.decision = match top.action {
-            EnforcementAction::Block => Decision::Block,
-            EnforcementAction::Flag => Decision::Flag,
-            EnforcementAction::Monitor => Decision::Allow,
-        };
-        o.action = Some(top.action);
-        o.severity = Some(top.severity);
-        o.rule_id = Some(top.rule_id);
-        o.rule_code = Some(top.rule_code);
-        o.ast_node_path = Some(top.ast_node_path);
-        o.estimated_rows_affected = top.estimated_rows_affected;
-        o.suggested_safe_query = top.suggested_safe_query;
-    }
-
     pub(super) fn evaluate_all(
         queries: &[QueryInput],
         dialect: &str,
     ) -> Result<Vec<QueryResult>, OfflineError> {
         let dialect =
             Dialect::parse_dialect(dialect).map_err(|_| OfflineError::Dialect(dialect.into()))?;
-        let rules = standard_ruleset();
+        let rules = standard_rules();
         let policy = ci_policy();
         let parser = parser_for(dialect);
         Ok(queries
@@ -336,8 +235,11 @@ mod engine {
                 let Ok(parsed) = parser.parse(&q.sql) else {
                     return parse_error(q.line, &q.sql);
                 };
-                let mut o = RuleEngine::evaluate(&parsed, &rules, &policy);
-                strongest_action_wins(&mut o);
+                // The engine's decision is the strongest resolved action across
+                // all violations (engine 4.2.0), and `rule_code` is the
+                // violation that holds it, so every output format and the exit
+                // code agree on it.
+                let o = RuleEngine::evaluate(&parsed, &rules, &policy);
                 // vericto-eval's mapping (proxy.rs), so statuses read the same.
                 let status = match (o.decision, o.action) {
                     (Decision::Allow, Some(EnforcementAction::Monitor)) => "MONITORED",
@@ -379,8 +281,7 @@ mod engine {
 mod tests {
     use super::*;
     use crate::api::QueryResult;
-    use std::collections::{BTreeMap, BTreeSet};
-    use vericto_engine::Severity;
+    use std::collections::BTreeSet;
 
     fn q(sql: &str) -> Vec<QueryInput> {
         vec![QueryInput {
@@ -393,12 +294,26 @@ mod tests {
         check(&q(sql), dialect).unwrap().queries.remove(0)
     }
 
+    /// Offline evaluates the engine's whole standard ruleset: 42 rules, one per
+    /// code. The engine's own `rule_catalogue_sync` test keeps that table equal
+    /// to its README and to the evaluator, so the CLI no longer checks it.
     #[test]
-    fn standard_set_is_42_unique_rules() {
-        let codes: BTreeSet<&str> = engine::STANDARD_RULES.iter().map(|r| r.0).collect();
-        assert_eq!(engine::STANDARD_RULES.len(), STANDARD_RULE_COUNT);
+    fn evaluates_the_engines_42_standard_rules() {
+        let rules = vericto_engine::standard_rules();
+        let codes: BTreeSet<&str> = rules.iter().map(|r| r.rule_id.as_str()).collect();
+        assert_eq!(STANDARD_RULE_COUNT, 42);
+        assert_eq!(rules.len(), STANDARD_RULE_COUNT);
         assert_eq!(codes.len(), STANDARD_RULE_COUNT, "no duplicate codes");
-        assert_eq!(engine::standard_ruleset().len(), STANDARD_RULE_COUNT);
+    }
+
+    /// The reported versions are the engine's, in the format 1.9.0 shipped.
+    #[test]
+    fn versions_are_the_engines() {
+        assert_eq!(ENGINE_VERSION, vericto_engine::ENGINE_VERSION);
+        assert_eq!(
+            ruleset_version(),
+            format!("standard@engine-{}", vericto_engine::ENGINE_VERSION)
+        );
     }
 
     #[test]
@@ -411,70 +326,6 @@ mod tests {
         assert!(
             block.contains(&format!("version = \"{ENGINE_VERSION}\"")),
             "ENGINE_VERSION {ENGINE_VERSION} differs from Cargo.lock:\n{block}"
-        );
-    }
-
-    /// The standard set is the engine catalogue: same codes and severities as
-    /// the `VERICTO-NNN` rows of the engine README (which the engine's own
-    /// `rule_catalogue_sync` test keeps equal to its evaluator). Fails on an
-    /// engine bump that adds, drops or re-grades a rule until this table follows.
-    #[test]
-    fn matches_engine_catalogue() {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let out = std::process::Command::new(cargo)
-            .args(["metadata", "--format-version", "1", "--locked"])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .output()
-            .expect("run cargo metadata");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        let manifest = meta["packages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["name"] == "vericto-engine")
-            .and_then(|p| p["manifest_path"].as_str())
-            .expect("vericto-engine in the graph")
-            .to_string();
-        let readme_path = std::path::Path::new(&manifest).with_file_name("README.md");
-        let readme = std::fs::read_to_string(readme_path).expect("engine README");
-        let mut severity = None;
-        let mut catalogue = BTreeMap::new();
-        for line in readme.lines() {
-            if let Some(h) = line.strip_prefix("### ") {
-                severity = match h.trim() {
-                    "Critical" => Some(Severity::Critical),
-                    "High" => Some(Severity::High),
-                    "Medium" => Some(Severity::Medium),
-                    "Low" => Some(Severity::Low),
-                    "Informational" => Some(Severity::Informational),
-                    _ => None,
-                };
-                continue;
-            }
-            let Some(row) = line.trim_start().strip_prefix("| VERICTO-") else {
-                continue;
-            };
-            let digits: String = row.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.is_empty() || !row[digits.len()..].trim_start().starts_with('|') {
-                continue;
-            }
-            catalogue.insert(
-                format!("VERICTO-{digits}"),
-                severity.expect("severity section"),
-            );
-        }
-        let ours: BTreeMap<String, Severity> = engine::STANDARD_RULES
-            .iter()
-            .map(|(c, s, _)| (c.to_string(), *s))
-            .collect();
-        assert_eq!(
-            ours, catalogue,
-            "standard set differs from the engine catalogue"
         );
     }
 
@@ -496,8 +347,10 @@ mod tests {
         assert_eq!(r.action.as_deref(), Some("flag"));
     }
 
-    /// A capped DROP must not hide a blocking statement later in the file:
-    /// the engine alone reports VERICTO-010 (FLAGGED) for this input.
+    /// A capped DROP must not hide a blocking statement later in the file.
+    /// Engine 4.1.3 reported VERICTO-010 (FLAGGED) for this input and 1.9.0
+    /// corrected it locally; since engine 4.2.0 the engine's own decision is
+    /// the strongest resolved action, and this pins the same outcome.
     #[test]
     fn a_capped_ddl_does_not_hide_a_block_in_the_same_file() {
         let r = one(
@@ -594,7 +447,7 @@ mod tests {
         assert_eq!(resp.summary.blocked, 1);
         assert_eq!(resp.summary.allowed, 1);
         assert_eq!(resp.exit_code, 1);
-        assert_eq!(resp.summary.ruleset_version, "standard@engine-4.1.3");
+        assert_eq!(resp.summary.ruleset_version, "standard@engine-4.2.0");
         assert_eq!(
             resp.mode,
             RunMode::Offline {
