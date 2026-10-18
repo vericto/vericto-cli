@@ -96,6 +96,17 @@ unchanged.
   so a toolchain break shows up before the tag. Nothing is published from a
   pull request.
 
+### Fixed
+- **`VERICTO_ALLOW_UNSANITIZED=1` works.** The variable accepted only `true`
+  and `false`, so `=1` was a usage error. It now reads values as
+  `VERICTO_OFFLINE` does, in `check`, `baseline` and `baseline prune`, and
+  both read them the same way: `1`, `true`, `yes` and `on` turn the flag on,
+  `0`, `false`, `no` and `off` leave it off, in any case and with surrounding
+  spaces ignored. An empty value is the same as unset, as in the SDKs (an
+  empty `VERICTO_OFFLINE` was an error), and anything else exits `2` with an
+  error that names the variable. One parser serves both, and a test checks
+  that every boolean flag with an environment variable uses it.
+
 ### Notes
 - **Windows is online-only for now.** The Windows build does not embed the
   engine yet: `--offline` and `VERICTO_OFFLINE=1` exit `2` there with a message

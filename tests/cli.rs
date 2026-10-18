@@ -3485,6 +3485,124 @@ fn vericto_offline_env_selects_offline_mode() {
         .code(3);
 }
 
+/// What an env-backed boolean reads each value as; `None` is a usage error.
+const ENV_BOOL_CASES: [(&str, Option<bool>); 8] = [
+    ("1", Some(true)),
+    ("0", Some(false)),
+    ("TRUE", Some(true)),
+    ("yes", Some(true)),
+    ("on", Some(true)),
+    (" off ", Some(false)),
+    ("", Some(false)),
+    ("maybe", None),
+];
+
+/// `VERICTO_OFFLINE`: on selects offline mode (a build without the engine
+/// exits 2 and says so); off and empty are the same as unset, so in CI with no
+/// key the run is exit 3; anything else is exit 2 naming the variable.
+#[test]
+fn vericto_offline_env_reads_boolish_values() {
+    let engine = cfg!(all(
+        feature = "offline",
+        any(not(windows), vericto_windows_offline)
+    ));
+    for (value, want) in ENV_BOOL_CASES {
+        let out = vericto()
+            .args(["check", "--format", "json", "-"])
+            .env("VERICTO_OFFLINE", value)
+            .env("CI", "true")
+            .env("VERICTO_API_URL", "http://127.0.0.1:1")
+            .write_stdin("DELETE FROM users;")
+            .output()
+            .unwrap();
+        let err = stderr_of(&out);
+        match want {
+            Some(true) if engine => {
+                assert_eq!(out.status.code(), Some(1), "{value:?}: {err}");
+                let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+                assert_eq!(v["mode"], "offline", "{value:?}");
+            }
+            Some(true) => {
+                assert_eq!(out.status.code(), Some(2), "{value:?}: {err}");
+                assert!(err.contains("online mode"), "{value:?}: {err}");
+            }
+            Some(false) => assert_eq!(out.status.code(), Some(3), "{value:?}: {err}"),
+            None => {
+                assert_eq!(out.status.code(), Some(2), "{value:?}: {err}");
+                assert!(
+                    err.contains("invalid value 'maybe' for VERICTO_OFFLINE"),
+                    "{err}"
+                );
+            }
+        }
+    }
+}
+
+/// `VERICTO_ALLOW_UNSANITIZED` reads the same values in `check`, `baseline`
+/// and `baseline prune`. With `/ci/config` unreadable, on sends the SQL as-is
+/// (exit 0); off and empty are the same as unset and fail closed (exit 4);
+/// anything else is exit 2 naming the variable.
+#[tokio::test]
+async fn vericto_allow_unsanitized_env_reads_boolish_values() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/check-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(check_body(&["BLOCKED"])))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("s.sql");
+    std::fs::write(&sql, "DELETE FROM users;").unwrap();
+    let sql = sql.to_str().unwrap();
+    let recorded = dir.path().join("recorded.json");
+    let recorded = recorded.to_str().unwrap();
+    let out = dir.path().join("out.json");
+    let out = out.to_str().unwrap();
+    // A baseline with the finding in it: `baseline prune` returns early on an
+    // empty one, and `check --baseline` passes with it.
+    vericto()
+        .args(["baseline", sql, "--out", recorded, "--allow-unsanitized"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0);
+
+    let runs: [&[&str]; 3] = [
+        &["check", sql, "--quiet", "--baseline", recorded],
+        &["baseline", sql, "--out", out],
+        &["baseline", "prune", sql, "--file", recorded, "--dry-run"],
+    ];
+    for args in runs {
+        for (value, want) in ENV_BOOL_CASES {
+            let run = vericto()
+                .args(args)
+                .env("VERICTO_ALLOW_UNSANITIZED", value)
+                .env("VERICTO_API_KEY", "vtro_k")
+                .env("VERICTO_API_URL", server.uri())
+                .output()
+                .unwrap();
+            let err = stderr_of(&run);
+            let code = match want {
+                Some(true) => 0,
+                Some(false) => 4,
+                None => 2,
+            };
+            assert_eq!(run.status.code(), Some(code), "{args:?} {value:?}: {err}");
+            if want.is_none() {
+                assert!(
+                    err.contains("invalid value 'maybe' for VERICTO_ALLOW_UNSANITIZED"),
+                    "{args:?}: {err}"
+                );
+            }
+        }
+    }
+}
+
 /// In CI a run with no credential stays exit 3 and points at --offline.
 #[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
 #[test]

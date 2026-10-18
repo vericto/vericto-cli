@@ -120,6 +120,54 @@ fn backend_compat(api_version: &str) -> Compat {
     }
 }
 
+/// The value parser of every boolean flag that can also be set from an
+/// environment variable (`VERICTO_OFFLINE`, `VERICTO_ALLOW_UNSANITIZED`). The
+/// default bool parser accepts only `true` and `false`, so `=1` was rejected.
+/// This one reads clap's boolish values (`1`/`0`, `true`/`false`, `yes`/`no`,
+/// `on`/`off`), case-insensitive and with surrounding whitespace trimmed. An
+/// empty value counts as unset, as in the SDKs, and anything else is a usage
+/// error (exit 2) that names the variable.
+#[derive(Clone, Copy)]
+struct EnvBool;
+
+impl clap::builder::TypedValueParser for EnvBool {
+    type Value = bool;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<bool, clap::Error> {
+        let text = value.to_string_lossy();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+        // No `arg`: its error is replaced below, so it need not render it.
+        clap::builder::BoolishValueParser::new()
+            .parse_ref(cmd, None, std::ffi::OsStr::new(trimmed))
+            .map_err(|_| {
+                // A flag takes no value on the command line, so a value that
+                // reaches this point came from the environment.
+                let name = match arg {
+                    Some(a) => match a.get_env() {
+                        Some(var) => var.to_string_lossy().into_owned(),
+                        None => a.to_string(),
+                    },
+                    None => "the flag".to_string(),
+                };
+                cmd.clone().error(
+                    clap::error::ErrorKind::InvalidValue,
+                    format!(
+                        "invalid value '{text}' for {name}: use 1, true, yes or on to \
+                         turn it on, and 0, false, no, off or an empty value to leave it off"
+                    ),
+                )
+            })
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "vericto",
@@ -232,7 +280,7 @@ struct BaselinePruneArgs {
     /// If the workspace config (`GET /ci/config`) can't be read, send the SQL
     /// as-is instead of failing with exit 4. Without it the CLI fails closed:
     /// it can't know whether the workspace requires sanitized mode (§6.2).
-    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED")]
+    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED", value_parser = EnvBool)]
     allow_unsanitized: bool,
 
     #[command(flatten)]
@@ -269,7 +317,7 @@ struct BaselineArgs {
     /// If the workspace config (`GET /ci/config`) can't be read, send the SQL
     /// as-is instead of failing with exit 4. Without it the CLI fails closed:
     /// it can't know whether the workspace requires sanitized mode (§6.2).
-    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED")]
+    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED", value_parser = EnvBool)]
     allow_unsanitized: bool,
 
     /// Vericto API key (or set VERICTO_API_KEY, or `vericto login`).
@@ -822,7 +870,7 @@ struct CheckArgs {
     /// If the workspace config (`GET /ci/config`) can't be read, send the SQL
     /// as-is instead of failing with exit 4. Without it the CLI fails closed:
     /// it can't know whether the workspace requires sanitized mode (§6.2).
-    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED")]
+    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED", value_parser = EnvBool)]
     allow_unsanitized: bool,
 
     /// Break-glass: if the backend is unreachable from the first request,
@@ -845,13 +893,7 @@ struct CheckArgs {
     /// default severities: no network, no workspace rules or overrides, no
     /// audit record. Chosen automatically outside CI when no API key, login or
     /// OIDC token is present.
-    // Boolish, so `VERICTO_OFFLINE=1` (and yes/on/true, 0/no/off/false) works;
-    // the default bool parser accepts only `true` and `false`.
-    #[arg(
-        long,
-        env = "VERICTO_OFFLINE",
-        value_parser = clap::builder::BoolishValueParser::new()
-    )]
+    #[arg(long, env = "VERICTO_OFFLINE", value_parser = EnvBool)]
     offline: bool,
 }
 
@@ -3287,5 +3329,127 @@ mod tests {
     fn fail_on_any_trips_on_monitored_too() {
         assert!(has_failure(&resp_with(&["MONITORED"]), FailOn::Any));
         assert!(!has_failure(&resp_with(&["ALLOWED"]), FailOn::Any));
+    }
+
+    /// What an env-backed boolean reads each value as; `None` is a usage error.
+    const ENV_BOOL_CASES: &[(&str, Option<bool>)] = &[
+        ("1", Some(true)),
+        ("0", Some(false)),
+        ("TRUE", Some(true)),
+        ("yes", Some(true)),
+        ("on", Some(true)),
+        (" off ", Some(false)),
+        ("", Some(false)),
+        ("maybe", None),
+    ];
+
+    #[test]
+    fn env_bool_reads_boolish_values() {
+        use clap::builder::TypedValueParser;
+        let cmd = clap::Command::new("vericto");
+        let arg = clap::Arg::new("flag")
+            .long("flag")
+            .env("VERICTO_TEST_ENV_BOOL");
+        let extra: &[(&str, Option<bool>)] = &[
+            ("False", Some(false)),
+            ("\tON\n", Some(true)),
+            ("   ", Some(false)),
+            ("2", None),
+            ("enabled", None),
+        ];
+        for (value, want) in ENV_BOOL_CASES.iter().chain(extra) {
+            let got = EnvBool.parse_ref(&cmd, Some(&arg), std::ffi::OsStr::new(value));
+            match want {
+                Some(b) => assert_eq!(got.ok(), Some(*b), "{value:?}"),
+                None => {
+                    let err = got.unwrap_err().to_string();
+                    assert!(
+                        err.contains(&format!(
+                            "invalid value '{value}' for VERICTO_TEST_ENV_BOOL"
+                        )),
+                        "{err}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every boolean flag that has an environment variable, in every
+    /// subcommand, goes through `EnvBool`: each value is fed to the real
+    /// argument (as its default, which clap parses with the argument's own
+    /// parser) and must read the same way everywhere.
+    #[test]
+    fn every_env_backed_flag_uses_env_bool() {
+        type Flag = (Vec<String>, String, String);
+        fn collect(cmd: &clap::Command, path: &mut Vec<String>, out: &mut Vec<Flag>) {
+            for a in cmd.get_arguments() {
+                let is_flag = matches!(
+                    a.get_action(),
+                    clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
+                );
+                if let (Some(var), true) = (a.get_env(), is_flag) {
+                    let var = var.to_string_lossy().into_owned();
+                    out.push((path.clone(), a.get_id().to_string(), var));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                path.push(sub.get_name().to_string());
+                collect(sub, path, out);
+                path.pop();
+            }
+        }
+        fn with_default(
+            cmd: clap::Command,
+            path: &[String],
+            id: &str,
+            v: &'static str,
+        ) -> clap::Command {
+            match path.split_first() {
+                Some((first, rest)) => cmd.mut_subcommand(first, |s| with_default(s, rest, id, v)),
+                None => cmd.mut_arg(id, |a| a.default_value(v)),
+            }
+        }
+
+        let mut built = Cli::command();
+        built.build();
+        let mut flags = Vec::new();
+        collect(&built, &mut Vec::new(), &mut flags);
+        let found: Vec<String> = flags
+            .iter()
+            .map(|(path, _, var)| format!("{} {var}", path.join(" ")))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "check VERICTO_ALLOW_UNSANITIZED",
+                "check VERICTO_OFFLINE",
+                "baseline VERICTO_ALLOW_UNSANITIZED",
+                "baseline prune VERICTO_ALLOW_UNSANITIZED",
+            ],
+            "a new env-backed flag must use value_parser = EnvBool and be listed here"
+        );
+
+        for (path, id, var) in &flags {
+            for (value, want) in ENV_BOOL_CASES {
+                let cmd = with_default(Cli::command(), path, id, value);
+                let argv = std::iter::once("vericto").chain(path.iter().map(String::as_str));
+                match (cmd.try_get_matches_from(argv), want) {
+                    (Ok(m), Some(b)) => {
+                        let m = path
+                            .iter()
+                            .fold(&m, |m, p| m.subcommand_matches(p).unwrap());
+                        assert_eq!(m.get_one::<bool>(id), Some(b), "{var}={value:?}");
+                    }
+                    (Err(e), None) => {
+                        let err = e.to_string();
+                        assert!(
+                            err.contains(&format!("invalid value '{value}' for {var}")),
+                            "{err}"
+                        );
+                    }
+                    (got, _) => panic!("{var}={value:?}: {:?}", got.map(|_| ())),
+                }
+            }
+        }
     }
 }
