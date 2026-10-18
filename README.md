@@ -3,9 +3,10 @@
 > Validate SQL against your Vericto workspace's security rules **before** it runs —
 > in pre-commit hooks and CI/CD pipelines.
 
-The installed command is `vericto`. It is a **thin client**: it sends SQL to the
+The installed command is `vericto`. By default it is a **thin client**: it sends SQL to the
 Vericto backend (`POST /api/v1/ci/check-key`, API-key auth) and mirrors the verdict
-as a process exit code. It does not evaluate locally. Available on **every plan**
+as a process exit code. With `--offline` it evaluates locally instead, with the
+embedded engine and the standard rules only (see [Offline mode](#offline-mode)). Available on **every plan**
 — checks are metered by a monthly CLI allowance (free tier included; team/
 enterprise unmetered). See [DESIGN.md](https://github.com/vericto/vericto-cli/blob/main/DESIGN.md) for the full design.
 
@@ -33,7 +34,8 @@ npm install -g @vericto/vericto-cli      # or, zero-install: npx @vericto/verict
 # Shell installer (Linux/macOS)
 curl -fsSL https://github.com/vericto/vericto-cli/releases/latest/download/vericto-cli-installer.sh | sh
 
-# Docker (CI runners that prefer an image step)
+# Docker (CI runners that prefer an image step). The image sets CI=true, so a
+# missing key is exit 3 there, never an automatic offline run.
 docker run --rm -e VERICTO_API_KEY ghcr.io/vericto/vericto-cli:latest check migrations/*.sql
 
 # Or download a prebuilt binary directly:
@@ -62,8 +64,14 @@ cargo install --path .
 > (`scoop install vericto`), pending a bucket repo; on Windows, use npm or the
 > prebuilt binary.
 
-> The CLI is a network-only thin client — it always evaluates against your live
-> Vericto workspace. There is no offline/local mode.
+> Building from source needs a C compiler and libclang (the embedded engine's
+> `pg_query` compiles PostgreSQL's parser and runs bindgen): Xcode Command Line
+> Tools on macOS, `clang` and `libclang-dev` on Debian/Ubuntu. The
+> `rust:*-alpine` images cannot load libclang from a build script; build in a
+> Debian container targeting musl, as the `Dockerfile` does. To build the thin
+> client only, without offline mode:
+> `cargo install --path . --no-default-features`. See
+> [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ### Verifying a download
 
@@ -493,6 +501,7 @@ vericto check schema.sql --monitor
 | `--oidc-token-env <VAR>` | `VERICTO_ID_TOKEN` | Env var holding a pre-minted OIDC token (GitLab-style) |
 | `--quiet` / `-q` | off | Only print the summary line |
 | `--no-color` | off | Disable ANSI color (also auto-off for non-TTY / `NO_COLOR`) |
+| `--offline` | off | Evaluate locally with the standard rules, no network (`$VERICTO_OFFLINE`); see [Offline mode](#offline-mode) |
 
 `--dialect`, `--fail-on` and `--baseline` fall back to `.vericto.toml`, then their
 defaults.
@@ -526,6 +535,75 @@ default_dialect = "postgres"
 
 Distinct non-zero codes let CI distinguish a real block from an outage.
 
+## Offline mode
+
+```bash
+# No account, no network: the standard rules at their default severities
+vericto check --offline migrations/*.sql
+git show :db/schema.sql | vericto check --offline - --dialect mysql
+VERICTO_OFFLINE=1 vericto check db/migrate/
+```
+
+`--offline` (or `VERICTO_OFFLINE=1`) evaluates on your machine with the engine
+built into the binary (`vericto-engine` 4.1.3) and its **42 standard rules at
+their default severities**: Critical and High block, Medium flags, Low is
+monitored, and, as in every online CI check, schema changes (DROP, ALTER,
+TRUNCATE) are flagged rather than blocked. No request is made, to Vericto or
+anyone else, and the SQL never leaves the machine. `--dialect`, `--fail-on`,
+`--format`, `--output`, `--quiet`, `--monitor`, `--baseline`, inline
+`-- vericto:ignore[...]`, `--changed` and `--since` (a local git diff) all work
+as online, and the exit codes are the same.
+
+It is a baseline gate: "is this SQL obviously dangerous?". It is not your
+workspace's policy and not evidence that a check took place. Log in for your
+workspace's rules and for the record.
+
+### Offline and online compared
+
+| | Offline (`--offline`) | Online (default) |
+|---|---|---|
+| Account, network | none; nothing leaves the machine | API key, login or OIDC; SQL goes to your workspace |
+| Rules | the 42 standard rules, at their default severities | your workspace's rules: standard rules with your overrides, plus custom rules |
+| Engine | the one in the binary (4.1.3 in 1.9.0) | the server's, always current |
+| Schema DDL (DROP, ALTER, TRUNCATE) | flagged, as in every CI check | your workspace's policy, with the same CI cap |
+| Sensitive columns, masking, agent allowlists, observe mode | no | yes |
+| Parse errors | allowed and reported | your workspace's parse-error policy |
+| Granularity | one result per file, with its strongest finding | one result per statement, at its line |
+| Audit trail, run reports | no record anywhere | every check recorded, with CI provenance |
+| Signed receipts (`--receipt`) | refused (exit `2`) | yes |
+| Baselines | inline suppressions work; a baseline recorded online does not match offline findings | yes |
+| Metered | no | counts against the plan's monthly CLI allowance |
+| Windows | not yet (`--offline` exits `2`) | yes |
+
+### Which mode a run uses
+
+- `--offline` or `VERICTO_OFFLINE=1`: offline, also in CI, even if a key is set.
+- Outside CI, with no API key, no login and no OIDC token: offline on its own,
+  and it says so on stderr.
+- In CI (any of `CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI`,
+  `JENKINS_URL`, `TF_BUILD`, `BITBUCKET_BUILD_NUMBER`, `TEAMCITY_VERSION`,
+  `CODEBUILD_BUILD_ID`), a missing credential stays exit `3`: a pipeline whose
+  secret went missing must not quietly fall back to fewer rules. Pass
+  `--offline` there to choose it.
+- Otherwise online. A present but invalid key is exit `3`, and an unreachable
+  backend is exit `4` (or `--allow-degraded`): neither ever switches to offline.
+- `.vericto.toml` cannot choose it: a committed `offline` key is rejected
+  (exit `2`), like `api_key` and `allow_degraded`.
+
+`--receipt`, `--oidc`, `--allow-degraded` and `--allow-unsanitized` need a
+workspace, so offline mode refuses them (exit `2`) rather than ignoring them.
+
+Every offline result says where it came from: `mode: offline` with the engine
+version in the text summary and the CI failure header, `"mode": "offline"` and
+`"engine_version"` in `--format json`, a `properties` bag (mode, engine and
+ruleset version) in SARIF, a note on each finding in the GitLab reports, and
+`Vericto (offline)` as the title of GitHub annotations. The ruleset version is
+`standard@engine-<version>`. Online JSON and SARIF carry `"mode": "online"`.
+
+A file with several statements reports the finding with the strongest action:
+in `DROP TABLE a; UPDATE accounts SET balance = 0;` the DROP is flagged, but
+the WHERE-less UPDATE blocks, so the file is BLOCKED and the run fails.
+
 ## CI/CD
 
 GitHub and GitLab are both first-class: findings render inline on PRs/MRs, not
@@ -556,7 +634,8 @@ vericto-check:
 
 ## Known limitations
 
-- Requires network access to the Vericto backend. No offline mode. The API key
+- Workspace checks require network access to the Vericto backend; offline mode
+  covers the standard rules only (see above). The API key
   needs the `ci_dryrun:execute` scope; checks count against the plan's monthly
   CLI allowance (free tier included).
 - Findings are reported **per statement, at their line**, when the backend

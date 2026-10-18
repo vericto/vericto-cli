@@ -46,8 +46,22 @@ cargo build
 cargo test
 ```
 
-Requires Rust 1.88+ (`rust-version` in `Cargo.toml`). The npm installer tests
-need Node 18+ and no dependencies. Tests never reach the real Vericto API: the
+Requires Rust 1.88+ (`rust-version` in `Cargo.toml`), a C compiler, libclang
+and clang's own headers: the default `offline` feature embeds `vericto-engine`,
+whose `pg_query` compiles PostgreSQL's parser and runs bindgen.
+
+- macOS: the Xcode Command Line Tools (`xcode-select --install`).
+- Debian/Ubuntu: `sudo apt-get install clang libclang-dev` (`libclang-dev`
+  alone lacks `stdbool.h`); add `musl-tools` to build for
+  `*-unknown-linux-musl`, as the release does.
+- Alpine: build in a Debian container instead (see `Dockerfile`); the
+  `rust:*-alpine` images cannot load libclang from a build script.
+- Windows: offline mode is not built on Windows yet (see DESIGN §13); the
+  default build there is the thin client and needs no libclang.
+
+`cargo build --no-default-features` builds the thin client alone, without the
+engine and without these prerequisites. The npm installer tests need Node 18+
+and no dependencies. Tests never reach the real Vericto API: the
 API client is tested against an in-process `wiremock` server, and
 `tests/cli.rs` runs the built binary, each run with its own empty home.
 
@@ -60,10 +74,14 @@ API client is tested against an in-process `wiremock` server, and
    ```bash
    cargo fmt --all --check
    cargo clippy --all-targets --all-features -- -D warnings
+   cargo clippy --all-targets --no-default-features -- -D warnings
    cargo build --locked --all-targets
    cargo test --locked
+   cargo test --locked --no-default-features
    (cd npm-installer && npm test)
    ```
+   The `--no-default-features` runs are the Windows-shaped build, where the
+   engine is absent and `--offline` exits 2.
    If you change dependencies, also run the supply-chain job
    (`cargo-deny` 0.20.2 and `cargo-audit` 0.22.2):
    ```bash
@@ -75,7 +93,7 @@ API client is tested against an in-process `wiremock` server, and
 ### Coverage
 
 CI does not gate on coverage. Line coverage of the unit and integration tests
-is 91.2%, measured with
+is 92.3% (1.9.0, default features), measured with
 [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov); keep it there:
 
 ```bash

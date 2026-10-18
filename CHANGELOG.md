@@ -6,6 +6,129 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-18
+
+**Offline mode.** `vericto check --offline` checks SQL on your machine with the
+engine built into the binary and its standard rules, with no account and no
+network. Until now the CLI was online-only by design, "no offline mode, ever";
+that decision is reversed for the standard rules only, and DESIGN §1, §12.4,
+§13 and §14 record the new one, its limits, and why online stays the product:
+your workspace's own policy (custom rules, overrides, sensitive columns and
+masking, agent allowlists), the audit trail and signed receipts are online
+only, and an offline result says so wherever it appears. Online checks are
+unchanged.
+
+### Added
+- **`vericto check --offline`, or `VERICTO_OFFLINE=1`.** It evaluates with
+  `vericto-engine` 4.1.3, pinned by tag, and its 42 standard rules at their
+  default severities, under the policy a CI check gets in a workspace without
+  overrides: Critical and High block, Medium flags, Low is monitored, parse
+  errors are reported without failing, and schema changes (DROP, ALTER,
+  TRUNCATE) are flagged rather than blocked, as online CI caps them. Statuses
+  are the ones online checks report. Every output format, `--fail-on`,
+  `--monitor`, `--baseline`, inline suppressions, files, stdin, `--sql`,
+  `--changed` and `--since` work as online, with the same exit codes. Each file
+  is one result, with its strongest finding. On the engine's own corpora
+  (1,452 statements in four dialects) offline mode gives the engine's verdict
+  every time.
+- **No request of any kind.** The offline path returns before an HTTP client
+  exists: no check, no workspace config, no telemetry, no OIDC token fetch.
+  A test points the API URL, every proxy variable and the GitHub OIDC endpoint
+  at recording servers, runs every format from a file, stdin and `--sql`, and
+  checks that nothing arrived.
+- **Every result names its mode.** The text summary and the CI failure header
+  read `(ruleset standard@engine-4.1.3 · mode: offline (engine 4.1.3, 42
+  standard rules, no workspace policy))`; JSON has `"mode"` and
+  `"engine_version"` at the top level; SARIF has a run `properties` bag with
+  the mode, the engine version and the ruleset version; each GitLab Code
+  Quality and SAST finding carries the same note; GitHub annotations are
+  titled `Vericto (offline)`. A note on stderr states the limits. Online JSON
+  and SARIF gain the same fields with `"mode": "online"` and
+  `"engine_version": null`; online text output is unchanged.
+- **The strongest action decides.** Engine 4.1.3 picks the finding to report
+  by severity, then rule code, after the CI cap. In a file holding
+  `DROP TABLE a; UPDATE accounts SET balance = 0;` that is the DROP (Critical,
+  capped to flag), so the file would pass with a WHERE-less UPDATE in it.
+  Offline mode reports the finding with the strongest action instead, here
+  the UPDATE (VERICTO-030, BLOCKED), in every format and in the exit code. A
+  single statement's verdict never changes.
+- **Refused, not ignored.** `--receipt`, `--oidc` (and `--audience`,
+  `--oidc-token-env`), `--allow-degraded` and `--allow-unsanitized` need a
+  workspace; with `--offline` they exit `2` and say why.
+- `.vericto.toml` rejects an `offline` key (exit `2`), as it rejects `api_key`
+  and `allow_degraded`: a committed file must not be able to switch CI to
+  fewer rules.
+- A default cargo feature, `offline`. `cargo install --no-default-features`
+  builds the thin client alone, as before.
+
+### Changed
+- **Outside CI, a run with no credential checks offline.** With no API key
+  (flag, environment or config file), no login and no OIDC token, and none of
+  the usual CI variables set (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`,
+  `CIRCLECI`, `JENKINS_URL`, `TF_BUILD`, `BITBUCKET_BUILD_NUMBER`,
+  `TEAMCITY_VERSION`, `CODEBUILD_BUILD_ID`), `vericto check` now gives the
+  offline verdict, with a note on stderr, instead of exit `3`. A first
+  `npx @vericto/vericto-cli check file.sql` or a fresh pre-commit hook gets an
+  answer. **In CI nothing changes:** a missing credential is still exit `3`,
+  now with a hint to pass `--offline`, because a pipeline whose secret went
+  missing must not quietly fall back to fewer rules. A key that is present
+  but invalid is still exit `3`, and an unreachable backend is still exit `4`;
+  neither ever switches to offline mode.
+- **The Docker image sets `CI=true`.** A container does not see the runner's
+  CI variables unless they are passed in, so without it a pipeline whose
+  `VERICTO_API_KEY` secret went missing would check offline instead of
+  failing. In the image a missing key is exit `3`; pass `--offline` to choose
+  offline mode, or `-e CI=` to use the image as a local tool.
+- **The binary is about 3× larger** because it embeds the engine, almost all of
+  it PostgreSQL's parser (libpg_query): on aarch64-apple-darwin 14.0 MiB
+  instead of 4.5 MiB, and the `.tar.xz` download about 3.7 MiB instead of
+  about 1.7 MiB.
+  Start-up time stays under 10 ms (`vericto --version`: 8.4 ms against
+  7.9 ms, median of 60 runs on an M3 Pro).
+- **Building needs a C compiler and libclang.** The release's musl runners and
+  CI install `clang` and `libclang-dev`. The Docker image is built in a Debian
+  builder that cross-compiles to static musl, instead of an Alpine one, whose
+  static build scripts cannot load libclang; the image is still a static
+  binary on distroless. `cargo-deny` allows the engine's git repository as a
+  source, by tag only. CONTRIBUTING lists the prerequisites per platform.
+- **Each pull request now builds every release target** (cargo-dist
+  `pr-run-mode = "upload"`) and uploads the archives as workflow artifacts,
+  so a toolchain break shows up before the tag. Nothing is published from a
+  pull request.
+
+### Fixed
+- **`VERICTO_ALLOW_UNSANITIZED=1` works.** The variable accepted only `true`
+  and `false`, so `=1` was a usage error. It now reads values as
+  `VERICTO_OFFLINE` does, in `check`, `baseline` and `baseline prune`, and
+  both read them the same way: `1`, `true`, `yes` and `on` turn the flag on,
+  `0`, `false`, `no` and `off` leave it off, in any case and with surrounding
+  spaces ignored. An empty value is the same as unset, as in the SDKs (an
+  empty `VERICTO_OFFLINE` was an error), and anything else exits `2` with an
+  error that names the variable. One parser serves both, and a test checks
+  that every boolean flag with an environment variable uses it.
+
+### Notes
+- **Windows is online-only for now.** The Windows build does not embed the
+  engine yet: `--offline` and `VERICTO_OFFLINE=1` exit `2` there with a message
+  saying so, and a run without a credential stays exit `3`. A new,
+  informational CI job builds and tests the engine on `windows-2022`; it is
+  not required, and once it passes, Windows gets offline mode in a later
+  release. Meanwhile, offline mode works under WSL.
+- **Offline is not your workspace.** It has no custom rules, overrides,
+  sensitive columns, allowlists, parse-error policy, audit trail, run reports
+  or receipts, and offline runs are not metered or recorded. One result per
+  file instead of one per statement means a baseline recorded online does not
+  match offline findings: they show up again (fail-closed, but noisy). Inline
+  suppressions work in both modes.
+- **The next release moves to engine 4.2.0.** Engine 4.1.3 exports no standard
+  ruleset and no version, so 1.9.0 carries its own copy of the 42-rule table
+  (a test keeps it equal to the engine's catalogue) and corrects the
+  strongest-action choice itself. Engine 4.2.0, in preparation, exports
+  `standard_rules()` and its version and picks the strongest action in the
+  engine; the CLI will then drop the local table and the local workaround.
+- `VERICTO_OFFLINE` accepts `1`, `true`, `yes` and `on` (and `0`, `false`,
+  `no`, `off`).
+
 ## [1.8.2] - 2026-10-18
 
 A security release for **sanitized mode** (a workspace whose telemetry query

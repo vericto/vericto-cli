@@ -3,8 +3,9 @@
 > Status: **v0.1 (MVP) implemented** — `check`, `login`, `logout`, `doctor`,
 > config file + env/flag resolution, exit codes. Verified end-to-end against the
 > local backend stack.
-> Decisions locked: **thin-client of the SaaS** (no local/offline mode — ever,
-> see §1/§13), **new repo `vericto-cli`**, **Rust**, **HTTP/JSON transport** (gRPC
+> Decisions locked: **thin-client of the SaaS by default**, with an offline mode
+> for the standard rules only (**since 1.9.0; decided 2026-10-18, reversing
+> "no offline mode — ever"**, see §1/§13), **new repo `vericto-cli`**, **Rust**, **HTTP/JSON transport** (gRPC
 > evaluated and rejected — see §3), **whole-file submission** (no client-side
 > statement splitting — see §5 / §12.3), **distribution via `cargo-dist`** —
 > GitHub Releases as the base, then `curl | sh` + Docker (phase 1) and Homebrew +
@@ -28,27 +29,42 @@
 
 `vericto` is a command-line client for validating SQL against a Vericto workspace's
 rules **before** it runs — in pre-commit hooks, code review, and CI/CD pipelines
-("shift-left"). It is a **thin client**: it does not embed the engine or evaluate
-locally. It sends SQL to the Vericto backend and reports the verdict.
+("shift-left"). It has two modes:
+
+- **Online (default): a thin client.** It sends SQL to the Vericto backend and
+  reports the workspace's verdict: its live rules, its enforcement policy, and a
+  record in its audit trail.
+- **Offline (`--offline`, since 1.9.0 — §13).** It evaluates locally with the
+  embedded `vericto-engine` and its standard rules at their default severities,
+  and sends nothing anywhere. A baseline gate that needs no account and no
+  network, not a copy of the workspace. Not in the Windows build yet.
 
 ```
 migration.sql ──► vericto check ──HTTPS──► POST /api/v1/ci/check-key ──► engine
                       │                                                    │
                       └────────────── verdict + exit code ◄───────────────┘
+
+migration.sql ──► vericto check --offline ──► embedded engine, standard rules
+                      │                                │
+                      └── verdict (mode: offline) + exit code ◄┘
 ```
 
 ### Goals
 - One command to gate a pipeline on destructive/unsafe SQL: **exit 1 on block**.
 - Use the workspace's **actual rules and enforcement policy** (same as runtime).
-- Every check is recorded in the **central audit trail** (server-side).
+- Every online check is recorded in the **central audit trail** (server-side).
+- A useful answer with **no account and no network**: the standard rules,
+  offline, in the same output formats and with the same exit codes (§13).
 - Trivial distribution: a single self-contained binary.
 
 ### Non-goals (permanent)
-- **No offline / local evaluation — ever.** The CLI is a thin client by design:
-  it always evaluates against the live workspace (rules + enforcement policy +
-  central audit) over the network. A local-first / embedded-engine mode is
-  explicitly **out of scope** (not merely deferred). Air-gapped CI is a
-  documented limitation, not a gap to close (see §12.4).
+- **No offline evaluation of a workspace's policy.** Offline mode evaluates the
+  engine's standard rules at their default severities and nothing else. Custom
+  rules, severity and action overrides, sensitive columns and masking, agent
+  allowlists and observe mode, the parse-error policy, the audit trail, run
+  reports and signed receipts stay online-only. The CLI does not download,
+  cache, export or sync a workspace ruleset: that is the rule distribution §13
+  rejects. Air-gapped CI gets the standard rules, not the workspace's (§12.4).
 - No proxying or query execution — it only *evaluates*.
 - No rule authoring UI (rules are managed in the dashboard).
 
@@ -577,7 +593,8 @@ about what it writes and where:
   server are shown as their human message only (§ `extract_message`), never raw
   auth headers.
 - **SQL is user data, not a secret to the CLI — but it leaves the machine.** By
-  design the SQL is sent to the customer's own Vericto tenant for evaluation (§13).
+  design the SQL is sent to the customer's own Vericto tenant for evaluation (§13);
+  with `--offline` it is evaluated on the machine and sent nowhere.
   The CLI never persists SQL locally beyond the request. Output shows a truncated
   `sql_preview` (returned by the server); `--quiet` prints only the summary line
   for logs that shouldn't echo query text at all.
@@ -908,8 +925,9 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   a future `vericto reports list`/`show` CLI command could consume it, but
   isn't implemented yet.
 - **Decided against (won't build):** server-side reconciliation of degraded runs
-  (§6.5 — the local record + CI artifact is the final design); local-first /
-  offline mode (§1/§13).
+  (§6.5 — the local record + CI artifact is the final design); offline
+  evaluation of a workspace's policy (§1/§13). Offline mode for the standard
+  rules, once on this list, shipped in 1.9.0 (§13).
 
 ## 12. Open questions (need product decisions)
 
@@ -992,30 +1010,171 @@ turns the build red on day one — the fastest way to get uninstalled. So:
    capability `check_files`) and returns every statement with its line, so the
    CLI annotates exact lines without a client tokenizer; the whole-file shape
    remains the fallback for older backends.
-4. **Backend availability in air-gapped CI — RESOLVED (won't fix).** A thin
-   client can't run where the runner has no egress to `api.vericto.com`. This is an
-   **accepted, permanent limitation**, documented as such. There is no local /
-   offline fallback (§1); air-gapped environments are simply not a supported
-   audience for the CLI.
+4. **Backend availability in air-gapped CI — REVISED 2026-10-18 (1.9.0, §13).**
+   This was "won't fix": air-gapped environments were not a supported audience
+   for the CLI. A runner
+   with no egress to `api.vericto.com` can run `vericto check --offline`: the
+   engine's standard rules, evaluated locally, with nothing sent. What it cannot
+   get is the workspace: custom rules and overrides, sensitive columns, agent
+   allowlists, the audit trail, run reports and receipts all need the backend.
+   Say exactly that to an air-gapped buyer: offline mode is a deterministic,
+   versioned baseline gate (`standard@engine-X.Y.Z`), not their policy and not
+   compliance evidence. Shipping a workspace's ruleset into the air gap (an
+   export, a cache, a sync) stays out of scope (§1, §13). Offline mode is not a
+   fallback either: an unreachable backend is still exit `4` (or the §6.5
+   break-glass), never a silent switch to fewer rules. Windows runners get it
+   once the Windows build embeds the engine (§13, "Windows").
 
-## 13. Why thin-client, and why *not* local-first (decision)
+## 13. Online by default, offline for the standard rules (decision, revised 2026-10-18)
 
-We chose thin-client to reuse the workspace's live rules + enforcement policy +
-central audit with zero new evaluation code, and this is now a **settled
-decision, not a stepping stone**. The tradeoffs are accepted permanently:
+**Status: approved by the owner on 2026-10-18 and shipped in 1.9.0.** It
+reverses the earlier "no offline mode — ever" decision, and replaces this
+section's previous title, "Why thin-client, and why *not* local-first". The
+evidence is the offline-mode spike of the same day: 0 differences against the
+engine on 1,461 corpus entries, no measurable cold-start cost, about 19 µs per
+statement, and four of the five release targets built and run.
 
-- **Requires network egress** to the customer's Vericto backend (air-gapped CI is
-  unsupported — §12.4).
-- **SQL leaves the machine** — sent to the customer's own Vericto tenant for
-  evaluation.
+**The earlier decision.** The CLI was a thin client, "no offline evaluation —
+ever": it reused the workspace's live rules, enforcement policy and central
+audit with no evaluation code of its own, and accepted two costs — network
+egress (no air-gapped CI) and SQL leaving the machine. The reasons were that a
+local evaluator would either duplicate rule distribution (ship the workspace's
+rules to every laptop and runner, and keep them fresh) or evaluate something
+other than the live ruleset, and that it would forgo the audit record.
 
-In exchange the CLI always reflects the *live* ruleset and every check lands in
-the central audit trail — properties a local/offline evaluator could not offer
-without duplicating rule distribution and forgoing the audit record. A
-local-first / embedded-engine mode is **explicitly out of scope** (§1); the CLI
-will not ship an offline evaluator. Rust remains the right choice on stack
-consistency and single-binary distribution grounds alone (§3) — the earlier
-"keeps local-first open" rationale no longer applies and has been removed.
+**What changed.** The engine is public (Elastic-2.0) and already embedded
+in-process by `vericto-proxy`, which seeds a built-in catalogue of the standard
+rules so it protects before its first sync and in air-gapped deployments. The
+standard rules are a function of the engine version alone, so they need no
+distribution: they ship *with* the binary. And three costs of "network-only"
+showed up: the first run needs an account before it says anything, air-gapped
+prospects are disqualified outright, and a SQL file that must not leave the
+machine cannot be checked at all.
+
+**Why reverse it.** Those three costs fall on exactly the people a SQL gate
+should win first: someone trying it without an account, a regulated team whose
+runners have no egress, and a team whose SQL must stay on the machine. The
+standard rules fix all three without touching the reasons for the earlier
+decision, which were about the *workspace's* rules: no workspace rules are
+distributed, and nothing an offline run produces passes for the workspace's
+verdict or its audit record.
+
+**The decision.** `vericto check --offline` evaluates locally with the
+embedded engine (`vericto-engine` 4.1.3, pinned by tag) and its **standard
+rules at their default severities**:
+
+- **Rule set:** the 42 standard rules, the table vericto-proxy seeds
+  (`evaluator::default_ruleset`); a test keeps it equal to the engine README's
+  catalogue, so an engine bump that adds or re-grades a rule fails the build
+  until the CLI follows. Engine 4.1.3 exports no ruleset, so the CLI carries
+  this table itself.
+- **Policy:** what a CI check gets in a workspace with no overrides —
+  `EnforcementPolicy::default()` (Critical/High → BLOCK, Medium → FLAG,
+  Low/Informational → MONITOR, parse errors allowed and reported) plus the CI
+  channel's `schema_migration_cap = flag`, as the backend sets for every CI
+  check. Without the cap a migration's DROP/ALTER would block offline and only
+  flag online.
+- **Statuses:** vericto-eval's mapping (`ALLOWED`, `MONITORED`, `FLAGGED`,
+  `BLOCKED`, `PARSE_ERROR`), so a result reads the same in both modes.
+- **Granularity:** one result per input file (the shape older backends return,
+  §12.3), with one correction: the engine picks its winner by severity then
+  rule code, after the CI cap, so in a multi-statement file a capped `DROP
+  TABLE` (Critical, FLAG) would outrank a WHERE-less `UPDATE` (Critical, BLOCK)
+  and the file would pass. Offline reports the violation with the strongest
+  resolved action instead, with the engine's order breaking ties, so no
+  single-statement outcome changes. Every output format and the exit code read
+  that one status, so `DROP TABLE a; UPDATE accounts SET balance = 0;` is
+  BLOCKED (VERICTO-030) everywhere and fails the run. (The same ordering
+  affects any whole-file evaluation online — the legacy `queries` shape and
+  scripts the backend splitter keeps whole — and engine 4.2.0 fixes it in the
+  engine.) Exact lines need the statement splitter,
+  which lives in the backend (`sql-split.ts`); moving it into the engine would
+  give offline mode, the backend and MCP one splitter.
+- **Marked everywhere:** `mode: offline`, the engine version and
+  `ruleset_version = standard@engine-X.Y.Z` in every output format, plus a
+  stderr note. An offline result must never pass for a workspace verdict.
+- **No network:** the offline branch returns before any client is built; an
+  integration test points the API URL, every proxy variable and the GitHub OIDC
+  endpoint at recording mock servers and asserts they receive nothing.
+- **Refused, not ignored:** `--receipt`, `--oidc`, `--allow-degraded` and
+  `--allow-unsanitized` exit `2` offline, with a pointer to online mode.
+- **When:** `--offline` / `VERICTO_OFFLINE=1`, or automatically when there is
+  no credential of any kind (no API key from the flag, the environment or the
+  config file, no login, no OIDC token) **and the run is not in CI**. In CI a
+  missing credential stays exit `3`: a pipeline whose secret went missing must
+  not quietly downgrade to fewer rules. A credential present never switches
+  modes; an unreachable backend is never a reason to go offline (§12.4).
+  `.vericto.toml` cannot turn it on: an `offline` key there is rejected (exit
+  `2`), next to `api_key` and `allow_degraded`, because a committed file must
+  not be able to swap CI's rule set in a PR. The Docker image sets `CI=true`,
+  because a container does not see the runner's CI variables unless they are
+  passed in.
+- **Build:** a default cargo feature, `offline`. The engine's `pg_query`
+  compiles libpg_query and runs bindgen, so builds need a C compiler, libclang
+  and clang's own headers: the musl release runners and CI install `clang` and
+  `libclang-dev`, and the Docker builder is Debian cross-compiling to musl,
+  because Alpine's static build scripts cannot load libclang. cargo-deny
+  allows the engine's git source, by tag only.
+- **Windows:** the Windows binary ships online-only in 1.9.0. The engine is not
+  a dependency on `x86_64-pc-windows-msvc`, and `--offline` exits `2` there
+  with a message saying so. pg_query's own CI builds and tests on Windows, but
+  ours has not, the engine's crates never ran there, and Windows has a 1 MiB
+  main-thread stack against 8 MiB elsewhere. An informational, non-required CI
+  job (`windows-offline`, on `windows-2022`) builds and tests with the engine
+  (`--cfg vericto_windows_offline`), including a deep-nesting test. Once it is
+  green, the target gate goes and Windows gets offline mode in the release
+  after.
+- **Engine 4.2.0, next release.** Engine 4.1.3 exports no standard ruleset and
+  no version constant, and its winner is severity-first; so 1.9.0 carries the
+  standard-rules table, the engine version and the strongest-action correction
+  itself. Engine 4.2.0 (in preparation) fixes the winner and exports
+  `standard_rules()` plus version constants. The next CLI release moves to it
+  and deletes the local table and the local strongest-action workaround; the
+  tests that guard the table against the engine README and pin the
+  strongest-action outcome stay until then, and the latter stay after it.
+
+**Its limits.** Offline mode has none of what makes a check *the workspace's*:
+custom rules, overrides, sensitive columns and masking, agent allowlists and
+observe mode, the parse-error policy, the audit trail, run reports, signed
+receipts. It is not a cache of the workspace, and it never will be (§1). It
+also differs from online by construction in ways a user can see: one result
+per file instead of one per statement at its line; no `statement_hash`, so a
+baseline recorded online does not match offline findings (they resurface:
+fail-closed, but noisy); a 10 MiB input limit instead of 64 KiB per
+statement; and the engine of the installed binary, which can be older than
+the server's. Offline runs are not metered and not recorded anywhere.
+
+**Why online still matters.** The product a team pays for is online: its own
+policy (custom rules, overrides, sensitive columns, allowlists) enforced the
+same in CI as at runtime; a central, retained audit trail of every check, with
+provenance; and signed receipts (§7.1). That is the evidence a SOC 2 auditor
+asks for under change management (CC8.1: changes are evaluated and approved
+before deployment) and monitoring (CC7): an offline run leaves no record anyone
+else can verify. Offline mode answers "is this SQL obviously dangerous?";
+online answers "does this SQL meet *our* policy, and can we prove we checked?".
+
+**Risks and how they are handled.**
+- *Cannibalizing the CI-check allowance (§12.1).* Offline checks are unmetered,
+  so a free team could gate CI offline and never hit the 1000-check cap. What
+  it gives up is exactly what converts — custom rules, history, receipts — and
+  the default in CI stays online (no auto-offline there). Track offline
+  adoption only if it can be done without a network call (it cannot today, so
+  it is not measured).
+- *Rule drift messaging.* Offline and online can legitimately differ: a
+  workspace override, a custom rule, a newer engine on the server than in the
+  installed CLI. Every result names its mode and ruleset, and the docs say
+  "standard rules at default severities, engine X.Y.Z" — never "your rules".
+- *Release coupling.* The engine is pinned by tag; every engine release with a
+  rule or parser change now needs a CLI release too (a tag bump plus the
+  catalogue test), or offline users fall behind the server.
+- *Binary size and build.* About 3× the size: +9.5 MiB (aarch64-apple-darwin:
+  4.5 to 14.0 MiB; +2.0 MiB as xz), almost all of it libpg_query, and a
+  libclang build dependency on the Linux runners and in the Docker builder.
+  `cargo install --no-default-features` still builds the thin client alone.
+
+Rust remains the right choice on stack consistency and single-binary
+distribution grounds (§3), and it is what makes embedding the engine a cargo
+feature rather than a second implementation.
 
 ## 14. Enterprise-readiness rationale (this revision)
 
@@ -1062,7 +1221,16 @@ deploys when Vericto is down?" and "nothing, ever, no matter what" is not
 always the answer they want either. Having a reviewed, audited answer to that
 question is a sales asset, not just a technical safety valve.
 
-### Air-gapped / fully offline environments — still out of scope, and why that's fine to say plainly
+### Air-gapped / fully offline environments — the workspace is still out of scope, and why that's fine to say plainly
+
+> **Revised 2026-10-18 (1.9.0, §13):** offline mode now gives an air-gapped
+> runner the standard rules, so that segment is no longer turned away with
+> nothing: it gets a deterministic, versioned baseline gate. Everything below
+> still holds for the *workspace*: its rules, its policy, its audit evidence and
+> its receipts need the backend, and "the door on a local-evaluation mode"
+> below now means a local evaluation of the workspace's policy. Read the
+> paragraphs below with that substitution; they are kept as the record of the
+> earlier reasoning.
 
 §1/§13 already close the door on a local-evaluation mode, permanently. This
 revision doesn't reopen that door — OIDC (§6.1) still requires reaching the

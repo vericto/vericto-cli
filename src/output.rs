@@ -10,7 +10,7 @@
 //! whole as one item, so an annotation points at the file (line 1) with the
 //! rule's AST node path in the message.
 
-use crate::api::{ApiKeyInfo, CheckResponse, QueryResult, RuleDetail, RuleSummary};
+use crate::api::{ApiKeyInfo, CheckResponse, QueryResult, RuleDetail, RuleSummary, RunMode};
 use anstyle::{AnsiColor, Style};
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
@@ -71,6 +71,35 @@ fn location(files: &[String], q: &QueryResult) -> String {
         format!("{file}:{}", q.line)
     } else {
         file
+    }
+}
+
+/// What every offline result carries in human-readable text (DESIGN §13): the
+/// mode, the engine and the rule set. Empty for an online result, so online
+/// output stays byte-for-byte what it was. The summary line prints the ruleset
+/// version next to it already.
+fn mode_note(resp: &CheckResponse) -> String {
+    match resp.mode {
+        RunMode::Online => String::new(),
+        RunMode::Offline {
+            engine_version,
+            rules,
+        } => format!(
+            " · mode: offline (engine {engine_version}, {rules} standard rules, no workspace policy)"
+        ),
+    }
+}
+
+/// `mode_note` for a single finding in a report with no summary line (the
+/// GitLab formats): it names the ruleset version too.
+fn finding_mode_note(resp: &CheckResponse) -> String {
+    match resp.mode {
+        RunMode::Online => String::new(),
+        RunMode::Offline { .. } => format!(
+            "{} · ruleset {}",
+            mode_note(resp),
+            resp.summary.ruleset_version
+        ),
     }
 }
 
@@ -149,6 +178,10 @@ fn render_json(resp: &CheckResponse) -> String {
             "sql_preview": q.sql_preview,
         })).collect::<Vec<_>>(),
         "exit_code": resp.exit_code,
+        // Additive: "online" for a backend verdict, "offline" (with the
+        // embedded engine's version) for a local one.
+        "mode": resp.mode.as_str(),
+        "engine_version": resp.mode.engine_version(),
     });
     serde_json::to_string_pretty(&value).unwrap_or_default()
 }
@@ -244,6 +277,12 @@ fn render_sarif(resp: &CheckResponse, files: &[String]) -> String {
                 "rules": rules,
             }},
             "results": results,
+            // SARIF property bag: where the verdict came from.
+            "properties": {
+                "mode": resp.mode.as_str(),
+                "engine_version": resp.mode.engine_version(),
+                "ruleset_version": resp.summary.ruleset_version,
+            },
         }]
     });
     serde_json::to_string_pretty(&sarif).unwrap_or_default()
@@ -303,7 +342,7 @@ fn render_gitlab_codequality(resp: &CheckResponse, files: &[String]) -> String {
             let file = file_of(files, q);
             let rule = q.rule_code.clone().unwrap_or_else(|| "VERICTO".to_string());
             serde_json::json!({
-                "description": finding_message(q),
+                "description": format!("{}{}", finding_message(q), finding_mode_note(resp)),
                 "check_name": rule,
                 "fingerprint": issue_id(q, &file),
                 "severity": gitlab_cq_severity(q),
@@ -344,7 +383,7 @@ fn render_gitlab_sast(resp: &CheckResponse, files: &[String]) -> String {
                 "id": issue_id(q, &file),
                 "category": "sast",
                 "name": rule,
-                "message": finding_message(q),
+                "message": format!("{}{}", finding_message(q), finding_mode_note(resp)),
                 "severity": gitlab_sast_severity(q),
                 "location": { "file": file, "start_line": source_line(q) },
                 "identifiers": [{
@@ -402,12 +441,13 @@ fn render_text_colored(resp: &CheckResponse, files: &[String], quiet: bool) {
     let dim = Style::new().dimmed();
     let _ = writeln!(
         out,
-        "{dim}{blocked} blocked · {allowed} allowed · {flagged} flagged · {monitored} monitored   (ruleset {ver}){dim:#}",
+        "{dim}{blocked} blocked · {allowed} allowed · {flagged} flagged · {monitored} monitored   (ruleset {ver}{mode}){dim:#}",
         blocked = s.blocked,
         allowed = s.allowed,
         flagged = s.flagged,
         monitored = s.monitored,
         ver = s.ruleset_version,
+        mode = mode_note(resp),
     );
 }
 
@@ -430,8 +470,13 @@ fn render_text_plain(resp: &CheckResponse, files: &[String], quiet: bool) -> Str
     }
     let s = &resp.summary;
     buf.push_str(&format!(
-        "{} blocked · {} allowed · {} flagged · {} monitored   (ruleset {})\n",
-        s.blocked, s.allowed, s.flagged, s.monitored, s.ruleset_version,
+        "{} blocked · {} allowed · {} flagged · {} monitored   (ruleset {}{})\n",
+        s.blocked,
+        s.allowed,
+        s.flagged,
+        s.monitored,
+        s.ruleset_version,
+        mode_note(resp),
     ));
     buf
 }
@@ -479,11 +524,15 @@ pub fn render_ci_failure_summary(
         let mut raw = io::stderr();
         for q in failing {
             let file = file_of(files, q);
+            let tool = match resp.mode {
+                RunMode::Online => "Vericto",
+                RunMode::Offline { .. } => "Vericto (offline)",
+            };
             let title = q
                 .rule_code
                 .as_deref()
-                .map(|c| format!("Vericto {c} [{}]", q.status))
-                .unwrap_or_else(|| format!("Vericto [{}]", q.status));
+                .map(|c| format!("{tool} {c} [{}]", q.status))
+                .unwrap_or_else(|| format!("{tool} [{}]", q.status));
             // Workflow commands take a single line; encode newlines just in case.
             let msg = gha_encode(&finding_message(q));
             let _ = writeln!(
@@ -503,9 +552,10 @@ pub fn render_ci_failure_summary(
     let _ = writeln!(err);
     let _ = writeln!(
         err,
-        "{hdr}✖ Vericto blocked {n} statement{}{hdr:#}  {dim}(ruleset {ver}){dim:#}",
+        "{hdr}✖ Vericto blocked {n} statement{}{hdr:#}  {dim}(ruleset {ver}{mode}){dim:#}",
         if n == 1 { "" } else { "s" },
         ver = s.ruleset_version,
+        mode = mode_note(resp),
     );
     for q in failing {
         let (mark, style) = status_style(&q.status);
@@ -814,6 +864,7 @@ mod tests {
             receipt: None,
             merged_receipts: Vec::new(),
             api_version_header: None,
+            mode: Default::default(),
         }
     }
 

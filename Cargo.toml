@@ -1,6 +1,6 @@
 [package]
 name = "vericto-cli"
-version = "1.8.2"
+version = "1.9.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Validate SQL against your Vericto workspace's security rules before it runs"
@@ -42,6 +42,31 @@ base64 = "0.22"
 # Already present transitively (rustls/ring); pinning it as a direct dep keeps
 # `cargo audit`/SBOM tooling honest about who actually uses it.
 getrandom = "0.2"
+
+[features]
+default = ["offline"]
+# `vericto check --offline` (DESIGN §13): evaluate locally with the embedded
+# engine and its standard rules at default severities. Pulls in
+# `vericto-engine`, whose `pg_query` builds libpg_query's C sources and runs
+# bindgen, so building needs a C compiler and libclang. Without the feature the
+# CLI is the thin client it has always been, and `--offline` exits 2.
+offline = ["dep:vericto-engine"]
+
+# The engine is a dependency on every target but Windows: the release does not
+# build `pg_query` for x86_64-pc-windows-msvc yet, so the Windows binary ships
+# online-only (the feature has nothing to enable there). The informational
+# `windows-offline` CI job builds and tests it anyway, with
+# `RUSTFLAGS=--cfg vericto_windows_offline`; once that job passes, drop this
+# target gate and the `cfg(vericto_windows_offline)` in the code.
+[target.'cfg(any(not(windows), vericto_windows_offline))'.dependencies]
+# Pinned by tag, like vericto-proxy and vericto-eval: an engine release is a
+# CLI release (the tag bump is the ruleset bump for offline mode). The next
+# release moves to engine 4.2.0 (see src/offline.rs).
+vericto-engine = { git = "https://github.com/vericto/vericto-engine", tag = "v4.1.3", optional = true }
+
+[lints.rust]
+# `vericto_windows_offline` is set only by the windows-offline CI job.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vericto_windows_offline)"] }
 
 [dev-dependencies]
 # HTTP mocking for the API-client tests (in-process wiremock server).

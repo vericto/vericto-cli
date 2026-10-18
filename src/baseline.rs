@@ -295,6 +295,7 @@ mod tests {
             receipt: None,
             merged_receipts: Vec::new(),
             api_version_header: None,
+            mode: Default::default(),
         }
     }
 

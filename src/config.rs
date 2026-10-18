@@ -180,12 +180,16 @@ pub struct ProjectConfig {
     pub api_key: Option<toml::Value>,
     #[serde(default)]
     pub allow_degraded: Option<toml::Value>,
+    /// Offline mode (§13) swaps the workspace's policy for the standard rules.
+    /// A committed file must not be able to do that for every run, CI included.
+    #[serde(default)]
+    pub offline: Option<toml::Value>,
 }
 
 /// Loads `.vericto.toml` from the current directory (repo root). Missing file →
-/// default. A file that carries `api_key` or `allow_degraded` is rejected: those
-/// are a secret and a per-run safety decision respectively, neither of which
-/// belongs in a committed, PR-reviewable file (§6.3).
+/// default. A file that carries `api_key`, `allow_degraded` or `offline` is
+/// rejected: a secret, a per-run safety decision and a per-run choice of rule
+/// set, none of which belongs in a committed, PR-reviewable file (§6.3, §13).
 pub fn load_project() -> io::Result<ProjectConfig> {
     let path = std::path::Path::new(".vericto.toml");
     match std::fs::read_to_string(path) {
@@ -206,6 +210,12 @@ pub fn load_project() -> io::Result<ProjectConfig> {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     ".vericto.toml must not set allow_degraded — pass --allow-degraded per run so the bypass is visible in the pipeline.",
+                ));
+            }
+            if cfg.offline.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    ".vericto.toml must not set offline — pass --offline or VERICTO_OFFLINE=1 per run, so a switch to the standard rules is visible in the pipeline.",
                 ));
             }
             Ok(cfg)
@@ -390,5 +400,7 @@ mod tests {
         assert!(cfg.api_key.is_some());
         let cfg: ProjectConfig = toml::from_str("allow_degraded = true").unwrap();
         assert!(cfg.allow_degraded.is_some());
+        let cfg: ProjectConfig = toml::from_str("offline = true").unwrap();
+        assert!(cfg.offline.is_some());
     }
 }

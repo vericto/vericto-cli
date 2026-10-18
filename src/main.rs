@@ -11,6 +11,7 @@ mod baseline;
 mod browser_login;
 mod ci_env;
 mod config;
+mod offline;
 mod oidc;
 mod output;
 mod pubkeys;
@@ -116,6 +117,54 @@ fn backend_compat(api_version: &str) -> Compat {
         Compat::MinorSkew
     } else {
         Compat::Ok
+    }
+}
+
+/// The value parser of every boolean flag that can also be set from an
+/// environment variable (`VERICTO_OFFLINE`, `VERICTO_ALLOW_UNSANITIZED`). The
+/// default bool parser accepts only `true` and `false`, so `=1` was rejected.
+/// This one reads clap's boolish values (`1`/`0`, `true`/`false`, `yes`/`no`,
+/// `on`/`off`), case-insensitive and with surrounding whitespace trimmed. An
+/// empty value counts as unset, as in the SDKs, and anything else is a usage
+/// error (exit 2) that names the variable.
+#[derive(Clone, Copy)]
+struct EnvBool;
+
+impl clap::builder::TypedValueParser for EnvBool {
+    type Value = bool;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<bool, clap::Error> {
+        let text = value.to_string_lossy();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+        // No `arg`: its error is replaced below, so it need not render it.
+        clap::builder::BoolishValueParser::new()
+            .parse_ref(cmd, None, std::ffi::OsStr::new(trimmed))
+            .map_err(|_| {
+                // A flag takes no value on the command line, so a value that
+                // reaches this point came from the environment.
+                let name = match arg {
+                    Some(a) => match a.get_env() {
+                        Some(var) => var.to_string_lossy().into_owned(),
+                        None => a.to_string(),
+                    },
+                    None => "the flag".to_string(),
+                };
+                cmd.clone().error(
+                    clap::error::ErrorKind::InvalidValue,
+                    format!(
+                        "invalid value '{text}' for {name}: use 1, true, yes or on to \
+                         turn it on, and 0, false, no, off or an empty value to leave it off"
+                    ),
+                )
+            })
     }
 }
 
@@ -231,7 +280,7 @@ struct BaselinePruneArgs {
     /// If the workspace config (`GET /ci/config`) can't be read, send the SQL
     /// as-is instead of failing with exit 4. Without it the CLI fails closed:
     /// it can't know whether the workspace requires sanitized mode (§6.2).
-    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED")]
+    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED", value_parser = EnvBool)]
     allow_unsanitized: bool,
 
     #[command(flatten)]
@@ -268,7 +317,7 @@ struct BaselineArgs {
     /// If the workspace config (`GET /ci/config`) can't be read, send the SQL
     /// as-is instead of failing with exit 4. Without it the CLI fails closed:
     /// it can't know whether the workspace requires sanitized mode (§6.2).
-    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED")]
+    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED", value_parser = EnvBool)]
     allow_unsanitized: bool,
 
     /// Vericto API key (or set VERICTO_API_KEY, or `vericto login`).
@@ -821,7 +870,7 @@ struct CheckArgs {
     /// If the workspace config (`GET /ci/config`) can't be read, send the SQL
     /// as-is instead of failing with exit 4. Without it the CLI fails closed:
     /// it can't know whether the workspace requires sanitized mode (§6.2).
-    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED")]
+    #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED", value_parser = EnvBool)]
     allow_unsanitized: bool,
 
     /// Break-glass: if the backend is unreachable from the first request,
@@ -839,6 +888,86 @@ struct CheckArgs {
     /// stdout isn't a TTY or when `NO_COLOR` is set (anstream default).
     #[arg(long)]
     no_color: bool,
+
+    /// Evaluate locally with the embedded engine and its standard rules at
+    /// default severities: no network, no workspace rules or overrides, no
+    /// audit record. Chosen automatically outside CI when no API key, login or
+    /// OIDC token is present.
+    #[arg(long, env = "VERICTO_OFFLINE", value_parser = EnvBool)]
+    offline: bool,
+}
+
+/// The `check` options that only mean something against a workspace, as
+/// (flag, why): offline mode refuses them rather than ignoring them, and their
+/// presence keeps a run without credentials from going offline on its own.
+fn online_only_options(args: &CheckArgs) -> Vec<(&'static str, &'static str)> {
+    let mut v = Vec::new();
+    if args.receipt.is_some() {
+        v.push(("--receipt", "a signed receipt is issued by your workspace"));
+    }
+    if args.oidc || args.audience.is_some() || args.oidc_token_env.is_some() {
+        v.push(("--oidc", "workload identity authenticates to a workspace"));
+    }
+    if args.allow_degraded.is_some() {
+        v.push((
+            "--allow-degraded",
+            "it waives an unreachable backend, and offline mode has none",
+        ));
+    }
+    if args.allow_unsanitized {
+        v.push((
+            "--allow-unsanitized",
+            "sanitized mode is a workspace telemetry setting",
+        ));
+    }
+    v
+}
+
+/// Decides whether this run evaluates offline (DESIGN §13): `--offline`
+/// / `VERICTO_OFFLINE`, or automatically when there is no credential of any
+/// kind, the run is not in CI, nothing online-only was asked for and this
+/// build has the engine. In CI a missing credential stays exit 3: a pipeline
+/// whose secret went missing must not quietly downgrade to the standard rules.
+fn resolve_offline(
+    args: &CheckArgs,
+    has_static_key: bool,
+    project: &config::ProjectConfig,
+) -> Result<bool, ExitCode> {
+    let online_only = online_only_options(args);
+    if args.offline {
+        if !offline::AVAILABLE {
+            eprintln!("error: --offline: {}", offline::OfflineError::Unavailable);
+            return Err(ExitCode::from(exit::USAGE));
+        }
+        if let Some((flag, why)) = online_only.first() {
+            eprintln!(
+                "error: {flag} needs online mode: {why}. Drop --offline and authenticate \
+                 (`vericto login`, VERICTO_API_KEY or --oidc)."
+            );
+            return Err(ExitCode::from(exit::USAGE));
+        }
+        return Ok(true);
+    }
+    let token_env = args
+        .oidc_token_env
+        .clone()
+        .or_else(|| project.oidc_token_env.clone())
+        .unwrap_or_else(|| oidc::DEFAULT_GITLAB_TOKEN_ENV.to_string());
+    let auto = offline::AVAILABLE
+        && !has_static_key
+        && online_only.is_empty()
+        && oidc::availability(&token_env).is_none()
+        && !offline::in_ci();
+    if auto {
+        eprintln!(
+            "note: no API key or login found: checking offline with the {} standard rules \
+             (engine {}). Run `vericto login` to check against your workspace's rules and \
+             record the run.",
+            offline::STANDARD_RULE_COUNT,
+            offline::ENGINE_VERSION
+        );
+    }
+    Ok(auto)
 }
 
 /// What counts as a failure for the exit code.
@@ -1082,26 +1211,46 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     );
     let api_url = resolved.api_url.clone();
     let transport = resolve_transport(args.timeout, args.ca_bundle.clone());
-    // Auth: a static key, or a short-lived key minted via OIDC (§6.1).
-    let oidc_opts = OidcOpts {
-        forced: args.oidc,
-        workspace: args.workspace.clone(),
-        audience: args.audience.clone(),
-        token_env: args.oidc_token_env.clone(),
-    };
-    let (api_key, _auth_mode) = match resolve_auth(
-        &api_url,
-        resolved.api_key,
-        resolved.key_source,
-        &oidc_opts,
-        &project,
-        &file,
-        &transport,
-    )
-    .await
-    {
-        Ok(pair) => pair,
+    // Offline (DESIGN §13) is decided before auth, which can already
+    // reach the network (OIDC token fetch and exchange).
+    let has_static_key = resolved.api_key.is_some();
+    let offline = match resolve_offline(&args, has_static_key, &project) {
+        Ok(o) => o,
         Err(code) => return code,
+    };
+    // Auth: a static key, or a short-lived key minted via OIDC (§6.1). Never
+    // resolved offline: the offline branch below returns before any request.
+    let api_key = if offline {
+        String::new()
+    } else {
+        let oidc_opts = OidcOpts {
+            forced: args.oidc,
+            workspace: args.workspace.clone(),
+            audience: args.audience.clone(),
+            token_env: args.oidc_token_env.clone(),
+        };
+        match resolve_auth(
+            &api_url,
+            resolved.api_key,
+            resolved.key_source,
+            &oidc_opts,
+            &project,
+            &file,
+            &transport,
+        )
+        .await
+        {
+            Ok((key, _auth_mode)) => key,
+            Err(code) => {
+                if !has_static_key && offline::AVAILABLE {
+                    eprintln!(
+                        "hint: to check with the standard rules only, locally and without an \
+                         account, pass --offline."
+                    );
+                }
+                return code;
+            }
+        }
     };
     // dialect precedence: flag > .vericto.toml > user config default > "postgres".
     let dialect = args
@@ -1177,6 +1326,26 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         };
         (queries, file_name, files)
     };
+
+    // Offline: evaluate in-process and report exactly like an online run. No
+    // config fetch, no sanitizing (nothing leaves the machine), no telemetry.
+    if offline {
+        let _ = file_name; // the backend's report label; nothing to label offline
+        eprintln!(
+            "note: offline mode: {} standard rules at default severities, engine {}. Custom \
+             rules, overrides, sensitive columns, allowlists and the audit trail apply online only.",
+            offline::STANDARD_RULE_COUNT,
+            offline::ENGINE_VERSION
+        );
+        let resp = match offline::check(&queries, &dialect) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(exit::USAGE);
+            }
+        };
+        return finish_check(&args, resp, files, baseline_path, fail_on);
+    }
 
     // Pre-flight (§6.2): learn the workspace's telemetry query mode BEFORE
     // sending any SQL. When 'sanitized', normalize literals client-side so raw
@@ -1273,6 +1442,19 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         }
     }
 
+    finish_check(&args, resp, files, baseline_path, fail_on)
+}
+
+/// Renders a check's verdict and turns it into the exit code: output, receipt,
+/// plan and version nudges, `--monitor`, suppression and `--fail-on`. Shared
+/// by online and offline runs, so both produce the same shapes and codes.
+fn finish_check(
+    args: &CheckArgs,
+    resp: CheckResponse,
+    files: Vec<String>,
+    baseline_path: Option<std::path::PathBuf>,
+    fail_on: FailOn,
+) -> ExitCode {
     if let Err(e) = output::render(
         &resp,
         args.format,
@@ -3122,6 +3304,7 @@ mod tests {
             receipt: None,
             merged_receipts: Vec::new(),
             api_version_header: None,
+            mode: Default::default(),
         }
     }
 
@@ -3146,5 +3329,127 @@ mod tests {
     fn fail_on_any_trips_on_monitored_too() {
         assert!(has_failure(&resp_with(&["MONITORED"]), FailOn::Any));
         assert!(!has_failure(&resp_with(&["ALLOWED"]), FailOn::Any));
+    }
+
+    /// What an env-backed boolean reads each value as; `None` is a usage error.
+    const ENV_BOOL_CASES: &[(&str, Option<bool>)] = &[
+        ("1", Some(true)),
+        ("0", Some(false)),
+        ("TRUE", Some(true)),
+        ("yes", Some(true)),
+        ("on", Some(true)),
+        (" off ", Some(false)),
+        ("", Some(false)),
+        ("maybe", None),
+    ];
+
+    #[test]
+    fn env_bool_reads_boolish_values() {
+        use clap::builder::TypedValueParser;
+        let cmd = clap::Command::new("vericto");
+        let arg = clap::Arg::new("flag")
+            .long("flag")
+            .env("VERICTO_TEST_ENV_BOOL");
+        let extra: &[(&str, Option<bool>)] = &[
+            ("False", Some(false)),
+            ("\tON\n", Some(true)),
+            ("   ", Some(false)),
+            ("2", None),
+            ("enabled", None),
+        ];
+        for (value, want) in ENV_BOOL_CASES.iter().chain(extra) {
+            let got = EnvBool.parse_ref(&cmd, Some(&arg), std::ffi::OsStr::new(value));
+            match want {
+                Some(b) => assert_eq!(got.ok(), Some(*b), "{value:?}"),
+                None => {
+                    let err = got.unwrap_err().to_string();
+                    assert!(
+                        err.contains(&format!(
+                            "invalid value '{value}' for VERICTO_TEST_ENV_BOOL"
+                        )),
+                        "{err}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every boolean flag that has an environment variable, in every
+    /// subcommand, goes through `EnvBool`: each value is fed to the real
+    /// argument (as its default, which clap parses with the argument's own
+    /// parser) and must read the same way everywhere.
+    #[test]
+    fn every_env_backed_flag_uses_env_bool() {
+        type Flag = (Vec<String>, String, String);
+        fn collect(cmd: &clap::Command, path: &mut Vec<String>, out: &mut Vec<Flag>) {
+            for a in cmd.get_arguments() {
+                let is_flag = matches!(
+                    a.get_action(),
+                    clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
+                );
+                if let (Some(var), true) = (a.get_env(), is_flag) {
+                    let var = var.to_string_lossy().into_owned();
+                    out.push((path.clone(), a.get_id().to_string(), var));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                path.push(sub.get_name().to_string());
+                collect(sub, path, out);
+                path.pop();
+            }
+        }
+        fn with_default(
+            cmd: clap::Command,
+            path: &[String],
+            id: &str,
+            v: &'static str,
+        ) -> clap::Command {
+            match path.split_first() {
+                Some((first, rest)) => cmd.mut_subcommand(first, |s| with_default(s, rest, id, v)),
+                None => cmd.mut_arg(id, |a| a.default_value(v)),
+            }
+        }
+
+        let mut built = Cli::command();
+        built.build();
+        let mut flags = Vec::new();
+        collect(&built, &mut Vec::new(), &mut flags);
+        let found: Vec<String> = flags
+            .iter()
+            .map(|(path, _, var)| format!("{} {var}", path.join(" ")))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "check VERICTO_ALLOW_UNSANITIZED",
+                "check VERICTO_OFFLINE",
+                "baseline VERICTO_ALLOW_UNSANITIZED",
+                "baseline prune VERICTO_ALLOW_UNSANITIZED",
+            ],
+            "a new env-backed flag must use value_parser = EnvBool and be listed here"
+        );
+
+        for (path, id, var) in &flags {
+            for (value, want) in ENV_BOOL_CASES {
+                let cmd = with_default(Cli::command(), path, id, value);
+                let argv = std::iter::once("vericto").chain(path.iter().map(String::as_str));
+                match (cmd.try_get_matches_from(argv), want) {
+                    (Ok(m), Some(b)) => {
+                        let m = path
+                            .iter()
+                            .fold(&m, |m, p| m.subcommand_matches(p).unwrap());
+                        assert_eq!(m.get_one::<bool>(id), Some(b), "{var}={value:?}");
+                    }
+                    (Err(e), None) => {
+                        let err = e.to_string();
+                        assert!(
+                            err.contains(&format!("invalid value '{value}' for {var}")),
+                            "{err}"
+                        );
+                    }
+                    (got, _) => panic!("{var}={value:?}: {:?}", got.map(|_| ())),
+                }
+            }
+        }
     }
 }

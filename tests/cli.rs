@@ -357,9 +357,11 @@ async fn check_from_stdin() {
 
 #[tokio::test]
 async fn missing_api_key_exits_3() {
-    // No backend needed — fails before any request.
+    // No backend needed — fails before any request. In CI: outside it, a run
+    // with no credential at all checks offline instead (see the offline tests).
     vericto()
         .args(["check", "-", "--quiet"])
+        .env("CI", "true")
         .env("VERICTO_API_URL", "http://127.0.0.1:1")
         .write_stdin("SELECT 1;")
         .assert()
@@ -3216,4 +3218,575 @@ fn init_without_a_detectable_provider_is_a_usage_error() {
         "{}",
         stderr_of(&out)
     );
+}
+
+// ── check --offline (DESIGN §13) ─────────────────────────────────────────────
+
+/// A mock that answers nothing (404) and records everything: pointed at by the
+/// API URL, every proxy variable and the GitHub OIDC endpoint, so any request
+/// the CLI makes, to any host, lands on it.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+fn tripwired(cmd: &mut Vericto, api: &MockServer, trip: &MockServer) {
+    let t = trip.uri();
+    cmd.env("VERICTO_API_URL", api.uri())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("HTTP_PROXY", &t)
+        .env("HTTPS_PROXY", &t)
+        .env("ALL_PROXY", &t)
+        .env("http_proxy", &t)
+        .env("https_proxy", &t)
+        .env("GITHUB_ACTIONS", "true")
+        .env("ACTIONS_ID_TOKEN_REQUEST_URL", format!("{t}/token"))
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "t");
+}
+
+/// The guarantee offline mode exists for: with a key, a reachable backend, a
+/// proxy and an OIDC endpoint all configured, `--offline` makes no request at
+/// all, in any output format, from files, stdin or `--sql`.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[tokio::test]
+async fn offline_makes_no_network_request() {
+    let api = mock_backend(check_body(&["ALLOWED"]), "sanitized").await;
+    let trip = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(&sql, "DELETE FROM users;").unwrap();
+    let file = sql.to_str().unwrap();
+
+    for format in ["text", "json", "sarif", "gitlab-codequality", "gitlab-sast"] {
+        let mut cmd = vericto();
+        tripwired(&mut cmd, &api, &trip);
+        cmd.args(["check", "--offline", "--format", format, file])
+            .assert()
+            .code(1);
+    }
+    let mut cmd = vericto();
+    tripwired(&mut cmd, &api, &trip);
+    cmd.args(["check", "--offline", "-"])
+        .write_stdin("DELETE FROM users;")
+        .assert()
+        .code(1);
+    let mut cmd = vericto();
+    tripwired(&mut cmd, &api, &trip);
+    cmd.args(["check", "--offline", "--sql", "DELETE FROM users"])
+        .assert()
+        .code(1);
+
+    let api_hits = api.received_requests().await.unwrap();
+    let trip_hits = trip.received_requests().await.unwrap();
+    assert!(api_hits.is_empty(), "backend was called: {api_hits:?}");
+    assert!(trip_hits.is_empty(), "something went out: {trip_hits:?}");
+}
+
+/// Outside CI, no credential at all means offline, said on stderr and in the
+/// report; in CI the same run stays exit 3 (`missing_api_key_exits_3`).
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn no_credential_outside_ci_checks_offline() {
+    let out = vericto()
+        .args(["check", "-", "--no-color"])
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .write_stdin("DELETE FROM users;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("no API key or login found"));
+    let stdout = stdout_of(&out);
+    assert!(
+        stdout.contains("BLOCKED <stdin>  VERICTO-001 critical"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("mode: offline (engine 4.1.3, 42 standard rules"),
+        "{stdout}"
+    );
+}
+
+/// A key present without `--offline` keeps the online path: no silent switch.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[tokio::test]
+async fn a_key_without_offline_stays_online_and_says_so() {
+    let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
+    let out = vericto()
+        .args(["check", "-", "--format", "json"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .write_stdin("DELETE FROM users;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["mode"], "online");
+    assert_eq!(v["engine_version"], serde_json::Value::Null);
+    assert!(!server.received_requests().await.unwrap().is_empty());
+}
+
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn offline_json_names_mode_engine_and_ruleset() {
+    let out = vericto()
+        .args(["check", "--offline", "--format", "json", "-"])
+        .write_stdin("DROP TABLE users;")
+        .output()
+        .unwrap();
+    // DROP TABLE is FLAGGED in CI (schema-migration cap), so the default
+    // --fail-on block passes.
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["mode"], "offline");
+    assert_eq!(v["engine_version"], "4.1.3");
+    assert_eq!(v["summary"]["ruleset_version"], "standard@engine-4.1.3");
+    assert_eq!(v["queries"][0]["status"], "FLAGGED");
+    assert_eq!(v["queries"][0]["rule_code"], "VERICTO-010");
+}
+
+/// One `--offline` run of `sql` from stdin in `format`: (exit code, stdout).
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+fn offline_run(format: &str, sql: &str) -> (Option<i32>, String) {
+    let out = vericto()
+        .args(["check", "--offline", "--no-color", "--format", format, "-"])
+        .write_stdin(sql.to_string())
+        .output()
+        .unwrap();
+    (out.status.code(), stdout_of(&out))
+}
+
+/// Every output format states the mode, the engine version and the ruleset
+/// version.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn every_offline_format_names_mode_engine_and_ruleset() {
+    let sql = "DELETE FROM users;";
+    let (_, text) = offline_run("text", sql);
+    assert!(
+        text.contains(
+            "(ruleset standard@engine-4.1.3 · mode: offline (engine 4.1.3, 42 standard rules"
+        ),
+        "{text}"
+    );
+    let (_, json) = offline_run("json", sql);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        (
+            &v["mode"],
+            &v["engine_version"],
+            &v["summary"]["ruleset_version"]
+        ),
+        (
+            &serde_json::json!("offline"),
+            &serde_json::json!("4.1.3"),
+            &serde_json::json!("standard@engine-4.1.3")
+        )
+    );
+    let (_, sarif) = offline_run("sarif", sql);
+    let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    let props = &v["runs"][0]["properties"];
+    assert_eq!(props["mode"], "offline");
+    assert_eq!(props["engine_version"], "4.1.3");
+    assert_eq!(props["ruleset_version"], "standard@engine-4.1.3");
+    for (format, field) in [
+        ("gitlab-codequality", "/0/description"),
+        ("gitlab-sast", "/vulnerabilities/0/message"),
+    ] {
+        let (_, out) = offline_run(format, sql);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let msg = v
+            .pointer(field)
+            .and_then(|m| m.as_str())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("mode: offline (engine 4.1.3")
+                && msg.contains("ruleset standard@engine-4.1.3"),
+            "{format}: {v}"
+        );
+    }
+}
+
+/// The strongest action decides, not the engine's severity-first winner: a
+/// capped DROP TABLE (Critical, FLAG) must not hide the WHERE-less UPDATE
+/// (Critical, BLOCK) after it. Every format reports BLOCKED and the run fails.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn offline_strongest_action_blocks_in_every_format() {
+    let sql = "DROP TABLE a; UPDATE accounts SET balance = 0;";
+    let (code, text) = offline_run("text", sql);
+    assert_eq!(code, Some(1), "{text}");
+    assert!(
+        text.contains("BLOCKED <stdin>  VERICTO-030 critical"),
+        "{text}"
+    );
+    assert!(text.contains("1 blocked · 0 allowed · 0 flagged"), "{text}");
+
+    let (code, json) = offline_run("json", sql);
+    assert_eq!(code, Some(1));
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["queries"][0]["status"], "BLOCKED");
+    assert_eq!(v["queries"][0]["action"], "block");
+    assert_eq!(v["queries"][0]["rule_code"], "VERICTO-030");
+    assert_eq!(v["summary"]["blocked"], 1);
+    assert_eq!(v["summary"]["flagged"], 0);
+    assert_eq!(v["exit_code"], 1);
+
+    let (code, sarif) = offline_run("sarif", sql);
+    assert_eq!(code, Some(1));
+    let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    let r = &v["runs"][0]["results"][0];
+    assert_eq!(r["ruleId"], "VERICTO-030");
+    assert_eq!(r["level"], "error");
+
+    let (code, cq) = offline_run("gitlab-codequality", sql);
+    assert_eq!(code, Some(1));
+    let v: serde_json::Value = serde_json::from_str(&cq).unwrap();
+    assert_eq!(v.as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(v[0]["check_name"], "VERICTO-030");
+    assert_eq!(v[0]["severity"], "blocker");
+
+    let (code, sast) = offline_run("gitlab-sast", sql);
+    assert_eq!(code, Some(1));
+    let v: serde_json::Value = serde_json::from_str(&sast).unwrap();
+    assert_eq!(v["vulnerabilities"][0]["name"], "VERICTO-030");
+    assert_eq!(v["vulnerabilities"][0]["severity"], "Critical");
+
+    // From a file too, and with --fail-on block named explicitly.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.sql");
+    std::fs::write(&path, sql).unwrap();
+    vericto()
+        .args(["check", "--offline", "--quiet", "--fail-on", "block"])
+        .arg(&path)
+        .assert()
+        .code(1);
+}
+
+/// `VERICTO_OFFLINE=1` is the same as `--offline`, also in CI with a key set.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn vericto_offline_env_selects_offline_mode() {
+    let out = vericto()
+        .args(["check", "--format", "json", "-"])
+        .env("VERICTO_OFFLINE", "1")
+        .env("CI", "true")
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .write_stdin("DELETE FROM users;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["mode"], "offline");
+    // A falsey value leaves it off: in CI without a key, exit 3 as before.
+    vericto()
+        .args(["check", "-", "--quiet"])
+        .env("VERICTO_OFFLINE", "0")
+        .env("CI", "true")
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .write_stdin("DELETE FROM users;")
+        .assert()
+        .code(3);
+}
+
+/// What an env-backed boolean reads each value as; `None` is a usage error.
+const ENV_BOOL_CASES: [(&str, Option<bool>); 8] = [
+    ("1", Some(true)),
+    ("0", Some(false)),
+    ("TRUE", Some(true)),
+    ("yes", Some(true)),
+    ("on", Some(true)),
+    (" off ", Some(false)),
+    ("", Some(false)),
+    ("maybe", None),
+];
+
+/// `VERICTO_OFFLINE`: on selects offline mode (a build without the engine
+/// exits 2 and says so); off and empty are the same as unset, so in CI with no
+/// key the run is exit 3; anything else is exit 2 naming the variable.
+#[test]
+fn vericto_offline_env_reads_boolish_values() {
+    let engine = cfg!(all(
+        feature = "offline",
+        any(not(windows), vericto_windows_offline)
+    ));
+    for (value, want) in ENV_BOOL_CASES {
+        let out = vericto()
+            .args(["check", "--format", "json", "-"])
+            .env("VERICTO_OFFLINE", value)
+            .env("CI", "true")
+            .env("VERICTO_API_URL", "http://127.0.0.1:1")
+            .write_stdin("DELETE FROM users;")
+            .output()
+            .unwrap();
+        let err = stderr_of(&out);
+        match want {
+            Some(true) if engine => {
+                assert_eq!(out.status.code(), Some(1), "{value:?}: {err}");
+                let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+                assert_eq!(v["mode"], "offline", "{value:?}");
+            }
+            Some(true) => {
+                assert_eq!(out.status.code(), Some(2), "{value:?}: {err}");
+                assert!(err.contains("online mode"), "{value:?}: {err}");
+            }
+            Some(false) => assert_eq!(out.status.code(), Some(3), "{value:?}: {err}"),
+            None => {
+                assert_eq!(out.status.code(), Some(2), "{value:?}: {err}");
+                assert!(
+                    err.contains("invalid value 'maybe' for VERICTO_OFFLINE"),
+                    "{err}"
+                );
+            }
+        }
+    }
+}
+
+/// `VERICTO_ALLOW_UNSANITIZED` reads the same values in `check`, `baseline`
+/// and `baseline prune`. With `/ci/config` unreadable, on sends the SQL as-is
+/// (exit 0); off and empty are the same as unset and fail closed (exit 4);
+/// anything else is exit 2 naming the variable.
+#[tokio::test]
+async fn vericto_allow_unsanitized_env_reads_boolish_values() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/ci/config"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/check-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(check_body(&["BLOCKED"])))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("s.sql");
+    std::fs::write(&sql, "DELETE FROM users;").unwrap();
+    let sql = sql.to_str().unwrap();
+    let recorded = dir.path().join("recorded.json");
+    let recorded = recorded.to_str().unwrap();
+    let out = dir.path().join("out.json");
+    let out = out.to_str().unwrap();
+    // A baseline with the finding in it: `baseline prune` returns early on an
+    // empty one, and `check --baseline` passes with it.
+    vericto()
+        .args(["baseline", sql, "--out", recorded, "--allow-unsanitized"])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .assert()
+        .code(0);
+
+    let runs: [&[&str]; 3] = [
+        &["check", sql, "--quiet", "--baseline", recorded],
+        &["baseline", sql, "--out", out],
+        &["baseline", "prune", sql, "--file", recorded, "--dry-run"],
+    ];
+    for args in runs {
+        for (value, want) in ENV_BOOL_CASES {
+            let run = vericto()
+                .args(args)
+                .env("VERICTO_ALLOW_UNSANITIZED", value)
+                .env("VERICTO_API_KEY", "vtro_k")
+                .env("VERICTO_API_URL", server.uri())
+                .output()
+                .unwrap();
+            let err = stderr_of(&run);
+            let code = match want {
+                Some(true) => 0,
+                Some(false) => 4,
+                None => 2,
+            };
+            assert_eq!(run.status.code(), Some(code), "{args:?} {value:?}: {err}");
+            if want.is_none() {
+                assert!(
+                    err.contains("invalid value 'maybe' for VERICTO_ALLOW_UNSANITIZED"),
+                    "{args:?}: {err}"
+                );
+            }
+        }
+    }
+}
+
+/// In CI a run with no credential stays exit 3 and points at --offline.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn no_credential_in_ci_stays_exit_3_with_a_hint() {
+    for var in ["CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "TF_BUILD"] {
+        let out = vericto()
+            .args(["check", "-"])
+            .env(var, "true")
+            .env("VERICTO_API_URL", "http://127.0.0.1:1")
+            .write_stdin("DELETE FROM users;")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{var}: {}", stderr_of(&out));
+        assert!(stderr_of(&out).contains("pass --offline"), "{var}");
+        assert!(out.stdout.is_empty(), "{var}: no verdict without a mode");
+    }
+}
+
+/// Deep nesting is refused by the engine as a PARSE_ERROR, not a crash, and
+/// the deepest nesting it accepts parses on the main thread. This is what the
+/// windows-offline CI job checks against Windows' 1 MiB main-thread stack.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn offline_deep_nesting_does_not_crash() {
+    let bomb = format!("SELECT 1 WHERE {}TRUE;", "NOT ".repeat(2000));
+    let (code, json) = offline_run("json", &bomb);
+    assert_eq!(code, Some(0), "{json}");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["queries"][0]["status"], "PARSE_ERROR");
+    // The engine's limit is 200 levels.
+    let deep = format!("SELECT {}1{};", "(".repeat(199), ")".repeat(199));
+    let (code, json) = offline_run("json", &deep);
+    assert_eq!(code, Some(0), "{json}");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_ne!(v["queries"][0]["status"], serde_json::Value::Null);
+}
+
+/// A committed `.vericto.toml` cannot turn offline mode on.
+#[test]
+fn vericto_toml_cannot_enable_offline_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".vericto.toml"), "offline = true\n").unwrap();
+    let out = vericto()
+        .current_dir(dir.path())
+        .args(["check", "--sql", "DELETE FROM users"])
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains(".vericto.toml must not set offline"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// Without the engine (the Windows build, or `--no-default-features`),
+/// `--offline` and `VERICTO_OFFLINE=1` exit 2 with a clear message, and a run
+/// without credentials never goes offline on its own.
+#[cfg(not(all(feature = "offline", any(not(windows), vericto_windows_offline))))]
+#[test]
+fn offline_without_the_engine_exits_2() {
+    let expected = if cfg!(windows) {
+        "offline mode is not available on Windows yet"
+    } else {
+        "compiled without the `offline` feature"
+    };
+    for env in [None, Some(("VERICTO_OFFLINE", "1"))] {
+        let mut cmd = vericto();
+        cmd.args(["check", "-"]);
+        match env {
+            Some((k, v)) => cmd.env(k, v),
+            None => cmd.arg("--offline"),
+        };
+        let out = cmd.write_stdin("DELETE FROM users;").output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+        let err = stderr_of(&out);
+        assert!(
+            err.contains(expected) && err.contains("online mode"),
+            "{err}"
+        );
+    }
+    let out = vericto()
+        .args(["check", "-"])
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .write_stdin("SELECT 1;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr_of(&out));
+    assert!(
+        !stderr_of(&out).contains("--offline"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn offline_honors_fail_on_and_dialect() {
+    let run = |args: &[&str], sql: &str| {
+        vericto()
+            .args(["check", "--offline", "--quiet"])
+            .args(args)
+            .arg("-")
+            .write_stdin(sql.to_string())
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    // SELECT without LIMIT: FLAGGED (Medium).
+    assert_eq!(run(&[], "SELECT * FROM t;"), Some(0));
+    assert_eq!(run(&["--fail-on", "flag"], "SELECT * FROM t;"), Some(1));
+    // INSERT without columns: MONITORED (Low).
+    assert_eq!(
+        run(&["--fail-on", "flag"], "INSERT INTO t VALUES (1);"),
+        Some(0)
+    );
+    assert_eq!(
+        run(&["--fail-on", "any"], "INSERT INTO t VALUES (1);"),
+        Some(1)
+    );
+    // Backticks parse as MySQL only; a PARSE_ERROR does not fail the run.
+    assert_eq!(run(&["--dialect", "mysql"], "DELETE FROM `t`;"), Some(1));
+    assert_eq!(run(&["--dialect", "postgres"], "DELETE FROM `t`;"), Some(0));
+    assert_eq!(run(&["--monitor"], "DELETE FROM t;"), Some(0));
+    // Unknown dialect: usage error.
+    assert_eq!(run(&["--dialect", "db2"], "SELECT 1;"), Some(2));
+}
+
+/// Inline suppression and the baseline are local, so they work offline.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn offline_honors_inline_suppression() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(
+        &sql,
+        "DELETE FROM users; -- vericto:ignore[VERICTO-001] one-off backfill\n",
+    )
+    .unwrap();
+    vericto()
+        .args(["check", "--offline", "--quiet", sql.to_str().unwrap()])
+        .assert()
+        .code(0);
+}
+
+/// Options that need a workspace are refused, with exit 2 and a pointer to
+/// online mode, never silently ignored.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn offline_refuses_workspace_options() {
+    for (args, flag) in [
+        (&["--receipt", "r.json"][..], "--receipt"),
+        (&["--oidc"][..], "--oidc"),
+        (&["--allow-degraded", "outage"][..], "--allow-degraded"),
+        (&["--allow-unsanitized"][..], "--allow-unsanitized"),
+    ] {
+        let out = vericto()
+            .args(["check", "--offline"])
+            .args(args)
+            .arg("-")
+            .write_stdin("SELECT 1;")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{flag}: {}", stderr_of(&out));
+        let err = stderr_of(&out);
+        assert!(
+            err.contains(&format!("{flag} needs online mode")) && err.contains("Drop --offline"),
+            "{err}"
+        );
+    }
+}
+
+/// Asking for something online-only keeps a credential-less run from going
+/// offline on its own: it fails as before (exit 3), it does not drop the flag.
+#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[test]
+fn online_only_option_without_credentials_does_not_go_offline() {
+    let out = vericto()
+        .args(["check", "--receipt", "r.json", "-"])
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .write_stdin("SELECT 1;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr_of(&out));
 }
