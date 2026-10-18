@@ -6,7 +6,82 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-10-18
+
+A security release for **sanitized mode** (a workspace whose telemetry query
+mode is `sanitized`). That mode promises that no literal value leaves the
+machine, and the sanitizer kept that promise only for the plain cases: in the
+ones below, part of a literal was sent as written. The sanitizer is rewritten
+as a lexer that ends every literal where the dialect's own lexer ends it, and
+it fails closed: what it cannot read with certainty is replaced, never sent.
+Nothing changes for a workspace in `raw` mode.
+
+### Security
+- **Snowflake backslash escapes.** Snowflake reads `\'` inside `'...'` as an
+  escaped quote; the sanitizer did not, so `'it\'s secret'` ended at `\'` and
+  `s secret` was sent. Backslash escapes now apply to every Snowflake string.
+- **MySQL with `NO_BACKSLASH_ESCAPES`.** MySQL's escape mode is a server
+  setting the CLI cannot see. Only the default mode was read, so on a server
+  without backslash escapes `'C:\' AND q = 'secret'` sent `secret`. A MySQL
+  statement with a backslash is now read in both modes, as the engine's MySQL
+  lexer does: a reading that leaves something unterminated is dropped, and
+  where both readings are possible and disagree, whatever is a literal in
+  either is replaced.
+- **MySQL double-quoted strings.** `"..."` is a string in MySQL (without
+  `ANSI_QUOTES`) and was copied as an identifier, value included.
+- **Oracle quote-delimited strings.** `q'[...]'`, `q'{...}'`, `q'(...)'`,
+  `q'<...>'`, `q'!...!'` (any delimiter) and `nq'...'` were not recognized:
+  their content was sent from the first `'` inside it on.
+- **Dollar-quoted strings and bodies.** `$$...$$` and `$tag$...$tag$` were
+  copied as written, literals inside included. A dollar-quoted string is now
+  a literal like any other (`$1` / `?`); after `AS` or `DO` it is a function
+  or `DO` body, which the engine flags without reading, and becomes the empty
+  body `$$$$` so the statement still parses. A `$` inside an identifier
+  (`a$b$c`) no longer opens a dollar quote, which copied everything up to the
+  next `$b$` as written.
+- **Comments the dialect reads differently.** A `'` inside a comment the
+  sanitizer did not know as one opened a literal there, so the real literal
+  after it was sent: MySQL `#` comments, Snowflake `//` comments, and nested
+  Postgres and MSSQL comments (`/* a /* b */ don't */`). In MySQL, `--` starts
+  a comment only before whitespace, so `5--'secret'` is now a literal, and the
+  content of `/*! ... */`, which MySQL executes, is now sanitized.
+- **Prefixed literals and numbers.** The prefix of `N'...'`, `U&'...'`,
+  `X'...'`, `B'...'` and MySQL `_utf8mb4'...'` stayed in front of the
+  placeholder; `0x4142`, `1e10`, `.5` and MSSQL money (`$12.50`) were sent in
+  part (`$1e10`, `.$2`); a unary sign stayed (`-$1`). Each is now one
+  placeholder.
+- **Fail closed.** An unterminated quoted identifier, comment, dollar quote or
+  q-quote was copied to the end as written. Now everything from the point
+  where the text cannot be read with certainty (also: a q-quote without a
+  usable delimiter, a nested comment in MySQL, a comment inside `/*! ... */`)
+  to the end is one placeholder.
+
+### Fixed
+- **Bind parameters are kept as written.** Oracle `:1` became `:$1` and an
+  MSSQL `[col 1]` identifier became `[col $1]`. `:1` / `:name` (Oracle,
+  Snowflake, SQLite) and `[...]` (MSSQL, with `]]`) are now copied as they are.
+- **Placeholders never reuse an existing parameter.** `id = $1 AND n = 5`
+  became `id = $1 AND n = $1`, one parameter for two values. New placeholders
+  are numbered after the highest `$N` (and Oracle `:N`) already in the
+  statement, as libpg_query's normalization numbers them.
+- **Non-ASCII text outside literals.** The sanitizer worked byte by byte and
+  wrote each byte of a multi-byte character as a character of its own:
+  `ñandú` became `Ã±andÃº`, and the digit in `café2` was read as a number.
+  Identifiers, comments and quoted names in any script now come out as they
+  went in.
+- The dialect name is matched case-insensitively (`--dialect MySQL`).
+
 ### Tests
+- `tests/fixtures/sanitize.json` holds the sanitizer's test vectors (133:
+  vericto-cli 1.8.0's 19, one of them updated for dollar-quoted bodies, and
+  one or more per leak and dialect above); each group is a test in
+  `src/sanitize.rs`, and vericto-python 0.3.2 runs the same file against its
+  port. A seeded property test builds random statements in all seven dialects
+  (the six named plus an unknown one) with a secret marker inside literals of
+  every kind and checks that no marker comes out; it found the
+  `NO_BACKSLASH_ESCAPES` case with an executable comment that this release also
+  covers. Other tests check that non-ASCII characters always come out whole and
+  that pathological input stays linear.
 - Unit and integration test line coverage from 85.7% to 91.2% (cargo-llvm-cov;
   production lines only, without the in-file test modules: 81.3% to 88.8%).
   New tests cover every `--format` written to `--output` with the exit code
@@ -20,7 +95,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stderr, an unusable CA bundle failing before any request, retries honoring
   `Retry-After`, a chunked run failing closed on one failed chunk, the GitHub
   OIDC token endpoint and exchange failures, and the remaining `doctor`,
-  `logout` and `init` branches. No change to the binary.
+  `logout` and `init` branches. These tests change nothing in the binary.
 
 ## [1.8.1] - 2026-10-18
 

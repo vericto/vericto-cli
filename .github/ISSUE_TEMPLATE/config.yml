@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Propose a rule or report a wrong verdict for a SQL statement
+    url: https://github.com/vericto/vericto-engine/issues/new/choose
+    about: Rules and SQL parsing live in vericto-engine; the CLI sends SQL to the Vericto API and mirrors its verdict.
+  - name: Report a problem with the GitHub Action (vericto/check-sql)
+    url: https://github.com/vericto/check-sql/issues/new/choose
+    about: The action that installs the CLI and runs it in GitHub Actions lives in check-sql.
+  - name: Report a security vulnerability
+    url: https://github.com/vericto/vericto-cli/security/policy
+    about: Report it privately (security@vericto.com) instead of in a public issue. See SECURITY.md.
