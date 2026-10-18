@@ -435,9 +435,23 @@ per-command choice.
   `vericto-eval`'s literal handling), so raw literal values never leave the
   machine in the first place. `doctor` reports the effective mode so a
   developer isn't guessed at.
-- `--dialect`-aware normalization only (no attempt to sanitize inside opaque
-  string blobs like `DO $$…$$` bodies — those are flagged, not rewritten,
-  consistent with the engine's existing conservative-parsing stance).
+- `--dialect`-aware normalization: each literal is found where the dialect's
+  own lexer would end it (backslash escapes in Snowflake and MySQL, Oracle
+  `q'[…]'`, MSSQL `[…]`, MySQL `"…"`, `#` and `/*! … */`, nested Postgres
+  comments, …), and replaced. Placeholders are numbered after the highest
+  bind parameter already in the statement. Opaque blobs like `DO $$…$$` and
+  function bodies are not rewritten inside: the engine flags them without
+  reading them, so their content is dropped (`DO $$$$`); a dollar-quoted
+  string anywhere else is a literal like any other. The rules, with their
+  test vectors, are in `src/sanitize.rs` and `tests/fixtures/sanitize.json`
+  (vericto-python's `vericto.sanitize` runs the same fixture).
+- **Fail closed inside the text too.** Where the lexer cannot be certain
+  (an unterminated literal, identifier, comment or dollar quote, an unknown
+  q-quote delimiter, a MySQL comment form whose reading depends on the server
+  version), everything from there on becomes one placeholder. A MySQL
+  statement with a backslash is read with and without `NO_BACKSLASH_ESCAPES`
+  (the client cannot see the server's mode); if both readings lex and
+  disagree, whatever is a literal in either is replaced.
 - One workspace setting, enforced consistently across `vericto-proxy` and
   `vericto-cli` — no per-tool drift.
 - **Fail closed when the setting is unknown.** If `GET /ci/config` can't be
