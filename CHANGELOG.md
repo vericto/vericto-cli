@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-10-19
+
+**The container image builds again, and no change in behavior.** The container
+images for 1.9.0 and 1.10.0 were never published: the `Docker` workflow failed
+on both tags, so `ghcr.io/vericto/vericto-cli` stayed at 1.8.2 (`latest`
+included). The binaries on GitHub Releases, the npm package and the Homebrew
+formula come from the release pipeline (cargo-dist), not from the image, and
+are unaffected. Every command, output and exit code is as in 1.10.0.
+
+### Fixed
+- **Container image: the linux/arm64 build failed in pg_query's build script
+  with `protoc failed`.** Since 1.9.0 the image embeds the engine, and its
+  pg_query regenerates protobuf bindings whenever spawning `protoc` succeeds.
+  The builder has no `protoc`, which the native arch (amd64) detects. arm64 is
+  built under QEMU, and there spawning a missing binary reports success, so the
+  build tried to run it and failed. The build stage now installs
+  `protobuf-compiler`, so every arch takes the same path (`Dockerfile`). The
+  `rustfmt is not installed` message in that log is a non-fatal bindgen step,
+  not the cause.
+
 ## [1.10.0] - 2026-10-18
 
 **A new license, and no change in behavior.** From this version on, the CLI is

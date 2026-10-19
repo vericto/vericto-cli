@@ -22,11 +22,20 @@
 # brings the compiler headers bindgen needs (`stdbool.h`); libclang-dev alone
 # does not. The target comes from `uname -m`, so the Dockerfile stays
 # architecture-agnostic for `docker buildx --platform linux/amd64,linux/arm64`.
+# `protobuf-compiler` is there because pg_query's build script regenerates its
+# protobuf bindings whenever spawning `protoc` succeeds. Without protoc that
+# spawn fails natively, so the build skips it, but under QEMU (the non-native
+# arch in docker.yml, arm64 on an amd64 runner) spawning a missing binary
+# reports success, and the build then fails with "protoc failed: ". With
+# protoc present, every arch takes the same path. That is why 1.9.0 and
+# 1.10.0 published no image. The "rustfmt is not installed" line in that log
+# is bindgen's non-fatal formatting step, not the cause.
 # Base images are pinned by digest (multi-arch index) as well as tag, so a
 # re-pushed tag cannot change what is built; Dependabot (docker) bumps them.
 FROM rust:1.88-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends musl-tools libclang-dev clang \
+        protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 
