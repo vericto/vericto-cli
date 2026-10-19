@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 // Hardens the npm package cargo-dist builds before it is published:
 //
 //   1. writes each platform archive's SHA-256, taken from the checksums the

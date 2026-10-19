@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! Bundled Vericto public keys for offline receipt verification (§7.1).
 //!
 //! Receipts are signed by a backend private key; `vericto verify-receipt` checks

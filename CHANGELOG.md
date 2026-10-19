@@ -6,6 +6,80 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-18
+
+**A new license, and no change in behavior.** From this version on, the CLI is
+licensed under the Functional Source License, Version 1.1, ALv2 Future License
+(SPDX `FSL-1.1-ALv2`) instead of the Elastic License 2.0, the same license as
+the engine it embeds for offline mode. **All previously released versions,
+1.9.1 and earlier, remain under the Elastic License 2.0.** Every command,
+output and exit code is as in 1.9.1. The embedded engine moves to 4.3.0, the
+engine's own relicensing release, which has no code change from 4.2.0: the
+only visible difference is that offline results name `engine 4.3.0` and
+`standard@engine-4.3.0`.
+
+### Changed
+- **License: FSL-1.1-ALv2, which becomes Apache-2.0 after two years.**
+  `LICENSE` is the FSL-1.1-ALv2 text from fsl.software, unmodified, with
+  "Copyright 2026 Vericto S.A.S." in its notice. It lets you use, copy, modify
+  and redistribute the CLI for any purpose other than a Competing Use: a
+  commercial product or service that substitutes for the CLI, or for a Vericto
+  product that uses it, or that offers substantially similar functionality.
+  Running it in your own CI, hooks and pipelines, including at a company, is a
+  permitted purpose. Each version is also licensed under the Apache License 2.0
+  from the second anniversary of the date it is made available, irrevocably.
+- **The embedded engine: vericto-engine 4.3.0, under FSL-1.1-ALv2.** Offline
+  mode runs vericto-engine v4.3.0 (was v4.2.0), pinned by tag, the first
+  engine release under FSL-1.1-ALv2. So the whole binary, engine included, is
+  under one license, and the engine's metadata and its entry in
+  `THIRD_PARTY_LICENSES` say `FSL-1.1-ALv2` too. Engine releases up to 4.2.0
+  stay under the Elastic License 2.0.
+- **Third-party notices ship with the binary.** New `THIRD_PARTY_LICENSES`: the
+  crates compiled into the binary for the release targets, with their
+  versions, declared licenses and license and notice files, plus the C code
+  pg_query compiles in (libpg_query, PostgreSQL, protobuf-c, xxHash).
+  `third-party/notices.py` generates it from `Cargo.lock` with `cargo metadata`
+  only, and CI (`cargo-deny + cargo-audit`) fails when it is out of date.
+  `NOTICE` and `THIRD_PARTY_LICENSES` are in every release archive
+  (`include` in `dist-workspace.toml`), so in what the npm package and the
+  Homebrew formula install, and in the container image next to `LICENSE`
+  (`/usr/share/doc/vericto/`).
+- **Metadata:** `Cargo.toml` and `Cargo.lock` declare
+  `license = "FSL-1.1-ALv2"` (the SPDX identifier) and version 1.10.0, which
+  dist carries into the npm package's `license` and the Homebrew formula's
+  `license`. The container image label is
+  `org.opencontainers.image.licenses=FSL-1.1-ALv2` (`Dockerfile`,
+  `docker.yml`).
+- `NOTICE` states the copyright, the license, the Apache-2.0 future license,
+  that versions up to 1.9.1 stay under the Elastic License 2.0, the engine
+  it embeds, the dist-generated installers (MIT OR Apache-2.0) and where the
+  third-party licenses are. **New `LICENSING.md`** (versions and a short FAQ)
+  and **`TRADEMARKS.md`** (the license grants no right to the Vericto name or
+  logo).
+- `deny.toml`: `Elastic-2.0` is no longer an allowed dependency license;
+  `FSL-1.1-ALv2` is allowed for vericto-cli and vericto-engine only, so a
+  third-party dependency under a source-available license still fails
+  `cargo deny check`.
+- Every Rust and JavaScript source file starts with `SPDX-FileCopyrightText`
+  and `SPDX-License-Identifier` lines (the REUSE convention);
+  `npm-installer/binary-install.js` names axodotdev's copyright and
+  MIT OR Apache-2.0 too.
+- README (License section), CONTRIBUTING and DESIGN name the new license.
+  CONTRIBUTING explains that CLA 1.0, which names the Elastic License 2.0,
+  also covers later and other licenses.
+
+### CI
+- **The CLA check runs in GitHub Actions** instead of cla-assistant.io, whose
+  webhook failed on every delivery on 2026-10-17 and 2026-10-18 and left pull
+  requests without a status. `.github/workflows/cla.yml` (CLA Assistant Lite,
+  pinned by commit SHA) reports the `CLA` check, which replaces `license/cla`
+  among the required checks. The agreement is unchanged (ICLA v1.0, now also
+  in `CLA.md`). Contributors sign it by commenting
+  `I have read the CLA Document and I hereby sign the CLA` on their pull
+  request, and `recheck` reruns the check. Signatures are kept on the
+  `cla-signatures` branch. The workflow never checks out pull request code.
+  No code change.
+
 ## [1.9.1] - 2026-10-18
 
 Offline mode moves to `vericto-engine` 4.2.0 and takes its rules, version and

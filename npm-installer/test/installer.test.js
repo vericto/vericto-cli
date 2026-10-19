@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 // Tests for the npm installer's integrity checks (node --test, no dependencies).
 "use strict";
 
@@ -128,7 +131,7 @@ function makeNpmPackage(dir, installerSource, { license = true } = {}) {
   fs.mkdirSync(pkgDir, { recursive: true });
   fs.writeFileSync(path.join(pkgDir, "binary-install.js"), installerSource);
   if (license) {
-    fs.writeFileSync(path.join(pkgDir, "LICENSE"), "Elastic License 2.0\n");
+    fs.writeFileSync(path.join(pkgDir, "LICENSE"), "# Functional Source License, Version 1.1, ALv2 Future License\n");
   }
   fs.writeFileSync(
     path.join(pkgDir, "package.json"),

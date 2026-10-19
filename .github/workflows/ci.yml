@@ -126,3 +126,7 @@ jobs:
           tool: cargo-deny@0.20.2,cargo-audit@0.22.2
       - run: cargo deny --locked check
       - run: cargo audit --deny warnings
+      # THIRD_PARTY_LICENSES ships in every release archive and the container
+      # image, so it must match Cargo.lock. After a dependency change, run
+      # `python3 third-party/notices.py` and commit the result.
+      - run: python3 third-party/notices.py --check

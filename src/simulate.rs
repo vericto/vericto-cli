@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! `vericto rules simulate <file>`: run a candidate rule change against the
 //! workspace's recorded production traffic (the backend's rule simulator) and
 //! fail the CI job when it would block legitimate flows.

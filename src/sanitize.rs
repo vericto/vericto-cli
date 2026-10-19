@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! Client-side literal sanitization (§6.2).
 //!
 //! When a workspace is in `sanitized` telemetry mode, the CLI replaces every

@@ -33,4 +33,4 @@
 - [ ] `CHANGELOG.md` updated under `[Unreleased]` (if a user can see the change)
 - [ ] New or changed flags, environment variables or exit codes documented in `README.md`
 - [ ] `release.yml` regenerated with `dist generate`, not edited by hand (if `dist-workspace.toml` changed)
-- [ ] I have signed the Vericto Contributor License Agreement (the CLA bot asks on your first pull request)
+- [ ] I have signed the Vericto Contributor License Agreement in `CLA.md` (on your first pull request, comment `I have read the CLA Document and I hereby sign the CLA`; comment `recheck` if the `CLA` check does not rerun)

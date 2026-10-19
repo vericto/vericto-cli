@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! CI environment detection: provider, base ref, and git provenance.
 //!
 //! One place resolves "where are we running and against what base", reused by

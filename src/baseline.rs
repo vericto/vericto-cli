@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! Baseline + suppression (§10).
 //!
 //! Dropping the CLI into a repo with pre-existing unsafe SQL would turn the

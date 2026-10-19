@@ -756,8 +756,8 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
     --strict` calls redundant, and refuses a formula whose SHA-256 are not the
     release's `sha256.sum`. The tap's own CI audits, installs and tests the
     formula on all four platforms. homebrew-core is not a target: it accepts
-    only OSI/DFSG-licensed software built from source, and Elastic-2.0 is
-    neither.
+    only OSI/DFSG-licensed software built from source, and neither
+    FSL-1.1-ALv2 (since 1.10.0) nor Elastic-2.0 (before) is.
   - **Scoop — 🔜:** needs an external *bucket* repo; add it to
     `dist-workspace.toml` once it exists.
 
@@ -1042,7 +1042,7 @@ local evaluator would either duplicate rule distribution (ship the workspace's
 rules to every laptop and runner, and keep them fresh) or evaluate something
 other than the live ruleset, and that it would forgo the audit record.
 
-**What changed.** The engine is public (Elastic-2.0) and already embedded
+**What changed.** The engine is public (Elastic-2.0 then; FSL-1.1-ALv2 from engine 4.3.0) and already embedded
 in-process by `vericto-proxy`, which seeds a built-in catalogue of the standard
 rules so it protects before its first sync and in air-gapped deployments. The
 standard rules are a function of the engine version alone, so they need no
@@ -1060,7 +1060,7 @@ distributed, and nothing an offline run produces passes for the workspace's
 verdict or its audit record.
 
 **The decision.** `vericto check --offline` evaluates locally with the
-embedded engine (`vericto-engine` 4.2.0, pinned by tag) and its **standard
+embedded engine (`vericto-engine` 4.3.0, pinned by tag) and its **standard
 rules at their default severities**:
 
 - **Rule set:** the 42 standard rules, the engine's own standard ruleset
