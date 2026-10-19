@@ -69,6 +69,14 @@ only visible difference is that offline results name `engine 4.3.0` and
   also covers later and other licenses.
 
 ### CI
+- **npm publishing uses Trusted Publishing (OIDC) instead of an npm token.**
+  The `npm-publish` job no longer reads `NPM_TOKEN`: npm exchanges the job's
+  GitHub OIDC token for a short-lived credential, so there is no long-lived
+  publish token to expire or leak (npm caps write tokens at 90 days, and an
+  expired one made the 1.9.0 npm publish fail with E404). The job runs on
+  Node 24 and checks for npm >= 11.5.1. Publishing stays gated by the `prod`
+  environment and keeps provenance. 1.9.0 and 1.9.1 were not published to npm;
+  they are on GitHub Releases and Homebrew. No code change.
 - **The CLA check runs in GitHub Actions** instead of cla-assistant.io, whose
   webhook failed on every delivery on 2026-10-17 and 2026-10-18 and left pull
   requests without a status. `.github/workflows/cla.yml` (CLA Assistant Lite,
