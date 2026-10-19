@@ -1060,14 +1060,15 @@ distributed, and nothing an offline run produces passes for the workspace's
 verdict or its audit record.
 
 **The decision.** `vericto check --offline` evaluates locally with the
-embedded engine (`vericto-engine` 4.1.3, pinned by tag) and its **standard
+embedded engine (`vericto-engine` 4.2.0, pinned by tag) and its **standard
 rules at their default severities**:
 
-- **Rule set:** the 42 standard rules, the table vericto-proxy seeds
-  (`evaluator::default_ruleset`); a test keeps it equal to the engine README's
-  catalogue, so an engine bump that adds or re-grades a rule fails the build
-  until the CLI follows. Engine 4.1.3 exports no ruleset, so the CLI carries
-  this table itself.
+- **Rule set:** the 42 standard rules, the engine's own standard ruleset
+  (`vericto_engine::standard_rules()`, the same table vericto-proxy falls back
+  to). The engine's `rule_catalogue_sync` test keeps it equal to its README
+  catalogue and to its evaluator, so an engine bump that adds or re-grades a
+  rule changes offline mode with it. The CLI keeps no copy (1.9.0 did, because
+  engine 4.1.3 exported none).
 - **Policy:** what a CI check gets in a workspace with no overrides —
   `EnforcementPolicy::default()` (Critical/High → BLOCK, Medium → FLAG,
   Low/Informational → MONITOR, parse errors allowed and reported) plus the CI
@@ -1077,19 +1078,16 @@ rules at their default severities**:
 - **Statuses:** vericto-eval's mapping (`ALLOWED`, `MONITORED`, `FLAGGED`,
   `BLOCKED`, `PARSE_ERROR`), so a result reads the same in both modes.
 - **Granularity:** one result per input file (the shape older backends return,
-  §12.3), with one correction: the engine picks its winner by severity then
-  rule code, after the CI cap, so in a multi-statement file a capped `DROP
-  TABLE` (Critical, FLAG) would outrank a WHERE-less `UPDATE` (Critical, BLOCK)
-  and the file would pass. Offline reports the violation with the strongest
-  resolved action instead, with the engine's order breaking ties, so no
-  single-statement outcome changes. Every output format and the exit code read
-  that one status, so `DROP TABLE a; UPDATE accounts SET balance = 0;` is
-  BLOCKED (VERICTO-030) everywhere and fails the run. (The same ordering
-  affects any whole-file evaluation online — the legacy `queries` shape and
-  scripts the backend splitter keeps whole — and engine 4.2.0 fixes it in the
-  engine.) Exact lines need the statement splitter,
-  which lives in the backend (`sql-split.ts`); moving it into the engine would
-  give offline mode, the backend and MCP one splitter.
+  §12.3). The result is the engine's decision, which since engine 4.2.0 is the
+  strongest resolved action across all violations, with severity then rule
+  code breaking ties. So in a multi-statement file a capped `DROP TABLE`
+  (Critical, FLAG) does not outrank a WHERE-less `UPDATE` (Critical, BLOCK):
+  `DROP TABLE a; UPDATE accounts SET balance = 0;` is BLOCKED (VERICTO-030) in
+  every output format and fails the run. (CLI 1.9.0, on engine 4.1.3, whose
+  winner was severity-first, made the same correction locally; 1.9.1 drops it
+  and the tests that pin the outcome stay.) Exact lines need the statement
+  splitter, which lives in the backend (`sql-split.ts`); moving it into the
+  engine would give offline mode, the backend and MCP one splitter.
 - **Marked everywhere:** `mode: offline`, the engine version and
   `ruleset_version = standard@engine-X.Y.Z` in every output format, plus a
   stderr note. An offline result must never pass for a workspace verdict.
@@ -1124,14 +1122,12 @@ rules at their default severities**:
   (`--cfg vericto_windows_offline`), including a deep-nesting test. Once it is
   green, the target gate goes and Windows gets offline mode in the release
   after.
-- **Engine 4.2.0, next release.** Engine 4.1.3 exports no standard ruleset and
-  no version constant, and its winner is severity-first; so 1.9.0 carries the
-  standard-rules table, the engine version and the strongest-action correction
-  itself. Engine 4.2.0 (in preparation) fixes the winner and exports
-  `standard_rules()` plus version constants. The next CLI release moves to it
-  and deletes the local table and the local strongest-action workaround; the
-  tests that guard the table against the engine README and pin the
-  strongest-action outcome stay until then, and the latter stay after it.
+- **Engine 4.2.0, since 1.9.1.** The rules (`standard_rules()`), the engine
+  version (`ENGINE_VERSION`) and the decision all come from the engine. 1.9.0
+  carried its own copy of the table, the version and the strongest-action
+  correction, because engine 4.1.3 exported none of them; 1.9.1 deleted all
+  three. `ruleset_version` keeps the `standard@engine-X.Y.Z` format 1.9.0
+  shipped.
 
 **Its limits.** Offline mode has none of what makes a check *the workspace's*:
 custom rules, overrides, sensitive columns and masking, agent allowlists and

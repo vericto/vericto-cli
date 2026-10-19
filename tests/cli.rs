@@ -96,6 +96,7 @@ async fn run_browser_login(
             "http://127.0.0.1:1",
         ])
         .env_clear()
+        .envs(windows_system_env())
         .env("HOME", config_dir)
         .env("XDG_CONFIG_HOME", config_dir)
         .stdout(Stdio::piped())
@@ -219,6 +220,22 @@ impl std::ops::DerefMut for Vericto {
     }
 }
 
+/// `env_clear()` on Windows also drops `SystemRoot`, and without it Winsock
+/// cannot load its service providers: every socket the child opens fails, so
+/// its request to the loopback mock fails with "error sending request" before
+/// it is sent (the windows-offline CI job, `a_key_without_offline_stays_online_and_says_so`).
+/// Put back the variables the OS itself needs; none of them changes what the
+/// CLI reads. Empty elsewhere.
+fn windows_system_env() -> Vec<(&'static str, std::ffi::OsString)> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    ["SystemRoot", "windir", "SystemDrive"]
+        .into_iter()
+        .filter_map(|var| std::env::var_os(var).map(|v| (var, v)))
+        .collect()
+}
+
 fn vericto() -> Vericto {
     let mut c = Command::cargo_bin("vericto").unwrap();
     // Keep the ambient environment from leaking into the run (e.g. SSL_CERT_FILE
@@ -227,6 +244,7 @@ fn vericto() -> Vericto {
     let profile = std::env::var_os("LLVM_PROFILE_FILE");
     let cov_dir = std::env::var_os("CARGO_LLVM_COV_TARGET_DIR");
     c.env_clear();
+    c.envs(windows_system_env());
     if let Some(p) = profile {
         c.env("LLVM_PROFILE_FILE", p);
     }
@@ -3297,7 +3315,7 @@ fn no_credential_outside_ci_checks_offline() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("mode: offline (engine 4.1.3, 42 standard rules"),
+        stdout.contains("mode: offline (engine 4.2.0, 42 standard rules"),
         "{stdout}"
     );
 }
@@ -3334,8 +3352,8 @@ fn offline_json_names_mode_engine_and_ruleset() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["mode"], "offline");
-    assert_eq!(v["engine_version"], "4.1.3");
-    assert_eq!(v["summary"]["ruleset_version"], "standard@engine-4.1.3");
+    assert_eq!(v["engine_version"], "4.2.0");
+    assert_eq!(v["summary"]["ruleset_version"], "standard@engine-4.2.0");
     assert_eq!(v["queries"][0]["status"], "FLAGGED");
     assert_eq!(v["queries"][0]["rule_code"], "VERICTO-010");
 }
@@ -3360,7 +3378,7 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
     let (_, text) = offline_run("text", sql);
     assert!(
         text.contains(
-            "(ruleset standard@engine-4.1.3 · mode: offline (engine 4.1.3, 42 standard rules"
+            "(ruleset standard@engine-4.2.0 · mode: offline (engine 4.2.0, 42 standard rules"
         ),
         "{text}"
     );
@@ -3374,16 +3392,16 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
         ),
         (
             &serde_json::json!("offline"),
-            &serde_json::json!("4.1.3"),
-            &serde_json::json!("standard@engine-4.1.3")
+            &serde_json::json!("4.2.0"),
+            &serde_json::json!("standard@engine-4.2.0")
         )
     );
     let (_, sarif) = offline_run("sarif", sql);
     let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
     let props = &v["runs"][0]["properties"];
     assert_eq!(props["mode"], "offline");
-    assert_eq!(props["engine_version"], "4.1.3");
-    assert_eq!(props["ruleset_version"], "standard@engine-4.1.3");
+    assert_eq!(props["engine_version"], "4.2.0");
+    assert_eq!(props["ruleset_version"], "standard@engine-4.2.0");
     for (format, field) in [
         ("gitlab-codequality", "/0/description"),
         ("gitlab-sast", "/vulnerabilities/0/message"),
@@ -3395,14 +3413,15 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
             .and_then(|m| m.as_str())
             .unwrap_or_default();
         assert!(
-            msg.contains("mode: offline (engine 4.1.3")
-                && msg.contains("ruleset standard@engine-4.1.3"),
+            msg.contains("mode: offline (engine 4.2.0")
+                && msg.contains("ruleset standard@engine-4.2.0"),
             "{format}: {v}"
         );
     }
 }
 
-/// The strongest action decides, not the engine's severity-first winner: a
+/// The strongest action decides (the engine's decision since engine 4.2.0;
+/// CLI 1.9.0 corrected engine 4.1.3's severity-first winner locally): a
 /// capped DROP TABLE (Critical, FLAG) must not hide the WHERE-less UPDATE
 /// (Critical, BLOCK) after it. Every format reports BLOCKED and the run fails.
 #[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
