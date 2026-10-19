@@ -46,11 +46,11 @@ RUN T="$(uname -m)-unknown-linux-musl" \
 # surface for a binary that runs inside CI holding credentials (§6.1).
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /vericto /usr/local/bin/vericto
-# The license ships with the image, where distroless keeps package docs. The
-# label is set here too, so a local `docker build` carries it, not only the
-# image docker.yml publishes.
-COPY LICENSE /usr/share/doc/vericto/LICENSE
-LABEL org.opencontainers.image.licenses="Elastic-2.0"
+# The license, its notices and the third-party licenses ship with the image,
+# where distroless keeps package docs. The label is set here too, so a local
+# `docker build` carries it, not only the image docker.yml publishes.
+COPY LICENSE NOTICE THIRD_PARTY_LICENSES /usr/share/doc/vericto/
+LABEL org.opencontainers.image.licenses="FSL-1.1-ALv2"
 # The image is for CI runners, and a container does not see the runner's `CI`
 # variable unless it is passed in. Without this, a pipeline whose
 # VERICTO_API_KEY secret went missing (`-e VERICTO_API_KEY` passes nothing)

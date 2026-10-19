@@ -17,16 +17,16 @@ ignore = []
 
 [licenses]
 version = 2
-# The licenses the dependency tree uses today, plus Elastic-2.0 for this crate.
-# A dependency under any other license fails the check until it has been
-# reviewed and added here.
+# The licenses the dependency tree uses today. A dependency under any other
+# license fails the check until it has been reviewed and added here. Vericto's
+# own crates are in `exceptions` below, so a third-party dependency under a
+# source-available license still fails.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
     "BSL-1.0",
     "CDLA-Permissive-2.0",
-    "Elastic-2.0",
     "ISC",
     "MIT",
     "Unicode-3.0",
@@ -34,8 +34,12 @@ allow = [
 confidence-threshold = 0.9
 # MPL-2.0 is file-level copyleft: accepted for this one crate, used unmodified
 # (dirs -> dirs-sys -> option-ext), not as a blanket allowance.
+# FSL-1.1-ALv2 is Vericto's own license: accepted for this crate (since 1.10.0)
+# and the engine it embeds (since engine 4.3.0), not for any third party.
 exceptions = [
     { allow = ["MPL-2.0"], crate = "option-ext" },
+    { allow = ["FSL-1.1-ALv2"], crate = "vericto-cli" },
+    { allow = ["FSL-1.1-ALv2"], crate = "vericto-engine" },
 ]
 
 [bans]

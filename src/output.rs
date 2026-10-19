@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! Rendering of check results.
 //!
 //! Human `text` (colored) + machine formats that CI systems consume:

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! Offline verification of signed run receipts (§7.1).
 //!
 //! A receipt is self-contained evidence that a check ran, verifiable without a

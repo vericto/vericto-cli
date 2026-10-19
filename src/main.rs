@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! vericto — CLI to validate SQL against a Vericto workspace's rules before it runs.
 //!
 //! Thin client: sends SQL to `POST /api/v1/ci/check-key` and mirrors the

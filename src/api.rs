@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! HTTP client for the Vericto CI dry-run endpoint.
 //!
 //! The CLI is a thin client: it does not evaluate SQL locally. It sends the SQL

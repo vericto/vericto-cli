@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Vericto S.A.S.
+// SPDX-License-Identifier: FSL-1.1-ALv2
+
 //! CI workload-identity (OIDC) login (§6.1).
 //!
 //! Instead of a long-lived `vtro_...` key sitting in a CI secret, a job can prove
