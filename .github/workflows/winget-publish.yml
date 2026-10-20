@@ -1,0 +1,96 @@
+# Custom cargo-dist publish job: submit the release to winget.
+#
+# `winget install Vericto.VerictoCLI`. Packages reach winget through pull
+# requests to microsoft/winget-pkgs, reviewed by its moderators. This job
+# writes the three manifests of the release (windows/package.js winget: a zip
+# holding a portable vericto.exe, x64 and ARM64, each pinned by the release's
+# SHA-256) and opens that pull request with wingetcreate, from the account
+# that owns WINGET_TOKEN (a fork of winget-pkgs is created there on first use).
+#
+# WINGET_TOKEN lives in the reviewer-gated `prod` environment, like the other
+# publish tokens. Until the owner has made the first submission by hand and
+# set the token, the job succeeds without submitting and says so (a notice on
+# the run), so releases are not blocked (DESIGN.md §9, "Windows channels").
+# Referenced from dist-workspace.toml as `publish-jobs = [..., "./winget-publish"]`.
+name: Publish to winget
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  winget-publish:
+    # wingetcreate is a Windows program.
+    runs-on: windows-2022
+    environment: prod
+    # The pull request is opened with WINGET_TOKEN, not the GITHUB_TOKEN.
+    permissions:
+      contents: read
+    env:
+      PLAN: ${{ inputs.plan }}
+      # Pinned by version and SHA-256 (the release asset's digest).
+      WINGETCREATE_URL: https://github.com/microsoft/winget-create/releases/download/v1.12.13.0/wingetcreate.exe
+      WINGETCREATE_SHA256: 24042bd37915805615e6cf969ac57c6439124c3fe85823327f5f3fb24bd9ffea
+    steps:
+      # Only whether the token is set reaches the shell, never its value.
+      - name: Check for the winget token
+        id: token
+        shell: bash
+        env:
+          HAS_TOKEN: ${{ secrets.WINGET_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=winget not published::WINGET_TOKEN is not set in the prod environment, so no winget pull request was opened. See DESIGN.md section 9, Windows channels."
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.token.outputs.enabled == 'true'
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            windows
+            npm-installer
+      - name: Fetch the release checksums
+        if: steps.token.outputs.enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-*
+          path: dist-artifacts/
+          merge-multiple: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.token.outputs.enabled == 'true'
+        with:
+          node-version: '20.x'
+      - name: Write the manifests
+        id: manifests
+        if: steps.token.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dist-artifacts/sha256.sum || { echo "::error::sha256.sum missing from the release artifacts"; exit 1; }
+          version=$(echo "$PLAN" | jq -r '.releases[] | select(.app_name == "vericto-cli") | .app_version')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          node windows/package.js winget dist-artifacts "$version" winget-manifests
+      - name: Fetch wingetcreate
+        if: steps.token.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri $env:WINGETCREATE_URL -OutFile wingetcreate.exe
+          $got = (Get-FileHash -Algorithm SHA256 wingetcreate.exe).Hash.ToLowerInvariant()
+          if ($got -ne $env:WINGETCREATE_SHA256) { throw "wingetcreate.exe: SHA-256 $got, expected $env:WINGETCREATE_SHA256" }
+      # wingetcreate validates the manifests before it opens the pull request.
+      - name: Open the winget-pkgs pull request
+        if: steps.token.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          VERSION: ${{ steps.manifests.outputs.version }}
+        run: |
+          .\wingetcreate.exe submit --no-open --prtitle "New version: Vericto.VerictoCLI version $env:VERSION" --token $env:WINGET_TOKEN winget-manifests
+          if ($LASTEXITCODE -ne 0) { throw "wingetcreate submit failed ($LASTEXITCODE)" }

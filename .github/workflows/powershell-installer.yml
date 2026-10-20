@@ -1,0 +1,98 @@
+# Custom cargo-dist global-artifacts job: the PowerShell installer.
+#
+# `irm https://github.com/vericto/vericto-cli/releases/latest/download/vericto-cli-installer.ps1 | iex`
+# installs the Windows binary. cargo-dist 0.32 can generate that installer
+# (`installers = ["powershell"]`), but its PowerShell installer verifies
+# nothing it downloads, while its shell installer checks a SHA-256 per
+# archive. So the installer published here is windows/installer.ps1: the one
+# cargo-dist generates, plus that check. This job renders it with the version
+# and the SHA-256 of both Windows archives (x64, ARM64), then installs this
+# run's x64 build with it, the way users run it, before uploading it.
+#
+# Referenced from dist-workspace.toml as `global-artifacts-jobs =
+# ["./powershell-installer"]`; `dist generate` wires it into release.yml after
+# the platform builds, and the `host` job, which creates the GitHub Release,
+# waits for it: the installer is part of the release from the start. It runs
+# on every PR too (pr-run-mode = "upload"), so a broken installer fails the PR.
+name: PowerShell installer
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  powershell-installer:
+    runs-on: windows-2022
+    # Reads this run's artifacts and uploads one; nothing else.
+    permissions:
+      contents: read
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      # windows/ (the template and the renderer), npm-installer/ (the shared
+      # checksum reader) and, at the root, dist-workspace.toml.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            windows
+            npm-installer
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20.x'
+      - name: Fetch the platform archives and their checksums
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-build-local-*
+          path: dist-artifacts/
+          merge-multiple: true
+      - name: Render the installer
+        id: render
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(echo "$PLAN" | jq -r '.releases[] | select(.app_name == "vericto-cli") | .app_version')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # Each archive's published .sha256 must be the SHA-256 of its bytes.
+          for zip in dist-artifacts/vericto-cli-*-pc-windows-msvc.zip; do
+            want=$(cut -d ' ' -f 1 "${zip}.sha256")
+            got=$(sha256sum "$zip" | cut -d ' ' -f 1)
+            [ "$want" = "$got" ] || { echo "::error::${zip}: .sha256 says ${want}, the file is ${got}"; exit 1; }
+          done
+          mkdir -p installer
+          node windows/package.js installer dist-artifacts "$version" installer/vericto-cli-installer.ps1
+      # As users run it (Windows PowerShell 5.1, the script piped to
+      # Invoke-Expression), against this run's archives instead of the
+      # release: into a temporary CARGO_HOME, PATH untouched.
+      - name: Install this build with it
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.render.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:VERICTO_CLI_DOWNLOAD_URL = ([System.Uri](Resolve-Path dist-artifacts).Path).AbsoluteUri
+          $env:CARGO_HOME = Join-Path $env:RUNNER_TEMP 'vericto-cargo'
+          $env:XDG_CONFIG_HOME = Join-Path $env:RUNNER_TEMP 'vericto-config'
+          $env:VERICTO_CLI_NO_MODIFY_PATH = '1'
+          $env:VERICTO_CLI_DISABLE_UPDATE = '1'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Content -Raw installer\vericto-cli-installer.ps1 | Invoke-Expression"
+          if ($LASTEXITCODE -ne 0) { throw "the installer failed ($LASTEXITCODE)" }
+          $vericto = Join-Path $env:CARGO_HOME 'bin\vericto.exe'
+          $got = & $vericto --version
+          if ($got -ne "vericto $env:VERSION") { throw "installed '$got', expected 'vericto $env:VERSION'" }
+          # The engine is in the Windows build: a DELETE without WHERE is
+          # blocked offline (exit 1).
+          'DELETE FROM users;' | & $vericto check --offline --quiet -
+          if ($LASTEXITCODE -ne 1) { throw "check --offline exited $LASTEXITCODE, expected 1" }
+          $global:LASTEXITCODE = 0
+          Write-Output "installed and ran $got"
+      - name: Upload the installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # artifacts-* is what the host job publishes to the GitHub Release.
+          name: artifacts-powershell-installer
+          path: installer/vericto-cli-installer.ps1
+          if-no-files-found: error

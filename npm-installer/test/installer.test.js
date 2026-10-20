@@ -238,3 +238,88 @@ test("conflicting checksums for one archive are an error", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── Windows: the .zip archive and `npx @vericto/vericto-cli ...` ────────────
+//
+// What `npx @vericto/vericto-cli <args>` runs on Windows: the package's run
+// script calls Package.run, which installs the .zip archive (unpacked with
+// PowerShell's Expand-Archive, since Windows has no `unzip`) on first use and
+// then runs vericto.exe with the arguments, exiting with its exit code. The
+// binary here is a renamed copy of cmd.exe, a real executable whose arguments
+// and exit code are easy to control.
+const onWindows = process.platform === "win32";
+
+function makeWindowsZip(dir) {
+  const content = path.join(dir, "content");
+  fs.mkdirSync(content);
+  fs.copyFileSync(path.join(process.env.SystemRoot, "System32", "cmd.exe"), path.join(content, "vericto.exe"));
+  fs.writeFileSync(path.join(content, "README.md"), "readme\n");
+  const zip = path.join(dir, "vericto-cli-x86_64-pc-windows-msvc.zip");
+  const r = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", "Compress-Archive -Path (Join-Path $env:SRC '*') -DestinationPath $env:DST"],
+    { env: { ...process.env, SRC: content, DST: zip }, encoding: "utf8" },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  return zip;
+}
+
+// Runs `node run.js <args>` the way the package's bin shim does.
+function runPackage(dir, url, platform, args) {
+  fs.copyFileSync(path.join(INSTALLER_DIR, "binary-install.js"), path.join(dir, "binary-install.js"));
+  fs.writeFileSync(
+    path.join(dir, "run.js"),
+    `const { Package } = require(${JSON.stringify(path.join(dir, "binary-install.js"))});
+     const platform = ${JSON.stringify(platform)};
+     new Package(platform, "vericto-test", ${JSON.stringify(url)}, platform.artifactName, ".zip", { vericto: "vericto.exe" })
+       .run("vericto");`,
+  );
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(dir, "run.js"), ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("Windows: the .zip installs on first run, and arguments and exit codes pass through", { skip: !onWindows }, async () => {
+  const dir = tmpdir("win");
+  const zip = makeWindowsZip(dir);
+  const { server, base } = await serve(zip);
+  try {
+    const platform = {
+      artifactName: "vericto-cli-x86_64-pc-windows-msvc.zip",
+      zipExt: ".zip",
+      sha256: sha256(fs.readFileSync(zip)),
+    };
+    const url = `${base}/vericto-cli-x86_64-pc-windows-msvc.zip`;
+    const first = await runPackage(dir, url, platform, ["/d", "/c", "echo vericto-ok"]);
+    assert.equal(first.code, 0, first.stderr);
+    assert.match(first.stdout, /vericto-ok/);
+    assert.ok(fs.existsSync(path.join(dir, "node_modules", ".bin_real", "vericto.exe")));
+    // Installed now: the second run uses it as is, and keeps the exit code.
+    const second = await runPackage(dir, url, platform, ["/d", "/c", "exit 3"]);
+    assert.equal(second.code, 3, second.stderr);
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Windows: a .zip whose SHA-256 does not match is not unpacked", { skip: !onWindows }, async () => {
+  const dir = tmpdir("winbad");
+  const zip = makeWindowsZip(dir);
+  const { server, base } = await serve(zip);
+  try {
+    const platform = { artifactName: "vericto-cli-x86_64-pc-windows-msvc.zip", zipExt: ".zip", sha256: "0".repeat(64) };
+    const r = await runPackage(dir, `${base}/vericto-cli-x86_64-pc-windows-msvc.zip`, platform, ["/c", "exit 0"]);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stderr, /SHA-256 mismatch/);
+    assert.ok(!fs.existsSync(path.join(dir, "node_modules", ".bin_real", "vericto.exe")));
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

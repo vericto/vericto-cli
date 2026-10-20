@@ -48,7 +48,7 @@ jobs:
       # libclang for pg_query's bindgen (the `offline` feature embeds the engine).
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev clang
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      # The Windows build has no engine: keep the feature-off code warning-free.
+      # The thin client (no engine): keep the feature-off code warning-free.
       - run: cargo clippy --all-targets --no-default-features -- -D warnings
 
   test:
@@ -63,30 +63,32 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev clang
       - run: cargo build --locked --all-targets
       - run: cargo test --locked
-      # The Windows-shaped build (no engine): `--offline` must exit 2 there.
+      # The thin client (no engine): `--offline` must exit 2 there.
       - run: cargo test --locked --no-default-features
 
-  # Informational, NOT required: does the embedded engine (pg_query: libpg_query
-  # C sources + bindgen) build and pass on Windows? The release ships Windows
-  # online-only; `--cfg vericto_windows_offline` lifts the Cargo.toml target
-  # gate for this job only. `continue-on-error` keeps a failure here from
-  # failing the workflow; do not add this job to the required checks. Once it
-  # is green, drop the gate (Cargo.toml, src/offline.rs, tests/cli.rs) and this
-  # job's RUSTFLAGS, and Windows gets offline mode in the next release.
-  windows-offline:
-    name: Windows offline mode (informational)
-    runs-on: windows-2022
-    continue-on-error: true
-    env:
-      RUSTFLAGS: "-D warnings --cfg vericto_windows_offline"
+  # Windows, with the embedded engine (offline mode ships on Windows since
+  # 1.11.0): lint, build and the whole test suite, natively on x64 and on ARM64.
+  # A required check, one per runner: "Windows build & test (windows-2022)" and
+  # "Windows build & test (windows-11-arm)". clippy runs here too, because the
+  # Linux lint job never compiles the cfg(windows) code (the config file's
+  # owner-only ACL). Both runner images ship LLVM (libclang, for pg_query's
+  # bindgen) and MSVC, so nothing is installed.
+  windows:
+    name: Windows build & test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # The runner image ships LLVM (libclang) and MSVC, as pg_query's own
-      # Windows CI relies on.
+      - name: Lint (clippy)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Build with the engine
         run: cargo build --locked --all-targets
       # The offline tests first (unit + integration, incl. deep nesting against
@@ -95,19 +97,39 @@ jobs:
         run: cargo test --locked offline
       - name: Full test suite
         run: cargo test --locked
+      - name: Thin client (no engine)
+        run: cargo test --locked --no-default-features
 
-  # The npm installer's integrity checks (npm-installer/): node:test, no
-  # dependencies to install.
-  npm-installer:
-    name: npm installer tests
-    runs-on: ubuntu-latest
+  # The installers' own tests, node:test with no dependencies to install: the
+  # npm installer's integrity checks (npm-installer/) and the Windows packaging
+  # (windows/: the PowerShell installer, Scoop and winget manifests). On
+  # Windows they also install a .zip through the npm package and run it, and
+  # run the rendered PowerShell installer against a good and a tampered
+  # archive.
+  installers:
+    name: Installer tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '20.x'
+      # The tests call `tar` with Windows paths (C:\...): put Windows' own
+      # bsdtar first, ahead of any GNU tar (Git's reads `C:` as a remote host).
+      - name: Use the system tar
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "$env:SystemRoot\System32" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          tar --version
       - run: npm test
         working-directory: npm-installer
+      - run: npm test
+        working-directory: windows
 
   # Dependency checks against the committed Cargo.lock: RustSec advisories
   # (vulnerable, unsound, unmaintained or yanked crates), licenses, bans and

@@ -14,7 +14,7 @@ enterprise unmetered). See [DESIGN.md](https://github.com/vericto/vericto-cli/bl
 
 Releases are built with [`cargo-dist`](https://opensource.axo.dev/cargo-dist/):
 cross-compiled binaries for Linux (x86_64/aarch64, static musl), macOS
-(x86_64/aarch64), and Windows (x86_64) are published to GitHub Releases on every
+(x86_64/aarch64), and Windows (x86_64/aarch64) are published to GitHub Releases on every
 version tag, each with SHA-256 checksums (see _Verifying a download_ below).
 Every other channel serves those same binaries.
 
@@ -33,6 +33,7 @@ npm install -g @vericto/vericto-cli      # or, zero-install: npx @vericto/verict
 ```bash
 # Shell installer (Linux/macOS)
 curl -fsSL https://github.com/vericto/vericto-cli/releases/latest/download/vericto-cli-installer.sh | sh
+# (Windows: see "Windows" below)
 
 # Docker (CI runners that prefer an image step). The image sets CI=true, so a
 # missing key is exit 3 there, never an automatic offline run.
@@ -60,18 +61,71 @@ cargo install --path .
 > under a Homebrew-managed Node.
 >
 > **npm:** the release pipeline builds **and publishes** `@vericto/vericto-cli`
-> to the registry on every version tag. **Scoop remains planned**
-> (`scoop install vericto`), pending a bucket repo; on Windows, use npm or the
-> prebuilt binary.
+> to the registry on every version tag, for every platform, Windows included.
 
 > Building from source needs a C compiler and libclang (the embedded engine's
 > `pg_query` compiles PostgreSQL's parser and runs bindgen): Xcode Command Line
-> Tools on macOS, `clang` and `libclang-dev` on Debian/Ubuntu. The
+> Tools on macOS, `clang` and `libclang-dev` on Debian/Ubuntu, and on Windows the
+> Visual Studio Build Tools (C++ workload) and LLVM (`winget install LLVM.LLVM`). The
 > `rust:*-alpine` images cannot load libclang from a build script; build in a
 > Debian container targeting musl, as the `Dockerfile` does. To build the thin
 > client only, without offline mode:
 > `cargo install --path . --no-default-features`. See
 > [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+### Windows
+
+Windows 10/11 on x64 and on ARM64 (a native `aarch64` build since 1.11.0), offline
+mode included. Any of these, in PowerShell (Windows PowerShell 5.1 or PowerShell 7):
+
+```powershell
+# PowerShell installer: puts vericto.exe in %USERPROFILE%\.cargo\bin and adds it
+# to PATH. It checks the archive's SHA-256 before unpacking anything.
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/vericto/vericto-cli/releases/latest/download/vericto-cli-installer.ps1 | iex"
+
+# winget
+winget install Vericto.VerictoCLI
+
+# Scoop, from Vericto's bucket
+scoop bucket add vericto https://github.com/vericto/scoop-bucket
+scoop install vericto/vericto
+
+# npm (Node 18+), also zero-install: npx @vericto/vericto-cli check ...
+npm install -g @vericto/vericto-cli
+```
+
+`-ExecutionPolicy Bypass` applies to that one command only; Windows' default
+policy (`Restricted`) refuses to run the installer otherwise. winget and Scoop
+are updated by the release pipeline and pin the archive's SHA-256 too; if
+either cannot find the package yet (both are new in 1.11.0), use the installer
+or npm.
+
+A manual install, with the checksum check (use
+`vericto-cli-aarch64-pc-windows-msvc.zip` on ARM64):
+
+```powershell
+$v = "1.11.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
+$base = "https://github.com/vericto/vericto-cli/releases/download/v$v"
+Invoke-WebRequest "$base/$zip" -OutFile $zip
+Invoke-WebRequest "$base/$zip.sha256" -OutFile "$zip.sha256"
+if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne (Get-Content "$zip.sha256").Split(" ")[0]) { throw "SHA-256 mismatch" }
+Expand-Archive $zip -DestinationPath "$env:LOCALAPPDATA\Programs\vericto"
+# then add $env:LOCALAPPDATA\Programs\vericto to your PATH
+```
+
+> **SmartScreen:** the Windows binaries are not code-signed yet. A `vericto.exe`
+> unpacked from a zip downloaded **with a browser** carries the "downloaded from
+> the internet" mark, and Windows may stop it with "Windows protected your PC".
+> Check the SHA-256 (above) or the build attestation
+> (`gh attestation verify <zip> --repo vericto/vericto-cli`), then
+> `Unblock-File vericto.exe`. The PowerShell installer and npm download with
+> PowerShell or Node, which do not add that mark.
+
+On Windows, `vericto login` stores its config in
+`%APPDATA%\vericto\config.toml`, readable by your user only (see
+[Configuration](#configuration)). SQL files are read as UTF-8, with or without
+a byte-order mark, or as UTF-16 with one (what Windows PowerShell 5.1's `>`
+writes), and CRLF line endings are fine.
 
 ### Verifying a download
 
@@ -326,7 +380,8 @@ fail_on = "flag"
 baseline = ".vericto-baseline.json"
 ```
 
-Resolution order (first wins): flags → env → `.vericto.toml` → `~/.config/vericto/config.toml`.
+Resolution order (first wins): flags → env → `.vericto.toml` → `~/.config/vericto/config.toml`
+(`%APPDATA%\vericto\config.toml` on Windows).
 
 ## Browser login (default, for a developer at a keyboard)
 
@@ -513,8 +568,10 @@ Credentials and defaults resolve in this order (first wins):
 1. `--api-key` / `--api-url` flags
 2. `VERICTO_API_KEY` / `VERICTO_API_URL` environment variables
 3. Config file written by `vericto login`:
-   `$XDG_CONFIG_HOME/vericto/config.toml` (default `~/.config/vericto/config.toml`),
-   created with `0600` permissions.
+   `$XDG_CONFIG_HOME/vericto/config.toml` (default `~/.config/vericto/config.toml`;
+   on Windows `%APPDATA%\vericto\config.toml`), created with `0600` permissions,
+   and on Windows with an access list that grants your user alone (no
+   inherited entries).
 
 ```toml
 # ~/.config/vericto/config.toml
@@ -564,7 +621,7 @@ workspace's rules and for the record.
 |---|---|---|
 | Account, network | none; nothing leaves the machine | API key, login or OIDC; SQL goes to your workspace |
 | Rules | the 42 standard rules, at their default severities | your workspace's rules: standard rules with your overrides, plus custom rules |
-| Engine | the one in the binary (4.3.0 in 1.10.0) | the server's, always current |
+| Engine | the one in the binary (4.3.0 in 1.11.0) | the server's, always current |
 | Schema DDL (DROP, ALTER, TRUNCATE) | flagged, as in every CI check | your workspace's policy, with the same CI cap |
 | Sensitive columns, masking, agent allowlists, observe mode | no | yes |
 | Parse errors | allowed and reported | your workspace's parse-error policy |
@@ -573,7 +630,7 @@ workspace's rules and for the record.
 | Signed receipts (`--receipt`) | refused (exit `2`) | yes |
 | Baselines | inline suppressions work; a baseline recorded online does not match offline findings | yes |
 | Metered | no | counts against the plan's monthly CLI allowance |
-| Windows | not yet (`--offline` exits `2`) | yes |
+| Windows | yes (x64 and ARM64), since 1.11.0 | yes |
 
 ### Which mode a run uses
 

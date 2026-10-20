@@ -13,6 +13,10 @@ ci = "github"
 # `homebrew` builds a `vericto.rb` formula (macOS arm64/x86_64 and Linux
 # arm64/x86_64, the latter served by the static musl archives) pinned to the
 # release's SHA-256 checksums: `brew install vericto/tap/vericto`.
+# No "powershell": cargo-dist 0.32's PowerShell installer does not verify what
+# it downloads (its shell installer does). Windows gets
+# vericto-cli-installer.ps1 from the custom global job below instead: the
+# cargo-dist installer plus SHA-256 pinning (windows/installer.ps1).
 installers = ["shell", "npm", "homebrew"]
 # The tap the formula is published to (github.com/vericto/homebrew-tap, tapped
 # as `vericto/tap`), and the formula name: `vericto`, the installed command,
@@ -33,9 +37,19 @@ npm-scope = "@vericto"
 # secret that any workflow in this public repo can reach. (With the tap set and
 # the built-in job off, `dist plan` warns that the Homebrew publish job is
 # disabled; that is expected.)
-publish-jobs = ["./npm-publish", "./homebrew-publish"]
+# Scoop and winget the same way (.github/workflows/scoop-publish.yml and
+# winget-publish.yml), each with its token in `prod`. Both skip, and say so,
+# while their token is not set: the bucket repo and the first winget
+# submission are owner steps (DESIGN.md §9, "Windows channels").
+publish-jobs = ["./npm-publish", "./homebrew-publish", "./scoop-publish", "./winget-publish"]
+# Runs once the binaries are built, next to cargo-dist's own global artifacts
+# (installers, checksums): renders the PowerShell installer with every Windows
+# archive's SHA-256 pinned, and installs the release with it on Windows before
+# anything is published (.github/workflows/powershell-installer.yml). Its
+# output is part of the release from the start, and every PR runs it too.
+global-artifacts-jobs = ["./powershell-installer"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Where to host releases
@@ -67,7 +81,17 @@ github-attestations = true
 # Offline mode (DESIGN §13) embeds vericto-engine, whose pg_query runs
 # bindgen at build time: the Linux runners need libclang and clang's own headers
 # (`stdbool.h`; libclang-dev alone lacks them, seen in a Debian builder), macOS
-# runners get both with Xcode. Windows builds without the engine, see Cargo.toml.
+# runners get both with Xcode. The Windows runners (windows-2022, windows-11-arm)
+# ship LLVM and MSVC, so they need nothing extra.
+# Windows on ARM builds natively on GitHub's windows-11-arm runner (free for
+# public repos; Visual Studio with the ARM64 tools, LLVM and Rust preinstalled),
+# so pg_query compiles and bindgen runs for the host, as on every other target.
+# dist itself runs there as its x64 build, under emulation (cargo-dist ships no
+# ARM64 Windows binary; its installer picks the x64 one).
+[dist.github-custom-runners.aarch64-pc-windows-msvc]
+runner = "windows-11-arm"
+host = "aarch64-pc-windows-msvc"
+
 [dist.dependencies.apt]
 libclang-dev = { version = "*", targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] }
 clang = { version = "*", targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] }
@@ -81,6 +105,12 @@ clang = { version = "*", targets = ["x86_64-unknown-linux-musl", "aarch64-unknow
 # this run's artifacts and pushes to the tap with HOMEBREW_TAP_TOKEN; it needs
 # nothing from the workflow's GITHUB_TOKEN beyond contents: read.
 "homebrew-publish" = { contents = "read" }
+# Scoop pushes to the bucket repo with SCOOP_BUCKET_TOKEN, winget opens its PR
+# on microsoft/winget-pkgs with WINGET_TOKEN, and the PowerShell installer job
+# only reads this run's artifacts: none of them uses the GITHUB_TOKEN to write.
+"scoop-publish" = { contents = "read" }
+"winget-publish" = { contents = "read" }
+"powershell-installer" = { contents = "read" }
 
 # Every action in the generated release.yml is pinned to a full commit SHA, not
 # a movable tag: dist writes these into the workflow on `dist generate`. Bump

@@ -294,21 +294,30 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// The program and arguments that open `url` in the default browser on `os`
+/// (`std::env::consts::OS`). The URL is always one argument, passed to a
+/// program that does not parse it: on Windows not `cmd /C start`, because
+/// cmd treats the `&` between query parameters as a command separator, and
+/// the browser would open `/cli-auth?state=...` without the `&port=...` the
+/// callback needs (before 1.11.0, `vericto login` on Windows failed that way).
+/// `rundll32 url.dll,FileProtocolHandler` hands the URL to the shell as is.
+fn launcher(os: &str, url: &str) -> (&'static str, Vec<String>) {
+    match os {
+        "macos" => ("open", vec![url.to_string()]),
+        "windows" => (
+            "rundll32.exe",
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
+        ),
+        _ => ("xdg-open", vec![url.to_string()]),
+    }
+}
+
 /// Opens `url` in the user's default browser. Best-effort: a failure here
 /// (headless box, unusual `$PATH`) is reported but never fatal — `login`
 /// falls back to printing the URL for the user to open by hand.
 pub fn open_browser(url: &str) -> Result<(), String> {
-    let result = if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(url).status()
-    } else if cfg!(target_os = "windows") {
-        // `cmd /c start "" <url>` — the empty title arg avoids `start`
-        // misinterpreting a URL containing spaces/quotes as the window title.
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .status()
-    } else {
-        std::process::Command::new("xdg-open").arg(url).status()
-    };
+    let (program, args) = launcher(std::env::consts::OS, url);
+    let result = std::process::Command::new(program).args(&args).status();
 
     match result {
         Ok(status) if status.success() => Ok(()),
@@ -320,6 +329,29 @@ pub fn open_browser(url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The login URL carries `&port=`: every launcher gets it whole, as one
+    /// argument, and none goes through a shell (`cmd /C start` cut it at `&`).
+    #[test]
+    fn launcher_passes_the_whole_url_as_one_argument() {
+        let url = "https://vericto.com/cli-auth?state=abc&port=51234";
+        for os in ["macos", "windows", "linux", "freebsd"] {
+            let (program, args) = launcher(os, url);
+            assert_eq!(args.last().map(String::as_str), Some(url), "{os}");
+            assert_eq!(args.iter().filter(|a| a.contains("port=")).count(), 1);
+            assert!(
+                !["cmd", "cmd.exe", "sh", "powershell"].contains(&program),
+                "{os}: {program}"
+            );
+        }
+        assert_eq!(
+            launcher("windows", url),
+            (
+                "rundll32.exe",
+                vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()]
+            )
+        );
+    }
 
     #[test]
     fn generate_state_is_64_hex_chars_and_varies() {

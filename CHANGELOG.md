@@ -6,6 +6,79 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-19
+
+**Windows becomes a first-class platform: offline mode, ARM64, and Windows
+installers.** The Windows binary embeds the engine, so `vericto check
+--offline` works there as on macOS and Linux, and Windows on ARM64 gets a
+native build. Nothing changes on macOS and Linux except the input fix under
+Security, which applies everywhere.
+
+### Security
+- **SQL saved with a UTF-8 byte-order mark was not checked.** The BOM reached
+  the parser as part of the first statement, which then failed to parse, and a
+  parse error is allowed: offline, `DELETE FROM users;` saved that way passed
+  with exit 0; online, the result was the workspace's parse-error policy
+  instead of the rule. Windows editors and Windows PowerShell 5.1 (`Set-Content
+  -Encoding UTF8`) write that BOM. Files and stdin are now read as UTF-8 with
+  or without a BOM, or as UTF-16 with one (Windows PowerShell 5.1's `>` and
+  `Out-File` write UTF-16LE, which used to stop the run with exit 2). Anything
+  else is still refused with exit 2. Line endings are kept as they are, CRLF
+  included, so lines, inline suppressions and statement hashes are unchanged.
+
+### Added
+- **Offline mode on Windows.** The `x86_64-pc-windows-msvc` build embeds
+  `vericto-engine` like every other target (the Windows-only target gate and
+  the `vericto_windows_offline` cfg are gone). `--offline` no longer exits 2
+  on Windows.
+- **Windows on ARM64:** `vericto-cli-aarch64-pc-windows-msvc.zip`, built
+  natively on GitHub's `windows-11-arm` runner, with offline mode. The shell
+  installer, npm package and the new Windows channels pick it on ARM64.
+- **PowerShell installer:** `powershell -ExecutionPolicy Bypass -c "irm
+  https://github.com/vericto/vericto-cli/releases/latest/download/vericto-cli-installer.ps1
+  | iex"`. It is cargo-dist's PowerShell installer plus a SHA-256 check of the
+  archive before anything is unpacked (cargo-dist 0.32's own does not check),
+  rendered with the release's checksums (`windows/installer.ps1`,
+  `windows/package.js`) and test-installed on Windows by the release workflow
+  before the release is published.
+- **Scoop and winget publish jobs** (`scoop install vericto/vericto` from
+  `vericto/scoop-bucket`, `winget install Vericto.VerictoCLI`), both pinning
+  the archives' SHA-256. They publish once their owner steps are done (the
+  bucket repo, the first winget submission and their tokens); until then they
+  succeed without publishing and say so.
+- README: a Windows install section (PowerShell, winget, Scoop, npm, a manual
+  zip with its checksum check, SmartScreen). DESIGN §9 "Windows channels":
+  the channels, the owner steps and the code-signing options.
+
+### Fixed
+- **`vericto login` on Windows opened a broken URL.** The browser was started
+  with `cmd /C start`, which treats the `&` between query parameters as a
+  command separator, so the login page opened without its `port` and could
+  not return to the CLI. It now uses `rundll32 url.dll,FileProtocolHandler`,
+  which receives the URL as one argument. `vericto docs` opens links the same
+  way.
+- **The config file on Windows is readable by your user only.** `vericto
+  login` wrote `%APPDATA%\vericto\config.toml` with the folder's inherited
+  permissions; on Unix it has always been `0600`. On Windows the file (and a
+  config folder the CLI creates) now gets a protected access list with a
+  single entry, full control for the current user, and an existing file is
+  replaced by a new owner-only one. An empty `XDG_CONFIG_HOME` now means unset
+  on Windows too (`%APPDATA%`), not `~/.config`.
+- **Windows paths in reports use `/`.** A file passed as `db\m.sql` is
+  reported as `db/m.sql` in SARIF URIs, GitHub annotations, GitLab reports and
+  new baseline entries, so they resolve and match what `--changed` or a Linux
+  runner produce. Baselines written before 1.11.0 with `\` paths still match.
+
+### CI
+- The Windows job is no longer informational: `Windows build & test`, on
+  `windows-2022` and `windows-11-arm`, runs clippy (the Linux lint job never
+  compiles the Windows-only code), the build and the whole suite, and is meant
+  to be a required check.
+- The installer tests run on `windows-latest` too: they install a .zip through
+  the npm package and run it (arguments and exit code), refuse a tampered one,
+  and run the rendered PowerShell installer against a good and a tampered
+  archive.
+
 ## [1.10.1] - 2026-10-19
 
 **The container image builds again, and no change in behavior.** The container

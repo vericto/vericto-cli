@@ -20,7 +20,7 @@
 //!   `check` suggests regenerating.
 
 use crate::api::{CheckResponse, QueryResult};
-use crate::output::{file_of, fingerprint};
+use crate::output::{file_as_given, file_of, fingerprint};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -141,8 +141,21 @@ pub fn is_baselined(
     if q.status == "ALLOWED" {
         return false;
     }
-    let file = file_of(files, q);
-    baselined.contains(key_for(baseline.version, q, &file).as_str())
+    keys_for(baseline.version, q, files)
+        .iter()
+        .any(|k| baselined.contains(k.as_str()))
+}
+
+/// Every key a finding matches under a baseline of `version`: the one for its
+/// path with `/` separators, and on Windows also the one for the path exactly
+/// as given (`db\m.sql`), which baselines written before 1.11.0 used, so they
+/// keep matching after the upgrade.
+fn keys_for(version: u32, q: &QueryResult, files: &[String]) -> Vec<String> {
+    let mut keys = vec![key_for(version, q, &file_of(files, q))];
+    if let Some(given) = file_as_given(files, q) {
+        keys.push(key_for(version, q, &given));
+    }
+    keys
 }
 
 /// Baseline entries whose fingerprint no longer appears in `resp` — stale rows a
@@ -156,7 +169,7 @@ pub fn drifted<'a>(
         .queries
         .iter()
         .filter(|q| q.status != "ALLOWED")
-        .map(|q| key_for(baseline.version, q, &file_of(files, q)))
+        .flat_map(|q| keys_for(baseline.version, q, files))
         .collect();
     baseline
         .entries
@@ -491,5 +504,35 @@ DELETE FROM audit;";
             inline_suppression_scoped("DELETE FROM u;", "VERICTO-001", 1, Some(9)),
             None
         );
+    }
+
+    /// On Windows a path typed with `\` is keyed with `/`, so a baseline
+    /// recorded from `--changed` or on a Linux runner matches it, and a
+    /// baseline written before 1.11.0 (keyed with `\`) still matches too.
+    #[cfg(windows)]
+    #[test]
+    fn windows_backslash_paths_match_both_spellings() {
+        let finding = || q("BLOCKED", "VERICTO-001", "DeleteStmt > WhereClause = NULL");
+        let typed = vec![r"db\m.sql".to_string()];
+        for keyed_as in ["db/m.sql", r"db\m.sql"] {
+            let b = Baseline {
+                version: 1,
+                entries: vec![Entry {
+                    fingerprint: fingerprint(&finding(), keyed_as),
+                    file: keyed_as.into(),
+                    rule_code: None,
+                    status: None,
+                    line: None,
+                }],
+            };
+            assert!(is_baselined(&finding(), &typed, &b, &b.set()), "{keyed_as}");
+            assert!(
+                drifted(&b, &resp(vec![finding()]), &typed).is_empty(),
+                "{keyed_as}"
+            );
+        }
+        // A new baseline records the `/` spelling.
+        let b = Baseline::from_response(&resp(vec![finding()]), &typed);
+        assert_eq!(b.entries[0].file, "db/m.sql");
     }
 }

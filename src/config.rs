@@ -10,8 +10,9 @@
 //!      never credentials (§6.3, `ProjectConfig`)
 //!   4. user config file `~/.config/vericto/config.toml` (written by `vericto login`)
 //!
-//! The config file holds the API key, so it is written with `0600` permissions
-//! and never logged.
+//! The config file holds the API key, so it is written owner-only and never
+//! logged: `0600` (directory `0700`) on Unix, and on Windows a protected DACL
+//! that grants the current user alone, with no inherited entries.
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -52,21 +53,26 @@ pub struct Config {
 }
 
 /// Returns the config file path (DESIGN §6): `$XDG_CONFIG_HOME/vericto/config.toml`
-/// when the env var is set, otherwise `~/.config/vericto/config.toml`. We follow
-/// the XDG convention on every Unix (including macOS) so the path is predictable
-/// and overridable in tests/CI, rather than `dirs`' platform-specific default
-/// (`~/Library/Application Support` on macOS). None if no home is resolvable.
+/// when the env var is set, otherwise `~/.config/vericto/config.toml` on Unix
+/// and `%APPDATA%\vericto\config.toml` on Windows. We follow the XDG convention
+/// on every Unix (including macOS) so the path is predictable and overridable
+/// in tests/CI, rather than `dirs`' platform-specific default
+/// (`~/Library/Application Support` on macOS). Windows keeps the platform's
+/// own per-user location (the roaming AppData folder), and `XDG_CONFIG_HOME`
+/// overrides it there too. None if no home is resolvable.
 pub fn config_path() -> Option<PathBuf> {
-    let base = if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            PathBuf::from(xdg)
-        } else {
-            dirs::home_dir()?.join(".config")
-        }
-    } else if cfg!(unix) {
-        dirs::home_dir()?.join(".config")
-    } else {
-        dirs::config_dir()?
+    config_path_in(std::env::var_os("XDG_CONFIG_HOME"))
+}
+
+/// `config_path` for a given `XDG_CONFIG_HOME` value (tests pass it in instead
+/// of changing the process environment, which other tests read concurrently).
+fn config_path_in(xdg: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    // An empty value is the same as unset (until 1.11.0 it meant
+    // `~/.config` on Windows too, instead of `%APPDATA%`).
+    let base = match xdg.filter(|x| !x.is_empty()) {
+        Some(xdg) => PathBuf::from(xdg),
+        None if cfg!(unix) => dirs::home_dir()?.join(".config"),
+        None => dirs::config_dir()?,
     };
     Some(base.join("vericto").join("config.toml"))
 }
@@ -109,8 +115,10 @@ impl Config {
     }
 }
 
-/// Creates the config directory (and missing parents) as `0700` on Unix, so a
-/// directory the CLI creates is not listable by other users.
+/// Creates the config directory (and missing parents) owner-only, so a
+/// directory the CLI creates is not listable by other users: `0700` on Unix,
+/// and on Windows a protected DACL for the current user, inherited by what is
+/// created inside it. An existing directory is left as it is on both.
 fn create_private_dir(dir: &std::path::Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -120,18 +128,28 @@ fn create_private_dir(dir: &std::path::Path) -> io::Result<()> {
             .mode(0o700)
             .create(dir)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        if dir.is_dir() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(dir)?;
+        win_acl::restrict_to_owner(dir, true)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::create_dir_all(dir)
     }
 }
 
-/// Writes `contents` to `path` with owner-only (`0600`) permissions on Unix.
-/// On other platforms it writes normally (ACLs are the platform's concern).
+/// Writes `contents` to `path` owner-only: `0600` on Unix, a protected DACL
+/// granting the current user alone on Windows (the ACL equivalent of `0600`:
+/// no entry inherited from the parent, so a key written under a shared
+/// `XDG_CONFIG_HOME` is not readable by the other users that folder grants).
 ///
-/// `mode(0o600)` only applies when the file is created, so an existing file
-/// (written by hand, or by an older version) is narrowed to `0600` before the
-/// key is written into it.
+/// An existing file (written by hand, or by an older version) loses its
+/// broader permissions before the key is written: on Unix it is narrowed
+/// first, on Windows a new owner-only file replaces it.
 fn write_private(path: &std::path::Path, contents: &str) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -147,9 +165,132 @@ fn write_private(path: &std::path::Path, contents: &str) -> io::Result<()> {
         f.write_all(contents.as_bytes())?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        win_acl::write_owner_only(path, contents)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::write(path, contents)
+    }
+}
+
+/// Owner-only access on Windows, without `unsafe` (the crate forbids it): the
+/// current user's SID from `whoami /user`, and `icacls` to replace the
+/// object's DACL with a protected one (`/inheritance:r`: no inherited
+/// entries) holding a single entry, full access for that user. Both tools
+/// ship with every Windows since Vista and are run from the system directory.
+/// Administrators can still take ownership, as root can read a `0600` file.
+#[cfg(windows)]
+mod win_acl {
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    /// `%SystemRoot%\System32\<exe>`, so a same-named program elsewhere on
+    /// `PATH` is never run instead.
+    fn system_tool(exe: &str) -> PathBuf {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        PathBuf::from(root).join("System32").join(exe)
+    }
+
+    fn run(cmd: &mut Command, what: &str) -> io::Result<String> {
+        let out = cmd
+            .output()
+            .map_err(|e| io::Error::other(format!("could not run {what}: {e}")))?;
+        if !out.status.success() {
+            return Err(io::Error::other(format!(
+                "{what} failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// The SID of the user the process runs as (`S-1-5-21-...`).
+    pub(super) fn current_user_sid() -> io::Result<String> {
+        let out = run(
+            Command::new(system_tool("whoami.exe")).args(["/user", "/fo", "csv", "/nh"]),
+            "whoami /user",
+        )?;
+        parse_whoami_sid(&out).ok_or_else(|| {
+            io::Error::other(format!("unexpected `whoami /user` output: {}", out.trim()))
+        })
+    }
+
+    /// The SID in `whoami /user /fo csv /nh` output: `"host\name","S-1-5-..."`.
+    pub(super) fn parse_whoami_sid(out: &str) -> Option<String> {
+        let sid = out.trim().rsplit(',').next()?.trim().trim_matches('"');
+        (sid.starts_with("S-1-") && sid[4..].chars().all(|c| c.is_ascii_digit() || c == '-'))
+            .then(|| sid.to_string())
+    }
+
+    /// Sets `path`'s DACL to a protected one granting the current user full
+    /// access and nobody else anything. Entries `path` carries explicitly
+    /// (not inherited) are kept, so it is only applied to objects the CLI has
+    /// just created, which have none. `inherit`: for a directory, the entry
+    /// is inherited by the files and directories created inside it.
+    pub(super) fn restrict_to_owner(path: &Path, inherit: bool) -> io::Result<()> {
+        let sid = current_user_sid()?;
+        let grant = if inherit {
+            format!("*{sid}:(OI)(CI)F")
+        } else {
+            format!("*{sid}:F")
+        };
+        run(
+            Command::new(system_tool("icacls.exe")).arg(path).args([
+                "/inheritance:r",
+                "/grant:r",
+                &grant,
+                "/q",
+            ]),
+            "icacls",
+        )
+        .map(|_| ())
+    }
+
+    /// Writes `contents` to `path` owner-only: into a new file next to it,
+    /// restricted before anything is written, then renamed over `path`. The
+    /// rename keeps the new file's DACL, so whatever entries an existing
+    /// `path` had are gone with it.
+    pub(super) fn write_owner_only(path: &Path, contents: &str) -> io::Result<()> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
+        let mut tmp_name = name.to_os_string();
+        tmp_name.push(format!(".{}.tmp", std::process::id()));
+        let tmp = path.with_file_name(tmp_name);
+        let result = (|| {
+            std::fs::File::create_new(&tmp)?;
+            restrict_to_owner(&tmp, false)?;
+            std::fs::write(&tmp, contents)?;
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
+    }
+
+    /// For tests: whether `path`'s DACL is protected, and the SID of each of
+    /// its access entries (PowerShell's `Get-Acl`, which does not depend on
+    /// the display language).
+    #[cfg(test)]
+    pub(super) fn dacl_of(path: &Path) -> io::Result<(bool, Vec<String>)> {
+        let script = "$a = Get-Acl -LiteralPath $env:VERICTO_ACL_PATH; \
+                      [string]$a.AreAccessRulesProtected; \
+                      $a.Access | ForEach-Object { \
+                        $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }";
+        let out = run(
+            Command::new(system_tool(r"WindowsPowerShell\v1.0\powershell.exe"))
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env("VERICTO_ACL_PATH", path),
+            "Get-Acl",
+        )?;
+        let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
+        let protected = lines.next() == Some("True");
+        Ok((protected, lines.map(String::from).collect()))
     }
 }
 
@@ -324,6 +465,61 @@ mod tests {
         );
     }
 
+    /// The Windows equivalent of the test above: the directory the CLI creates
+    /// and a config file written over an existing one end up with a protected
+    /// DACL whose only entry is the current user's, in place of the entries
+    /// they would inherit from the temp directory (which also grant SYSTEM and
+    /// Administrators).
+    #[cfg(windows)]
+    #[test]
+    fn write_private_leaves_only_the_current_user_in_the_dacl() {
+        let me = win_acl::current_user_sid().unwrap();
+        let owner_only = (true, vec![me.clone()]);
+        let dir = tempfile::tempdir().unwrap();
+        let (_, inherited) = win_acl::dacl_of(dir.path()).unwrap();
+        assert!(
+            inherited.len() > 1,
+            "the temp dir grants more than the user: {inherited:?}"
+        );
+
+        let config_dir = dir.path().join("vericto");
+        create_private_dir(&config_dir).unwrap();
+        assert_eq!(win_acl::dacl_of(&config_dir).unwrap(), owner_only);
+
+        let path = config_dir.join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        write_private(&path, "api_key = \"vtro_x\"").unwrap();
+        assert_eq!(win_acl::dacl_of(&path).unwrap(), owner_only);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "api_key = \"vtro_x\""
+        );
+
+        // A file outside a private directory, inheriting broader entries, is
+        // replaced by an owner-only one; no temporary file is left behind.
+        let loose = dir.path().join("loose.toml");
+        std::fs::write(&loose, "old").unwrap();
+        assert!(win_acl::dacl_of(&loose).unwrap().1.len() > 1);
+        write_private(&loose, "x").unwrap();
+        assert_eq!(win_acl::dacl_of(&loose).unwrap(), owner_only);
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parses_the_sid_from_whoami() {
+        assert_eq!(
+            win_acl::parse_whoami_sid("\"desktop-1\\runner admin\",\"S-1-5-21-1-2-3-500\"\r\n"),
+            Some("S-1-5-21-1-2-3-500".into())
+        );
+        assert_eq!(win_acl::parse_whoami_sid("\"x\",\"not a sid\""), None);
+        assert_eq!(win_acl::parse_whoami_sid(""), None);
+    }
+
     #[test]
     fn key_source_labels() {
         assert_eq!(KeySource::Flag.label(), "--api-key flag");
@@ -372,16 +568,38 @@ mod tests {
 
     #[test]
     fn config_path_honors_xdg() {
-        // config_path reads XDG_CONFIG_HOME; set it for a deterministic result.
-        let prev = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-test");
-        let p = config_path().unwrap();
+        let p = config_path_in(Some("/tmp/xdg-test".into())).unwrap();
         assert!(p.ends_with("vericto/config.toml"));
         assert!(p.starts_with("/tmp/xdg-test"));
-        match prev {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
+        // An empty value is the same as unset on Unix: ~/.config.
+        #[cfg(unix)]
+        assert_eq!(
+            config_path_in(Some("".into())).unwrap(),
+            dirs::home_dir()
+                .unwrap()
+                .join(".config/vericto/config.toml")
+        );
+    }
+
+    /// Without `XDG_CONFIG_HOME`, Windows uses the roaming AppData folder
+    /// (`%APPDATA%`), the platform's per-user config location.
+    #[cfg(windows)]
+    #[test]
+    fn config_path_defaults_to_appdata_on_windows() {
+        let p = config_path_in(None).unwrap();
+        assert_eq!(
+            p,
+            dirs::config_dir()
+                .unwrap()
+                .join("vericto")
+                .join("config.toml")
+        );
+        assert!(
+            p.ends_with(r"AppData\Roaming\vericto\config.toml"),
+            "{}",
+            p.display()
+        );
+        assert_eq!(config_path_in(Some("".into())), Some(p));
     }
 
     #[test]

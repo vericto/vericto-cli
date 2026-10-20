@@ -36,33 +36,30 @@
 //! because engine 4.1.3 exported none of them and picked its winner by
 //! severity first.
 //!
-//! Windows: the engine is not built for Windows in this release (see
-//! Cargo.toml), so `AVAILABLE` is false there and `--offline` exits 2. The
-//! `vericto_windows_offline` cfg, set only by the windows-offline CI job,
-//! turns it on to find out whether pg_query builds there.
+//! Windows: since 1.11.0 the engine is built for Windows like every other
+//! target, and the Windows CI job (a required check) runs the whole suite,
+//! offline tests included, on `windows-2022` and `windows-11-arm`. Until then
+//! the Windows binary was online-only.
 
 use crate::api::{CheckResponse, QueryInput, RunMode, Summary};
 
-/// Whether this build can evaluate offline: the `offline` feature is on and
-/// the target has the engine (every target but Windows, see Cargo.toml).
-pub const AVAILABLE: bool = cfg!(all(
-    feature = "offline",
-    any(not(windows), vericto_windows_offline)
-));
+/// Whether this build can evaluate offline: the `offline` feature (default,
+/// on every release target) embeds the engine.
+pub const AVAILABLE: bool = cfg!(feature = "offline");
 
 /// Version of the embedded `vericto-engine`: the engine's own constant.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 pub const ENGINE_VERSION: &str = vericto_engine::ENGINE_VERSION;
 /// A build with no engine never reports an offline result (`check` fails with
 /// `Unavailable` first), so this only keeps the type the same.
-#[cfg(not(all(feature = "offline", any(not(windows), vericto_windows_offline))))]
+#[cfg(not(feature = "offline"))]
 pub const ENGINE_VERSION: &str = "none";
 
 /// Number of standard rules evaluated offline: the engine's standard ruleset.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 pub const STANDARD_RULE_COUNT: usize = vericto_engine::STANDARD_RULES.len();
 /// No engine, no rules (never reported, see `ENGINE_VERSION`).
-#[cfg(not(all(feature = "offline", any(not(windows), vericto_windows_offline))))]
+#[cfg(not(feature = "offline"))]
 pub const STANDARD_RULE_COUNT: usize = 0;
 
 /// The `ruleset_version` an offline result reports: the standard set is a
@@ -98,28 +95,16 @@ pub fn in_ci() -> bool {
 /// Why an offline check could not run at all.
 #[derive(Debug, PartialEq, Eq)]
 pub enum OfflineError {
-    /// This build has no engine (feature off, or Windows).
+    /// This build has no engine (built with `--no-default-features`).
     Unavailable,
     /// The dialect is not one the engine knows.
-    #[cfg_attr(
-        not(all(feature = "offline", any(not(windows), vericto_windows_offline))),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(feature = "offline"), allow(dead_code))]
     Dialect(String),
 }
 
 impl std::fmt::Display for OfflineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OfflineError::Unavailable if cfg!(all(windows, not(vericto_windows_offline))) => {
-                write!(
-                    f,
-                    "offline mode is not available on Windows yet: vericto {} for Windows is \
-                     online-only. Use online mode (`vericto login` or VERICTO_API_KEY), or run \
-                     --offline on macOS, Linux or WSL.",
-                    env!("CARGO_PKG_VERSION")
-                )
-            }
             OfflineError::Unavailable => write!(
                 f,
                 "this build of vericto was compiled without the `offline` feature, so it has no \
@@ -165,7 +150,7 @@ pub fn check(queries: &[QueryInput], dialect: &str) -> Result<CheckResponse, Off
     })
 }
 
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 mod engine {
     use super::OfflineError;
     use crate::api::{QueryInput, QueryResult};
@@ -267,7 +252,7 @@ mod engine {
     }
 }
 
-#[cfg(not(all(feature = "offline", any(not(windows), vericto_windows_offline))))]
+#[cfg(not(feature = "offline"))]
 mod engine {
     use super::OfflineError;
     use crate::api::{QueryInput, QueryResult};
@@ -280,7 +265,7 @@ mod engine {
     }
 }
 
-#[cfg(all(test, feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(all(test, feature = "offline"))]
 mod tests {
     use super::*;
     use crate::api::QueryResult;
