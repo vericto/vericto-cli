@@ -177,8 +177,9 @@ fn write_private(path: &std::path::Path, contents: &str) -> io::Result<()> {
 
 /// Owner-only access on Windows, without `unsafe` (the crate forbids it): the
 /// current user's SID from `whoami /user`, and `icacls` to replace the
-/// object's DACL with a protected one (`/inheritance:r`: no inherited
-/// entries) holding a single entry, full access for that user. Both tools
+/// object's DACL with a protected one (`/reset`: no explicit entries, then
+/// `/inheritance:r`: no inherited ones) holding a single entry, full access
+/// for that user. Both tools
 /// ship with every Windows since Vista and are run from the system directory.
 /// Administrators can still take ownership, as root can read a `0600` file.
 #[cfg(windows)]
@@ -227,10 +228,15 @@ mod win_acl {
     }
 
     /// Sets `path`'s DACL to a protected one granting the current user full
-    /// access and nobody else anything. Entries `path` carries explicitly
-    /// (not inherited) are kept, so it is only applied to objects the CLI has
-    /// just created, which have none. `inherit`: for a directory, the entry
+    /// access and nobody else anything. `inherit`: for a directory, the entry
     /// is inherited by the files and directories created inside it.
+    ///
+    /// A new object is not always entry-free besides what it inherits: under
+    /// a parent with no inheritable entries it gets the creator's default
+    /// DACL as explicit entries (SYSTEM and Administrators for an elevated
+    /// administrator, as on the GitHub runners), which `/inheritance:r` and
+    /// `/grant:r` leave in place. `/reset` drops them first; it is only
+    /// applied to objects the CLI has just created and not yet written to.
     pub(super) fn restrict_to_owner(path: &Path, inherit: bool) -> io::Result<()> {
         let sid = current_user_sid()?;
         let grant = if inherit {
@@ -238,6 +244,12 @@ mod win_acl {
         } else {
             format!("*{sid}:F")
         };
+        run(
+            Command::new(system_tool("icacls.exe"))
+                .arg(path)
+                .args(["/reset", "/q"]),
+            "icacls /reset",
+        )?;
         run(
             Command::new(system_tool("icacls.exe")).arg(path).args([
                 "/inheritance:r",
@@ -523,6 +535,24 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 2, "{names:?}");
+
+        // Under a parent without inheritable entries (the GitHub runners'
+        // temp directory), a new object gets the creator's default DACL as
+        // explicit entries instead: still owner-only once restricted.
+        let bare = dir.path().join("bare");
+        std::fs::create_dir(&bare).unwrap();
+        let status = std::process::Command::new("icacls")
+            .arg(&bare)
+            .args(["/inheritance:r", "/grant:r", &format!("*{me}:F"), "/q"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bare_dir = bare.join("vericto");
+        create_private_dir(&bare_dir).unwrap();
+        assert_eq!(win_acl::dacl_of(&bare_dir).unwrap(), owner_only);
+        let bare_file = bare.join("config.toml");
+        write_private(&bare_file, "x").unwrap();
+        assert_eq!(win_acl::dacl_of(&bare_file).unwrap(), owner_only);
     }
 
     #[cfg(windows)]
