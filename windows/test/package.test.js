@@ -104,6 +104,19 @@ test("the winget manifests are a zip with a portable vericto.exe, x64 and arm64"
 
 const onWindows = process.platform === "win32";
 
+// The environment for a child Windows PowerShell 5.1. When the test runs under
+// PowerShell 7 (the GitHub Actions default shell on Windows), PSModulePath
+// lists PowerShell 7's module folders, and 5.1 then fails to load its own
+// Microsoft.PowerShell.Security module ("Get-ExecutionPolicy ... could not be
+// loaded"). Without the variable, 5.1 builds its default module path.
+function windowsPowerShellEnv() {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() === "PSMODULEPATH") delete env[key];
+  }
+  return env;
+}
+
 // A release archive laid out like cargo-dist's Windows zip: the files at the
 // root. The "binary" is a marker, never run.
 function makeZip(dir, name) {
@@ -117,7 +130,7 @@ function makeZip(dir, name) {
     "-NonInteractive",
     "-Command",
     "Compress-Archive -Path (Join-Path $env:SRC '*') -DestinationPath $env:DST",
-  ], { env: { ...process.env, SRC: content, DST: zip }, encoding: "utf8" });
+  ], { env: { ...windowsPowerShellEnv(), SRC: content, DST: zip }, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
   return zip;
 }
@@ -143,7 +156,7 @@ function runInstaller(script, base, home) {
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
       {
         env: {
-          ...process.env,
+          ...windowsPowerShellEnv(),
           VERICTO_CLI_DOWNLOAD_URL: base,
           CARGO_HOME: path.join(home, "cargo"),
           XDG_CONFIG_HOME: path.join(home, "config"),
