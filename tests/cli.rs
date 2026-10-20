@@ -1878,7 +1878,14 @@ async fn check_per_statement_reports_the_real_file_and_line() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let expected = format!("{}:3", b.to_str().unwrap());
+    // Reports spell the path with `/` separators on Windows too
+    // (`output::forward_slashes`): `C:\...\b.sql` is shown as `C:/.../b.sql`.
+    let b_reported = if cfg!(windows) {
+        b.to_str().unwrap().replace('\\', "/")
+    } else {
+        b.to_str().unwrap().to_string()
+    };
+    let expected = format!("{b_reported}:3");
     assert!(
         stdout.contains(&expected),
         "text output should point at {expected}:\n{stdout}"
@@ -1902,7 +1909,7 @@ async fn check_per_statement_reports_the_real_file_and_line() {
     let sarif: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&sarif_path).unwrap()).unwrap();
     let loc = &sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"];
-    assert_eq!(loc["artifactLocation"]["uri"], b.to_str().unwrap());
+    assert_eq!(loc["artifactLocation"]["uri"], b_reported.as_str());
     assert_eq!(loc["region"]["startLine"], 3);
 }
 
