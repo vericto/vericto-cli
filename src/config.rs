@@ -282,14 +282,30 @@ mod win_acl {
                       [string]$a.AreAccessRulesProtected; \
                       $a.Access | ForEach-Object { \
                         $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }";
+        // Without PSModulePath: under PowerShell 7 (the GitHub Actions default
+        // shell on Windows) it lists 7's module folders, and Windows
+        // PowerShell 5.1 then cannot load Microsoft.PowerShell.Security, where
+        // Get-Acl lives. The error is not fatal to `-Command`, so the exit code
+        // stays 0 and the output is empty; the check below makes that an error
+        // rather than an empty DACL.
         let out = run(
             Command::new(system_tool(r"WindowsPowerShell\v1.0\powershell.exe"))
                 .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env_remove("PSModulePath")
                 .env("VERICTO_ACL_PATH", path),
             "Get-Acl",
         )?;
         let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
-        let protected = lines.next() == Some("True");
+        let protected = match lines.next() {
+            Some("True") => true,
+            Some("False") => false,
+            other => {
+                return Err(io::Error::other(format!(
+                    "unexpected Get-Acl output for {}: {other:?}",
+                    path.display()
+                )))
+            }
+        };
         Ok((protected, lines.map(String::from).collect()))
     }
 }

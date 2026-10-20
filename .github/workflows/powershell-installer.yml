@@ -78,8 +78,15 @@ jobs:
           $env:XDG_CONFIG_HOME = Join-Path $env:RUNNER_TEMP 'vericto-config'
           $env:VERICTO_CLI_NO_MODIFY_PATH = '1'
           $env:VERICTO_CLI_DISABLE_UPDATE = '1'
+          # Windows PowerShell 5.1 runs the installer as users do. It must not
+          # inherit PowerShell 7's PSModulePath, or it cannot load its own
+          # Microsoft.PowerShell.Security (Get-ExecutionPolicy).
+          $modulePath = $env:PSModulePath
+          $env:PSModulePath = $null
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Content -Raw installer\vericto-cli-installer.ps1 | Invoke-Expression"
-          if ($LASTEXITCODE -ne 0) { throw "the installer failed ($LASTEXITCODE)" }
+          $installerExit = $LASTEXITCODE
+          $env:PSModulePath = $modulePath
+          if ($installerExit -ne 0) { throw "the installer failed ($installerExit)" }
           $vericto = Join-Path $env:CARGO_HOME 'bin\vericto.exe'
           $got = & $vericto --version
           if ($got -ne "vericto $env:VERSION") { throw "installed '$got', expected 'vericto $env:VERSION'" }
