@@ -22,6 +22,7 @@ mod receipt;
 mod sanitize;
 mod scaffold;
 mod simulate;
+mod text;
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -1634,7 +1635,7 @@ fn suppressed_results(
         }
         let Some(sql) = sources
             .entry(path.clone())
-            .or_insert_with(|| std::fs::read_to_string(&path).ok())
+            .or_insert_with(|| text::read_file(&path).ok())
             .as_deref()
         else {
             continue;
@@ -3068,10 +3069,12 @@ fn resolve_files(
                 "--stdin-file-list can't be combined with files or --changed/--since.".to_string(),
             );
         }
-        let mut buf = String::new();
-        if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
-            return FileResolution::Usage(format!("could not read file list from stdin: {e}"));
-        }
+        let buf = match text::read_stdin() {
+            Ok(b) => b,
+            Err(e) => {
+                return FileResolution::Usage(format!("could not read file list from stdin: {e}"))
+            }
+        };
         let list: Vec<String> = buf
             .lines()
             .map(|l| l.trim())
@@ -3206,14 +3209,13 @@ fn collect_queries(files: &[String]) -> Option<Vec<QueryInput>> {
     Some(queries)
 }
 
-/// Reads a file path, or stdin when `path` is "-".
+/// Reads a file path, or stdin when `path` is "-", as text: UTF-8, or UTF-8
+/// and UTF-16 with a byte-order mark, which is dropped (`text::decode`).
 fn read_source(path: &str) -> std::io::Result<String> {
     if path == "-" {
-        let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf)?;
-        Ok(buf)
+        text::read_stdin()
     } else {
-        std::fs::read_to_string(path)
+        text::read_file(path)
     }
 }
 

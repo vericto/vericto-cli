@@ -226,7 +226,7 @@ impl std::ops::DerefMut for Vericto {
 /// `env_clear()` on Windows also drops `SystemRoot`, and without it Winsock
 /// cannot load its service providers: every socket the child opens fails, so
 /// its request to the loopback mock fails with "error sending request" before
-/// it is sent (the windows-offline CI job, `a_key_without_offline_stays_online_and_says_so`).
+/// it is sent (seen in the Windows CI job, `a_key_without_offline_stays_online_and_says_so`).
 /// Put back the variables the OS itself needs; none of them changes what the
 /// CLI reads. Empty elsewhere.
 fn windows_system_env() -> Vec<(&'static str, std::ffi::OsString)> {
@@ -1878,7 +1878,14 @@ async fn check_per_statement_reports_the_real_file_and_line() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let expected = format!("{}:3", b.to_str().unwrap());
+    // Reports spell the path with `/` separators on Windows too
+    // (`output::forward_slashes`): `C:\...\b.sql` is shown as `C:/.../b.sql`.
+    let b_reported = if cfg!(windows) {
+        b.to_str().unwrap().replace('\\', "/")
+    } else {
+        b.to_str().unwrap().to_string()
+    };
+    let expected = format!("{b_reported}:3");
     assert!(
         stdout.contains(&expected),
         "text output should point at {expected}:\n{stdout}"
@@ -1902,7 +1909,7 @@ async fn check_per_statement_reports_the_real_file_and_line() {
     let sarif: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&sarif_path).unwrap()).unwrap();
     let loc = &sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"];
-    assert_eq!(loc["artifactLocation"]["uri"], b.to_str().unwrap());
+    assert_eq!(loc["artifactLocation"]["uri"], b_reported.as_str());
     assert_eq!(loc["region"]["startLine"], 3);
 }
 
@@ -3246,7 +3253,7 @@ fn init_without_a_detectable_provider_is_a_usage_error() {
 /// A mock that answers nothing (404) and records everything: pointed at by the
 /// API URL, every proxy variable and the GitHub OIDC endpoint, so any request
 /// the CLI makes, to any host, lands on it.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 fn tripwired(cmd: &mut Vericto, api: &MockServer, trip: &MockServer) {
     let t = trip.uri();
     cmd.env("VERICTO_API_URL", api.uri())
@@ -3264,7 +3271,7 @@ fn tripwired(cmd: &mut Vericto, api: &MockServer, trip: &MockServer) {
 /// The guarantee offline mode exists for: with a key, a reachable backend, a
 /// proxy and an OIDC endpoint all configured, `--offline` makes no request at
 /// all, in any output format, from files, stdin or `--sql`.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[tokio::test]
 async fn offline_makes_no_network_request() {
     let api = mock_backend(check_body(&["ALLOWED"]), "sanitized").await;
@@ -3301,7 +3308,7 @@ async fn offline_makes_no_network_request() {
 
 /// Outside CI, no credential at all means offline, said on stderr and in the
 /// report; in CI the same run stays exit 3 (`missing_api_key_exits_3`).
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn no_credential_outside_ci_checks_offline() {
     let out = vericto()
@@ -3324,7 +3331,7 @@ fn no_credential_outside_ci_checks_offline() {
 }
 
 /// A key present without `--offline` keeps the online path: no silent switch.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[tokio::test]
 async fn a_key_without_offline_stays_online_and_says_so() {
     let server = mock_backend(check_body(&["ALLOWED"]), "raw").await;
@@ -3342,7 +3349,7 @@ async fn a_key_without_offline_stays_online_and_says_so() {
     assert!(!server.received_requests().await.unwrap().is_empty());
 }
 
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn offline_json_names_mode_engine_and_ruleset() {
     let out = vericto()
@@ -3362,7 +3369,7 @@ fn offline_json_names_mode_engine_and_ruleset() {
 }
 
 /// One `--offline` run of `sql` from stdin in `format`: (exit code, stdout).
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 fn offline_run(format: &str, sql: &str) -> (Option<i32>, String) {
     let out = vericto()
         .args(["check", "--offline", "--no-color", "--format", format, "-"])
@@ -3374,7 +3381,7 @@ fn offline_run(format: &str, sql: &str) -> (Option<i32>, String) {
 
 /// Every output format states the mode, the engine version and the ruleset
 /// version.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn every_offline_format_names_mode_engine_and_ruleset() {
     let sql = "DELETE FROM users;";
@@ -3427,7 +3434,7 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
 /// CLI 1.9.0 corrected engine 4.1.3's severity-first winner locally): a
 /// capped DROP TABLE (Critical, FLAG) must not hide the WHERE-less UPDATE
 /// (Critical, BLOCK) after it. Every format reports BLOCKED and the run fails.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn offline_strongest_action_blocks_in_every_format() {
     let sql = "DROP TABLE a; UPDATE accounts SET balance = 0;";
@@ -3481,7 +3488,7 @@ fn offline_strongest_action_blocks_in_every_format() {
 }
 
 /// `VERICTO_OFFLINE=1` is the same as `--offline`, also in CI with a key set.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn vericto_offline_env_selects_offline_mode() {
     let out = vericto()
@@ -3524,10 +3531,7 @@ const ENV_BOOL_CASES: [(&str, Option<bool>); 8] = [
 /// key the run is exit 3; anything else is exit 2 naming the variable.
 #[test]
 fn vericto_offline_env_reads_boolish_values() {
-    let engine = cfg!(all(
-        feature = "offline",
-        any(not(windows), vericto_windows_offline)
-    ));
+    let engine = cfg!(feature = "offline");
     for (value, want) in ENV_BOOL_CASES {
         let out = vericto()
             .args(["check", "--format", "json", "-"])
@@ -3626,7 +3630,7 @@ async fn vericto_allow_unsanitized_env_reads_boolish_values() {
 }
 
 /// In CI a run with no credential stays exit 3 and points at --offline.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn no_credential_in_ci_stays_exit_3_with_a_hint() {
     for var in ["CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "TF_BUILD"] {
@@ -3645,8 +3649,8 @@ fn no_credential_in_ci_stays_exit_3_with_a_hint() {
 
 /// Deep nesting is refused by the engine as a PARSE_ERROR, not a crash, and
 /// the deepest nesting it accepts parses on the main thread. This is what the
-/// windows-offline CI job checks against Windows' 1 MiB main-thread stack.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+/// Windows CI job checks against Windows' 1 MiB main-thread stack.
+#[cfg(feature = "offline")]
 #[test]
 fn offline_deep_nesting_does_not_crash() {
     let bomb = format!("SELECT 1 WHERE {}TRUE;", "NOT ".repeat(2000));
@@ -3681,17 +3685,13 @@ fn vericto_toml_cannot_enable_offline_mode() {
     );
 }
 
-/// Without the engine (the Windows build, or `--no-default-features`),
+/// Without the engine (a `--no-default-features` build),
 /// `--offline` and `VERICTO_OFFLINE=1` exit 2 with a clear message, and a run
 /// without credentials never goes offline on its own.
-#[cfg(not(all(feature = "offline", any(not(windows), vericto_windows_offline))))]
+#[cfg(not(feature = "offline"))]
 #[test]
 fn offline_without_the_engine_exits_2() {
-    let expected = if cfg!(windows) {
-        "offline mode is not available on Windows yet"
-    } else {
-        "compiled without the `offline` feature"
-    };
+    let expected = "compiled without the `offline` feature";
     for env in [None, Some(("VERICTO_OFFLINE", "1"))] {
         let mut cmd = vericto();
         cmd.args(["check", "-"]);
@@ -3721,7 +3721,7 @@ fn offline_without_the_engine_exits_2() {
     );
 }
 
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn offline_honors_fail_on_and_dialect() {
     let run = |args: &[&str], sql: &str| {
@@ -3756,7 +3756,7 @@ fn offline_honors_fail_on_and_dialect() {
 }
 
 /// Inline suppression and the baseline are local, so they work offline.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn offline_honors_inline_suppression() {
     let dir = tempfile::tempdir().unwrap();
@@ -3772,9 +3772,136 @@ fn offline_honors_inline_suppression() {
         .code(0);
 }
 
+/// SQL saved by Windows tools: a UTF-8 byte-order mark (Visual Studio, SSMS,
+/// PowerShell 5.1 `Set-Content -Encoding UTF8`), UTF-16LE (PowerShell 5.1 `>`)
+/// and CRLF line endings. Each is evaluated like the plain file: until 1.11.0
+/// the BOM turned the statement into an allowed parse error (exit 0) and
+/// UTF-16 could not be read (exit 2). From a file and from stdin.
+#[cfg(feature = "offline")]
+#[test]
+fn offline_reads_bom_utf16_and_crlf_sources() {
+    let sql = "DELETE FROM users;\r\n";
+    let mut bom = b"\xEF\xBB\xBF".to_vec();
+    bom.extend_from_slice(sql.as_bytes());
+    let mut utf16 = b"\xFF\xFE".to_vec();
+    utf16.extend(sql.encode_utf16().flat_map(u16::to_le_bytes));
+    let dir = tempfile::tempdir().unwrap();
+    for (name, bytes) in [
+        ("crlf.sql", sql.as_bytes().to_vec()),
+        ("bom.sql", bom),
+        ("utf16.sql", utf16),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        let out = vericto()
+            .args([
+                "check",
+                "--offline",
+                "--format",
+                "json",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{name}: {}", stdout_of(&out));
+        let v: serde_json::Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+        assert_eq!(v["queries"][0]["rule_code"], "VERICTO-001", "{name}");
+        let out = vericto()
+            .args(["check", "--offline", "--format", "json", "-"])
+            .write_stdin(bytes)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{name} on stdin: {}",
+            stdout_of(&out)
+        );
+    }
+    // Text that is neither is still refused, with exit 2.
+    let bad = dir.path().join("latin1.sql");
+    std::fs::write(&bad, b"DELETE FROM caf\xE9;").unwrap();
+    let out = vericto()
+        .args(["check", "--offline", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("not valid UTF-8"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// An inline suppression in a CRLF file with a BOM, on the line above the
+/// statement, still suppresses it (the reason does not keep the `\r`).
+#[cfg(feature = "offline")]
+#[test]
+fn offline_inline_suppression_in_a_crlf_file_with_a_bom() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql = dir.path().join("m.sql");
+    std::fs::write(
+        &sql,
+        b"\xEF\xBB\xBF-- vericto:ignore[VERICTO-001] one-off backfill\r\nDELETE FROM users;\r\n",
+    )
+    .unwrap();
+    let out = vericto()
+        .args([
+            "check",
+            "--offline",
+            "--format",
+            "json",
+            sql.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stdout_of(&out));
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("one-off backfill") && !err.contains("backfill\r"),
+        "{err}"
+    );
+}
+
+/// On Windows, a path typed with `\` is reported with `/`: SARIF URIs and
+/// GitHub annotation paths resolve, and match what `--changed` produces.
+#[cfg(all(windows, feature = "offline"))]
+#[test]
+fn windows_paths_are_reported_with_forward_slashes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("db")).unwrap();
+    std::fs::write(
+        dir.path().join("db").join("m.sql"),
+        "DELETE FROM users;\r\n",
+    )
+    .unwrap();
+    let sarif = vericto()
+        .current_dir(dir.path())
+        .args(["check", "--offline", "--format", "sarif", r"db\m.sql"])
+        .output()
+        .unwrap();
+    assert_eq!(sarif.status.code(), Some(1), "{}", stderr_of(&sarif));
+    let v: serde_json::Value = serde_json::from_str(&stdout_of(&sarif)).unwrap();
+    assert_eq!(
+        v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+        "db/m.sql"
+    );
+    let gh = vericto()
+        .current_dir(dir.path())
+        .env("GITHUB_ACTIONS", "true")
+        .args(["check", "--offline", r"db\m.sql"])
+        .output()
+        .unwrap();
+    assert!(
+        stderr_of(&gh).contains("::error file=db/m.sql,"),
+        "{}",
+        stderr_of(&gh)
+    );
+}
+
 /// Options that need a workspace are refused, with exit 2 and a pointer to
 /// online mode, never silently ignored.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn offline_refuses_workspace_options() {
     for (args, flag) in [
@@ -3801,7 +3928,7 @@ fn offline_refuses_workspace_options() {
 
 /// Asking for something online-only keeps a credential-less run from going
 /// offline on its own: it fails as before (exit 3), it does not drop the flag.
-#[cfg(all(feature = "offline", any(not(windows), vericto_windows_offline)))]
+#[cfg(feature = "offline")]
 #[test]
 fn online_only_option_without_credentials_does_not_go_offline() {
     let out = vericto()

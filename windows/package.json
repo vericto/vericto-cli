@@ -1,0 +1,12 @@
+{
+  "name": "vericto-windows-packaging",
+  "private": true,
+  "description": "Windows packaging for vericto-cli releases: the PowerShell installer, Scoop and winget manifests (see package.js)",
+  "license": "FSL-1.1-ALv2",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -22,7 +22,9 @@
 > on binaries and image ✅ (from v1.5.1, §9 Notes), and package
 > Phase 2 npm ✅ (the `@vericto/vericto-cli` package is built by the pipeline;
 > publishing needs an `NPM_TOKEN`), Homebrew ✅ (`brew install vericto/tap/vericto`,
-> published to the `vericto/homebrew-tap` tap on each release), Scoop remains 🔜.
+> published to the `vericto/homebrew-tap` tap on each release), and from 1.11.0
+> Windows channels: a SHA-256-pinning PowerShell installer, Scoop and winget
+> publish jobs, and a native Windows ARM64 build (§9, "Windows channels").
 > Rationale in §14.
 
 ## 1. What it is
@@ -37,7 +39,8 @@ rules **before** it runs — in pre-commit hooks, code review, and CI/CD pipelin
 - **Offline (`--offline`, since 1.9.0 — §13).** It evaluates locally with the
   embedded `vericto-engine` and its standard rules at their default severities,
   and sends nothing anywhere. A baseline gate that needs no account and no
-  network, not a copy of the workspace. Not in the Windows build yet.
+  network, not a copy of the workspace. On every release target, Windows
+  included since 1.11.0.
 
 ```
 migration.sql ──► vericto check ──HTTPS──► POST /api/v1/ci/check-key ──► engine
@@ -703,7 +706,8 @@ effort, so we layer them.
 
 > **Status (this revision): Level 0 + Phase 1 ✅ implemented.** `cargo-dist` is
 > configured (`dist-workspace.toml`) and generates `.github/workflows/release.yml`,
-> which on every version tag cross-compiles all five targets, publishes them to
+> which on every version tag builds all six targets (Windows x64 and ARM64 since
+> 1.11.0), publishes them to
 > GitHub Releases with SHA-256 checksums, and generates the `vericto-cli-installer.sh`
 > `curl | sh` installer. (Keyless **build attestations** ship with every artifact
 > from v1.5.1 — see the signing note below.) The image channel is a thin distroless
@@ -711,13 +715,17 @@ effort, so we layer them.
 > by a separate `.github/workflows/docker.yml` — separate because `dist generate`
 > owns and would overwrite `release.yml`. `dist plan`
 > validates the artifact set. **Phase 2:** npm ✅ (built by the pipeline as
-> `@vericto/vericto-cli`; publishing needs `NPM_TOKEN`), Homebrew ✅, Scoop 🔜.
+> `@vericto/vericto-cli`; publishing needs `NPM_TOKEN`), Homebrew ✅, and the
+> Windows channels (PowerShell installer ✅, Scoop and winget publish jobs ✅,
+> waiting on their owner steps).
 
 ### Level 0 — the base (everything else depends on it)
 
 **GitHub Releases with cross-compiled binaries.** A workflow that, on every tag,
 builds for: `x86_64`/`aarch64-linux` (musl, static), `x86_64`/`aarch64-macOS`,
-`x86_64-windows`. This is the prerequisite for nearly every channel below.
+`x86_64`/`aarch64-windows` (ARM64 since 1.11.0, built natively on the
+`windows-11-arm` runner). This is the prerequisite for nearly every channel
+below.
 
 **Tooling: [`cargo-dist`](https://opensource.axo.dev/cargo-dist/).** It generates
 the release workflow **plus** the `curl | sh` installer **plus** the
@@ -731,7 +739,7 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
   `cargo-dist` (the installer and release workflow are generated; the Docker
   image is a thin `FROM scratch`/`distroless` wrapper over the static musl
   binary).
-- **Phase 2 (adoption): npm ✅, Homebrew ✅, Scoop 🔜.** Cover the Node ecosystem,
+- **Phase 2 (adoption): npm ✅, Homebrew ✅, Windows channels ✅ (1.11.0).** Cover the Node ecosystem,
   macOS, and Windows.
   - **npm — done (this revision):** `cargo-dist`'s `npm` installer
     (`installers = ["shell", "npm"]`, `npm-scope = "@vericto"`) generates the
@@ -758,8 +766,106 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
     formula on all four platforms. homebrew-core is not a target: it accepts
     only OSI/DFSG-licensed software built from source, and neither
     FSL-1.1-ALv2 (since 1.10.0) nor Elastic-2.0 (before) is.
-  - **Scoop — 🔜:** needs an external *bucket* repo; add it to
-    `dist-workspace.toml` once it exists.
+  - **Windows — 1.11.0:** see "Windows channels" below.
+
+### Windows channels
+
+Since 1.11.0 the Windows build embeds the engine (offline mode, §13) and ships
+for x64 and ARM64. Every channel serves the release's two zips
+(`vericto-cli-{x86_64,aarch64}-pc-windows-msvc.zip`, `vericto.exe` at the root),
+pinned by their SHA-256:
+
+- **PowerShell installer ✅:** `powershell -ExecutionPolicy Bypass -c "irm
+  .../releases/latest/download/vericto-cli-installer.ps1 | iex"`. cargo-dist
+  0.32's own PowerShell installer checks nothing it downloads (its shell
+  installer checks a SHA-256 per archive), so it is not enabled in
+  `installers`. `windows/installer.ps1` is that generated installer plus the
+  check, rendered with the release's checksums by a custom **global-artifacts**
+  job (`./powershell-installer`), which also installs the x64 build with it on
+  `windows-2022` and runs it. `host` waits for that job, so the published
+  installer is the checked one from the first minute (no asset is replaced
+  after the release, so this also works with immutable releases). On a
+  cargo-dist upgrade the job refuses to render until the template is ported
+  (`UPSTREAM_CARGO_DIST_VERSION` in `windows/package.js`).
+- **Scoop (job ✅, bucket 🔜 owner):** our own bucket,
+  `vericto/scoop-bucket`, like the Homebrew tap: `scoop bucket add vericto
+  https://github.com/vericto/scoop-bucket`, `scoop install vericto/vericto`.
+  The custom publish job `./scoop-publish` writes `bucket/vericto.json` there
+  with `SCOOP_BUCKET_TOKEN` from `prod`. Chosen over Scoop's `extras` bucket,
+  whose maintainers review every new manifest against notability criteria and
+  update it on their own schedule; the manifest carries `checkver` and
+  `autoupdate`, so it can be proposed to `extras` later unchanged.
+- **winget (job ✅, first submission 🔜 owner):** `winget install
+  Vericto.VerictoCLI`. The custom publish job `./winget-publish` writes the
+  three manifests (zip with a portable `vericto.exe`, x64 and ARM64) and opens
+  the pull request on `microsoft/winget-pkgs` with `wingetcreate` (pinned by
+  version and SHA-256) and `WINGET_TOKEN` from `prod`.
+- **npm ✅:** the generated package already covers `win32-x64` and
+  `win32-arm64` (the .zip is unpacked with PowerShell's `Expand-Archive`); CI
+  installs and runs a .zip through it on `windows-latest`.
+- **MSI: not shipped.** cargo-dist can build one (`installers = ["msi"]`), but
+  it needs a committed WiX v3 source (`wix/main.wxs`) with upgrade GUIDs that
+  must never change, WiX v3 itself is end-of-life, cargo-wix has no license
+  page for FSL-1.1-ALv2, and an unsigned MSI meets the same SmartScreen
+  prompt. winget and Scoop install the zip, so an MSI adds no channel.
+
+Both publish jobs run behind the `prod` approval like npm and Homebrew, and
+**succeed without publishing, with a notice on the run, while their token is
+not set**, so a release never waits on a channel that is not set up.
+
+**Owner steps:**
+
+1. Required checks: add `Windows build & test (windows-2022)` and `Windows
+   build & test (windows-11-arm)` to the `Protection-default-branches`
+   ruleset (`Installer tests (windows-latest)` too, if wanted).
+2. Scoop: create the public repo `vericto/scoop-bucket` (a `bucket/` folder; the
+   job writes `bucket/vericto.json`) and put a fine-grained token with
+   *Contents: read and write* on that repo only in `prod` as
+   `SCOOP_BUCKET_TOKEN`. The next release fills it; to fill it for an already
+   released version, run `node windows/package.js scoop <dir with the
+   release's sha256.sum> <version> bucket/vericto.json` and commit it.
+3. winget: make the first submission by hand, so the identifier
+   `Vericto.VerictoCLI` and the moderators' first review happen under the
+   owner's eye: download the release's `sha256.sum`, run `node
+   windows/package.js winget <that dir> <version> manifests`, then
+   `wingetcreate submit --token <PAT> manifests` (or open the PR on
+   `microsoft/winget-pkgs` with those three files). Once it is merged, put a
+   **classic** PAT with the `public_repo` scope, of the account that should
+   own the fork, in `prod` as `WINGET_TOKEN` (wingetcreate forks
+   `winget-pkgs` and opens cross-repo PRs, which fine-grained tokens cannot).
+   From then on every release opens its own PR.
+
+**Code signing (not implemented; needs a certificate).** Unsigned binaries meet
+SmartScreen ("Windows protected your PC") when a browser downloaded them; the
+installer, Scoop and npm download without the mark that triggers it, and
+attestations (§9 Notes) prove provenance but are not Authenticode. Options:
+
+- **Azure Artifact Signing** (formerly Trusted Signing): about US$10/month
+  (Basic, 5,000 signatures), certificates short-lived and held by Microsoft, a
+  GitHub Action for CI, SmartScreen reputation that accrues to the validated
+  organization. Needs a paid Azure subscription and organization validation,
+  available only in Microsoft's list of supported countries/regions: check it
+  for Vericto S.A.S. before anything else.
+- **OV certificate** from a public CA: roughly US$200-500/year. Since 2023 the
+  key must live in an HSM, so CI signing goes through the CA's cloud signer
+  (for example SSL.com eSigner or DigiCert KeyLocker, extra cost) or a cloud
+  HSM. Reputation builds per certificate.
+- **EV certificate:** roughly US$300-700/year, same HSM rule. Since 2024 EV no
+  longer skips SmartScreen's reputation check, so for a CLI it buys little
+  over OV.
+- **SignPath Foundation (free for open source):** requires an OSI-approved
+  license for every component and no commercial dual-licensing. FSL-1.1-ALv2 is
+  not OSI-approved (it becomes Apache-2.0 two years after each release), so the
+  CLI does not qualify; SignPath's paid plans do not have that condition.
+
+Where it would go: cargo-dist 0.32 signs inside its own build step, and its
+only Windows hook is `ssldotcom-windows-sign` (SSL.com eSigner), which reads
+four repository secrets in the build job, outside the `prod` environment. It
+is not enabled, and no placeholder is added to `release.yml` (generated, and a
+hand edit fails `dist plan`). Signing with Azure Artifact Signing or another
+CA means signing `vericto.exe` before it is zipped: a `github-build-setup`
+step cannot (it runs before the build), so it takes either SSL.com through
+that hook, or a cargo-dist release that adds a post-build hook.
 
 ### Notes
 
@@ -792,7 +898,7 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
   fetches `/version` and reports both, and `check` reads the response header and
   **warns on a minor skew, fails (exit 4) on a hard major mismatch**. An older
   backend that sends neither is treated as unknown and not blocked.
-- **Platforms vs channels:** Linux/macOS/Windows are *targets* (the Level-0 build
+- **Platforms vs channels:** Linux/macOS/Windows (x64 and ARM64) are *targets* (the Level-0 build
   matrix), not channels — each channel just serves the right prebuilt binary for
   the host.
 - **apt/yum deferred:** native Linux system packages (hosted repos, GPG signing,
@@ -908,7 +1014,7 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   binaries + SHA-256 checksums to GitHub Releases with a `curl | sh` installer,
   plus a distroless multi-arch Docker image to GHCR (`docker.yml`), plus the
   `@vericto/vericto-cli` npm package (built on tag; publishing needs `NPM_TOKEN`).
-  Keyless build attestations on binaries and image from v1.5.1 (§9 Notes). **Homebrew** ✅ (`vericto/homebrew-tap`, custom `./homebrew-publish` job); **Scoop** remains 🔜 (needs an external bucket repo).
+  Keyless build attestations on binaries and image from v1.5.1 (§9 Notes). **Homebrew** ✅ (`vericto/homebrew-tap`, custom `./homebrew-publish` job); **Windows** ✅ from 1.11.0 (PowerShell installer, Scoop and winget jobs, ARM64; §9 "Windows channels").
 - **Rule catalogue — DONE (this revision):** `vericto rules list` / `vericto
   rules show <CODE>` (§15) — read-only lookups against the workspace's effective
   ruleset, using the same API key and scope as `check`.
@@ -919,7 +1025,8 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   default for `vericto login`) and fail-closed verification of a manually
   provided `--api-key` (§6.0.1) — an unverified credential is never persisted
   either way.
-- **Still 🔜:** distribution Scoop; npm registry publish (`NPM_TOKEN`);
+- **Still 🔜:** the Scoop bucket repo and the first winget submission (owner
+  steps, §9 "Windows channels"); Windows code signing; npm registry publish (`NPM_TOKEN`);
   keyless attestations (repo must be public/org); watch/dev ergonomics. Backend
   now exposes API-key-gated CI run history (`GET /api/v1/ci/reports[/:id]`) —
   a future `vericto reports list`/`show` CLI command could consume it, but
@@ -1022,8 +1129,8 @@ turns the build red on day one — the fastest way to get uninstalled. So:
    compliance evidence. Shipping a workspace's ruleset into the air gap (an
    export, a cache, a sync) stays out of scope (§1, §13). Offline mode is not a
    fallback either: an unreachable backend is still exit `4` (or the §6.5
-   break-glass), never a silent switch to fewer rules. Windows runners get it
-   once the Windows build embeds the engine (§13, "Windows").
+   break-glass), never a silent switch to fewer rules. Windows runners have it
+   too since 1.11.0 (§13, "Windows").
 
 ## 13. Online by default, offline for the standard rules (decision, revised 2026-10-18)
 
@@ -1113,15 +1220,21 @@ rules at their default severities**:
   `libclang-dev`, and the Docker builder is Debian cross-compiling to musl,
   because Alpine's static build scripts cannot load libclang. cargo-deny
   allows the engine's git source, by tag only.
-- **Windows:** the Windows binary ships online-only in 1.9.0. The engine is not
-  a dependency on `x86_64-pc-windows-msvc`, and `--offline` exits `2` there
-  with a message saying so. pg_query's own CI builds and tests on Windows, but
-  ours has not, the engine's crates never ran there, and Windows has a 1 MiB
-  main-thread stack against 8 MiB elsewhere. An informational, non-required CI
-  job (`windows-offline`, on `windows-2022`) builds and tests with the engine
-  (`--cfg vericto_windows_offline`), including a deep-nesting test. Once it is
-  green, the target gate goes and Windows gets offline mode in the release
-  after.
+- **Windows:** online-only in 1.9.0 and 1.10.x, with offline mode since
+  1.11.0, on x64 and ARM64. The engine was first kept off
+  `x86_64-pc-windows-msvc`: pg_query's own CI builds on Windows but ours had
+  not, the engine's crates had never run there, and Windows has a 1 MiB
+  main-thread stack against 8 MiB elsewhere. An informational CI job built and
+  tested it with the engine from 1.9.0, including a deep-nesting test; it
+  passed from 1.9.1 (after a test-harness fix for `SystemRoot`), so 1.11.0
+  dropped the target gate and the job became the required `Windows build &
+  test` check, on `windows-2022` and `windows-11-arm`. The same release fixed
+  what Windows exposed: SQL saved with a UTF-8 byte-order mark (Windows
+  editors, PowerShell 5.1) parsed as an allowed parse error, UTF-16 files
+  could not be read, `vericto login` opened a URL cut at its first `&`
+  (`cmd /C start`), report paths kept `\` separators, and the config file had
+  no owner-only access list (now a protected DACL, via `icacls`, since the
+  crate forbids `unsafe`).
 - **Engine 4.2.0, since 1.9.1.** The rules (`standard_rules()`), the engine
   version (`ENGINE_VERSION`) and the decision all come from the engine. 1.9.0
   carried its own copy of the table, the version and the strongest-action

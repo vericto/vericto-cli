@@ -57,12 +57,15 @@ whose `pg_query` compiles PostgreSQL's parser and runs bindgen.
   `*-unknown-linux-musl`, as the release does.
 - Alpine: build in a Debian container instead (see `Dockerfile`); the
   `rust:*-alpine` images cannot load libclang from a build script.
-- Windows: offline mode is not built on Windows yet (see DESIGN §13); the
-  default build there is the thin client and needs no libclang.
+- Windows: the Visual Studio Build Tools (MSVC, "Desktop development with
+  C++") and LLVM for libclang (`winget install LLVM.LLVM`; set `LIBCLANG_PATH`
+  to its `bin` folder if bindgen does not find it). Windows on ARM64 builds
+  natively with the same tools. CI runs the whole suite on `windows-2022` and
+  `windows-11-arm`.
 
 `cargo build --no-default-features` builds the thin client alone, without the
-engine and without these prerequisites. The npm installer tests need Node 18+
-and no dependencies. Tests never reach the real Vericto API: the
+engine and without these prerequisites. The npm installer and Windows
+packaging tests need Node 18+ and no dependencies. Tests never reach the real Vericto API: the
 API client is tested against an in-process `wiremock` server, and
 `tests/cli.rs` runs the built binary, each run with its own empty home.
 
@@ -80,9 +83,12 @@ API client is tested against an in-process `wiremock` server, and
    cargo test --locked
    cargo test --locked --no-default-features
    (cd npm-installer && npm test)
+   (cd windows && npm test)
    ```
-   The `--no-default-features` runs are the Windows-shaped build, where the
-   engine is absent and `--offline` exits 2.
+   The `--no-default-features` runs are the thin client, where the engine is
+   absent and `--offline` exits 2. The tests that run the PowerShell installer
+   (`windows/`) and install a .zip through the npm package run on Windows
+   only; elsewhere they are skipped.
    If you change dependencies, also run the supply-chain job
    (`cargo-deny` 0.20.2 and `cargo-audit` 0.22.2):
    ```bash

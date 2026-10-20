@@ -47,8 +47,32 @@ pub(crate) fn file_for(files: &[String], line: u32) -> String {
     let idx = line.saturating_sub(1) as usize;
     match files.get(idx).map(String::as_str) {
         Some("-") | None => "<stdin>".to_string(),
-        Some(p) => p.to_string(),
+        Some(p) => forward_slashes(p, cfg!(windows)),
     }
+}
+
+/// A path as every report and baseline key spells it: with `/` separators on
+/// Windows too (`windows`), so `db\m.sql` typed in PowerShell and `db/m.sql`
+/// from `--changed` or a Linux runner are the same file: one baseline entry,
+/// SARIF URIs and GitHub annotation paths that resolve. Windows accepts `/`
+/// when the file is read again (inline suppressions). A verbatim `\\?\` path
+/// is left as it is, since `/` is not a separator there. Unix is unchanged
+/// (`\` is a valid file-name character there).
+pub(crate) fn forward_slashes(path: &str, windows: bool) -> String {
+    if windows && !path.starts_with(r"\\?\") {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    }
+}
+
+/// The path of a result's file exactly as it was given, when that differs
+/// from `file_of` (a Windows path typed with `\`). Baselines written before
+/// 1.11.0 keyed those paths that way, and still match (`baseline::is_baselined`).
+pub(crate) fn file_as_given(files: &[String], q: &QueryResult) -> Option<String> {
+    let idx = q.file_index.unwrap_or(q.line).saturating_sub(1) as usize;
+    let given = files.get(idx).filter(|p| p.as_str() != "-")?;
+    (given.as_str() != file_of(files, q)).then(|| given.clone())
 }
 
 /// The source file a result belongs to: `file_index` in per-statement mode,
@@ -877,6 +901,26 @@ mod tests {
         assert_eq!(file_for(&files, 1), "a.sql");
         assert_eq!(file_for(&files, 2), "<stdin>"); // "-" → stdin
         assert_eq!(file_for(&files, 9), "<stdin>"); // out of range
+    }
+
+    #[test]
+    fn windows_paths_use_forward_slashes() {
+        assert_eq!(
+            forward_slashes(r"db\migrations\0001.sql", true),
+            "db/migrations/0001.sql"
+        );
+        assert_eq!(forward_slashes(r".\m.sql", true), "./m.sql");
+        assert_eq!(forward_slashes(r"C:\repo\m.sql", true), "C:/repo/m.sql");
+        assert_eq!(forward_slashes("db/m.sql", true), "db/m.sql");
+        // Verbatim paths, and every path on Unix, are kept as given.
+        assert_eq!(
+            forward_slashes(r"\\?\C:\repo\m.sql", true),
+            r"\\?\C:\repo\m.sql"
+        );
+        assert_eq!(forward_slashes(r"db\m.sql", false), r"db\m.sql");
+        // The path as given is reported only when it differs.
+        let files = vec!["a.sql".to_string(), "-".to_string()];
+        assert_eq!(file_as_given(&files, &q("BLOCKED", None, None)), None);
     }
 
     #[test]
