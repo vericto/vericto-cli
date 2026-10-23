@@ -180,6 +180,8 @@ vericto baseline [files...]  Record current findings to .vericto-baseline.json (
 vericto baseline prune       Remove stale baseline entries that no longer match (§10).
 vericto rules list           List the workspace's effective rule catalogue (§15).
 vericto rules show <CODE>    Show one rule's detail, incl. its AST condition (§15).
+vericto rules test [paths]   Run the fixtures of business policy documents in the backend (§16).
+vericto policies apply       Create/update the workspace's policies from the repository (§16).
 vericto init                 Scaffold CI workflow + pre-commit hook (§10); --oidc for workload-identity.
 vericto verify-receipt <f>   Verify a signed run receipt offline (§7.1).
 vericto version              Print the CLI version (same as --version).
@@ -1442,7 +1444,47 @@ no new key needed for an existing CI integration:
 
 - **No rule authoring here.** `rules list`/`show` are read-only, matching the
   existing non-goal "no rule authoring UI" (§1) — creating/editing rules stays
-  a dashboard (or `POST .../rules/custom`) operation, not a CLI one.
+  a dashboard (or `POST .../rules/custom`) operation, not a CLI one. The one
+  exception is GitOps for business policy documents, `policies apply` (§16):
+  it pushes reviewed files, it is not an editor.
 - **No local caching.** Every invocation is a live network call, consistent
   with the thin-client decision (§13) — the catalogue can change (an admin
   toggles a rule) and the CLI should never show a stale answer.
+
+## 16. Business policies: `vericto rules test` / `vericto policies apply` ✅ (1.12.0)
+
+Business policy rules (Phase 1, M3) are custom rules written as policy
+documents (YAML with the engine's policy keys: `when`, `deny_if`, `require`,
+`action`, `exempt`, `modes`, …). Teams keep them in the repository,
+`.vericto/policies/<name>.yaml`, with extra fixtures in
+`.vericto/policies/tests/<name>.yaml`, and review them like code.
+
+- **`vericto rules test [PATHS...] [--dialect D] [--format text|json]`** —
+  `POST /api/v1/ci/rules/test`, scope `ci_dryrun:execute`. The CLI sends the
+  documents (`id` = repository path) and their fixtures file as `tests`; the
+  backend runs them in the evaluator sidecar. **Still a thin client:** no policy
+  is parsed or evaluated locally. The only local logic is file discovery and
+  the request limits (50 documents, 500 fixtures, 64 KiB per document and per
+  fixtures file), checked before sending so an oversized run fails with a clear
+  message instead of a round-trip. The fixture count is a line-based lower
+  bound (a flow list counts as 0); the evaluator counts exactly and still
+  enforces it. Does not spend the CI-check allowance and never calls a check
+  endpoint. Read-only, so a `429` (after `Retry-After`, header or
+  `error.retry_after_seconds`), a `5xx` or a dropped connection is retried.
+- **`vericto policies apply [PATHS...] [--dry-run] [--format text|json]`** —
+  `PUT /api/v1/ci/policies`, scope `policies:write`, all or nothing on the
+  backend. Sends `{path, document}` per file (path relative to the repository
+  root, `/` separators; files outside it are refused). `400 INVALID_POLICIES`
+  lists `error.details` per document and nothing is written. Never deletes.
+  Only a `429` is retried: after a `5xx` or a lost connection the outcome of
+  the write is unknown, so it is reported (exit 4) rather than repeated.
+- **Discovery.** No paths = `.vericto/policies/*.yaml|*.yml` relative to the
+  current directory (the repository root, as for `.vericto.toml`). A directory
+  contributes its YAML files, not recursively. In a scanned directory an
+  orphan fixtures file or two documents with one stem are errors, because
+  either would make fixtures silently not run.
+- **Exit codes (§8).** `0` pass/applied; `1` a fixture failed or a document is
+  invalid (the code is wrong); `2` usage, over the limits, a `400` refusal;
+  `3` key/scope/role, and `404` (the feature is off for the workspace: "business
+  policy tests are not enabled for this workspace"); `4` backend/network.
+  Skipped fixtures (they need a later phase) do not fail a run.

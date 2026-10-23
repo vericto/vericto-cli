@@ -2242,6 +2242,442 @@ async fn rules_simulate_pass_exits_zero_and_json_is_the_api_response() {
     assert_eq!(v["summary"]["verdict"], "warn");
 }
 
+// ── vericto rules test / vericto policies apply ─────────────────────────────
+
+/// A repository with two policy documents, one with a fixtures file.
+fn policy_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let pol = dir.path().join(".vericto/policies");
+    std::fs::create_dir_all(pol.join("tests")).unwrap();
+    std::fs::write(
+        pol.join("no-bulk-refunds.yaml"),
+        "rule: no-bulk-refunds\ndeny_if: \"true\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pol.join("tests/no-bulk-refunds.yaml"),
+        "- name: denies a bulk refund\n  sql: UPDATE refunds SET amount = 0\n  expect: deny\n",
+    )
+    .unwrap();
+    std::fs::write(pol.join("reads.yml"), "rule: reads\nwhen: \"true\"\n").unwrap();
+    dir
+}
+
+fn rules_test_body(failed: bool) -> serde_json::Value {
+    serde_json::json!({
+        "results": [
+            { "id": ".vericto/policies/no-bulk-refunds.yaml",
+              "check": { "valid": true, "errors": [], "warnings": [] },
+              "fixtures": [{ "name": "denies a bulk refund", "passed": !failed, "expected": "deny",
+                             "actual": if failed { "allow" } else { "deny" } }],
+              "passed": usize::from(!failed), "failed": usize::from(failed), "skipped": 0 },
+            { "id": ".vericto/policies/reads.yml",
+              "check": { "valid": true, "errors": [], "warnings": [] },
+              "fixtures": [{ "name": "needs runtime", "passed": false, "skipped": "needs the runtime phase",
+                             "expected": "deny", "actual": "" }],
+              "passed": 0, "failed": 0, "skipped": 1 }
+        ],
+        "summary": { "documents": 2, "errored": 0, "fixtures": 2, "passed": usize::from(!failed),
+                     "failed": usize::from(failed), "skipped": 1, "ok": !failed },
+        "latency_ms": 1.2
+    })
+}
+
+async fn mock_rules_test(status: u16, body: serde_json::Value) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/rules/test"))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Default discovery sends both documents (with the paired fixtures as
+/// `tests`), never calls a check endpoint, and exits 0 when every fixture
+/// passed; skipped fixtures are shown and do not fail the run.
+#[tokio::test]
+async fn rules_test_discovers_policies_and_passes() {
+    let repo = policy_repo();
+    let server = mock_rules_test(200, rules_test_body(false)).await;
+    let out = vericto()
+        .args(["rules", "test", "--dialect", "mysql"])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_secret_key")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("  PASS   denies a bulk refund\n"), "{text}");
+    assert!(
+        text.contains("  SKIP   needs runtime: needs the runtime phase\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("PASSED  2 documents (0 errored), 2 fixtures: 1 passed, 0 failed, 1 skipped"),
+        "{text}"
+    );
+    assert!(!text.contains("vtro_secret_key") && !stderr_of(&out).contains("vtro_secret_key"));
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1, "one request, and no check endpoint");
+    assert_eq!(reqs[0].url.path(), "/api/v1/ci/rules/test");
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body["dialect"], "mysql");
+    assert_eq!(
+        body["documents"][0]["id"],
+        ".vericto/policies/no-bulk-refunds.yaml"
+    );
+    assert!(body["documents"][0]["tests"]
+        .as_str()
+        .unwrap()
+        .contains("denies a bulk refund"));
+    assert_eq!(body["documents"][1]["id"], ".vericto/policies/reads.yml");
+    assert!(body["documents"][1].get("tests").is_none());
+}
+
+/// A failing fixture exits 1 with expected vs actual; `--format json` prints
+/// the API response with the same exit code.
+#[tokio::test]
+async fn rules_test_failing_fixture_exits_1() {
+    let repo = policy_repo();
+    let server = mock_rules_test(200, rules_test_body(true)).await;
+    let out = vericto()
+        .args([
+            "rules",
+            "test",
+            ".vericto/policies/no-bulk-refunds.yaml",
+            ".vericto/policies/reads.yml",
+        ])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.contains(
+            "  FAIL   denies a bulk refund\n         expected: deny\n         actual:   allow\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("FAILED  2 documents"), "{text}");
+
+    let out = vericto()
+        .args(["rules", "test", "--format", "json"])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["summary"]["failed"], 1);
+}
+
+/// 404 (feature off), 403 (scope) and a missing key are exit 3; 400 is exit 2;
+/// a 5xx after the retries is exit 4.
+#[tokio::test]
+async fn rules_test_backend_errors_map_to_exit_codes() {
+    let repo = policy_repo();
+    for (status, code, needle) in [
+        (
+            404u16,
+            3,
+            "business policy tests are not enabled for this workspace",
+        ),
+        (403, 3, "ci_dryrun:execute"),
+        (400, 2, "the backend refused the request: bad body"),
+    ] {
+        let server = mock_rules_test(
+            status,
+            serde_json::json!({ "error": { "code": "X", "message": "bad body" } }),
+        )
+        .await;
+        let out = vericto()
+            .args(["rules", "test"])
+            .current_dir(repo.path())
+            .env("VERICTO_API_KEY", "vtro_k")
+            .env("VERICTO_API_URL", server.uri())
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "{status}: {}",
+            stderr_of(&out)
+        );
+        assert!(
+            stderr_of(&out).contains(needle),
+            "{status}: {}",
+            stderr_of(&out)
+        );
+    }
+    vericto()
+        .args(["rules", "test"])
+        .current_dir(repo.path())
+        .env("CI", "true")
+        .env("VERICTO_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .code(3);
+}
+
+/// A throttled request is retried after Retry-After, then succeeds.
+#[tokio::test]
+async fn rules_test_retries_a_429() {
+    let repo = policy_repo();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/rules/test"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/ci/rules/test"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(rules_test_body(false)))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let out = vericto()
+        .args(["rules", "test"])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("retry 1/3"), "{}", stderr_of(&out));
+}
+
+/// Over the limits, or nothing to test: exit 2 before any request is sent.
+#[tokio::test]
+async fn rules_test_refuses_locally_before_sending() {
+    let server = mock_rules_test(200, rules_test_body(false)).await;
+    let repo = tempfile::tempdir().unwrap();
+    let pol = repo.path().join(".vericto/policies");
+    std::fs::create_dir_all(&pol).unwrap();
+    for i in 0..51 {
+        std::fs::write(pol.join(format!("p{i}.yaml")), "rule: p\n").unwrap();
+    }
+    let out = vericto()
+        .args(["rules", "test"])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr_of(&out).contains("51 policy documents; at most 50"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    let empty = tempfile::tempdir().unwrap();
+    let out = vericto()
+        .args(["rules", "test"])
+        .current_dir(empty.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr_of(&out).contains("no .vericto/policies/ directory"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+fn apply_body(dry_run: bool) -> serde_json::Value {
+    serde_json::json!({
+        "dry_run": dry_run,
+        "applied": [
+            { "path": ".vericto/policies/no-bulk-refunds.yaml", "name": "no-bulk-refunds",
+              "code": "CUSTOM-007", "rule_id": "r1", "result": "created", "version": 1 },
+            { "path": ".vericto/policies/reads.yml", "name": "reads",
+              "code": "CUSTOM-002", "rule_id": "r2", "result": "unchanged", "version": 3 }
+        ]
+    })
+}
+
+async fn mock_apply(status: u16, body: serde_json::Value) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/ci/policies"))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// `policies apply` sends each document with its repository path and prints
+/// the per-policy result; `--dry-run` says nothing was written.
+#[tokio::test]
+async fn policies_apply_sends_paths_and_prints_results() {
+    let repo = policy_repo();
+    let server = mock_apply(200, apply_body(true)).await;
+    let out = vericto()
+        .args(["policies", "apply", "--dry-run"])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.starts_with("Dry run: nothing was written."), "{text}");
+    assert!(text.contains("  created    CUSTOM-007 v1  no-bulk-refunds  (.vericto/policies/no-bulk-refunds.yaml)\n"), "{text}");
+    assert!(
+        text.contains(
+            "2 policies: 1 created, 0 updated, 1 unchanged (dry run, nothing was written)"
+        ),
+        "{text}"
+    );
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body["dry_run"], true);
+    assert_eq!(
+        body["policies"][0],
+        serde_json::json!({
+            "path": ".vericto/policies/no-bulk-refunds.yaml",
+            "document": "rule: no-bulk-refunds\ndeny_if: \"true\"\n"
+        })
+    );
+    assert_eq!(
+        body["policies"].as_array().unwrap().len(),
+        2,
+        "fixtures are not policies"
+    );
+
+    let server = mock_apply(200, apply_body(false)).await;
+    let out = vericto()
+        .args([
+            "policies",
+            "apply",
+            ".vericto/policies/reads.yml",
+            "--format",
+            "json",
+        ])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["applied"][1]["result"], "unchanged");
+}
+
+/// Invalid documents (400 INVALID_POLICIES) exit 1 with the per-document
+/// errors; a scope/role refusal exits 3; a file outside the repo exits 2.
+#[tokio::test]
+async fn policies_apply_errors_map_to_exit_codes() {
+    let repo = policy_repo();
+    let server = mock_apply(
+        400,
+        serde_json::json!({ "error": {
+            "code": "INVALID_POLICIES", "message": "1 policy is invalid",
+            "details": [{ "field": "policies[0]", "path": ".vericto/policies/no-bulk-refunds.yaml",
+                          "message": "the document does not pass the check",
+                          "check": { "valid": false, "errors": [{ "key": "deny_if", "offset": 2, "message": "unknown field `amont`" }] } }]
+        }}),
+    )
+    .await;
+    let out = vericto()
+        .args(["policies", "apply"])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.contains("1 policy is invalid; nothing was written:"),
+        "{text}"
+    );
+    assert!(
+        text.contains("check error at `deny_if` offset 2: unknown field `amont`"),
+        "{text}"
+    );
+
+    let server = mock_apply(
+        403,
+        serde_json::json!({ "error": { "code": "FORBIDDEN", "message": "This API key lacks the required scope: policies:write" } }),
+    )
+    .await;
+    let out = vericto()
+        .args(["policies", "apply"])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        stderr_of(&out)
+            .contains("FORBIDDEN: This API key lacks the required scope: policies:write"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("x.yaml"), "rule: x\n").unwrap();
+    let out = vericto()
+        .args([
+            "policies",
+            "apply",
+            outside.path().join("x.yaml").to_str().unwrap(),
+        ])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr_of(&out).contains("outside the repository root"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// A lost answer to a write is exit 4 and says the outcome is unknown.
+#[tokio::test]
+async fn policies_apply_server_error_says_the_outcome_is_unknown() {
+    let repo = policy_repo();
+    let server = mock_apply(
+        503,
+        serde_json::json!({ "error": { "code": "UNAVAILABLE", "message": "down" } }),
+    )
+    .await;
+    let out = vericto()
+        .args(["policies", "apply"])
+        .current_dir(repo.path())
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert!(
+        stderr_of(&out).contains("may or may not have been applied"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "a write is not retried"
+    );
+}
+
 // ── check: output formats, CI integration, exit codes, input boundaries ──────
 
 /// Writes `body` to `dir/name` and returns the path as a string.

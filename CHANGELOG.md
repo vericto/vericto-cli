@@ -6,6 +6,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-10-22
+
+**Business policies from the repository: `vericto rules test` and `vericto
+policies apply`** (business policy rules, Phase 1, M3). Policy documents live
+in `.vericto/policies/`, are reviewed in PRs, tested in CI and applied from
+the main branch. The CLI stays a thin client: fixtures run in the backend's
+evaluator, nothing is evaluated locally.
+
+### Security
+- **TLS certificate verification could accept distrusted intermediates.**
+  rustls-webpki 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382: certificate
+  verification may accept distrusted intermediates) and webpki-roots 1.0.8 ->
+  1.0.10 (RUSTSEC-2026-0381: the bundled roots allowed trust in distrusted
+  emSign intermediates). Every HTTPS request the CLI makes to the Vericto API
+  verifies the server with these crates, so an API endpoint presenting a chain
+  through one of those intermediates could have been trusted. No other
+  dependency changes; THIRD_PARTY_LICENSES updated for the two versions.
+
+### Added
+- **`vericto rules test [PATHS...]`** sends the policy documents (default
+  `.vericto/policies/*.yaml|*.yml`) and their fixtures
+  (`.vericto/policies/tests/<name>.yaml`) to `POST /api/v1/ci/rules/test` and
+  reports, per document, the checker's errors and warnings with key and offset,
+  then each fixture as PASS, FAIL (expected vs actual, with reasons) or SKIP
+  (with the reason), and a summary line. `--dialect` (default as for `check`,
+  else `postgres`) and `--format text|json`. Exit 0 when every fixture passed,
+  1 when one failed or a document is invalid, 2 for bad paths or a run over
+  the limits, 3 for key/scope or when business policy tests are not enabled
+  for the workspace (404), 4 for backend/network. Same `ci_dryrun:execute` key
+  as `check`, and it does not spend the monthly CLI check allowance. The
+  request limits (50 documents, 500 fixtures, 64 KiB per document or fixtures
+  file) are checked before anything is sent. A fixtures file with no document
+  of the same name is an error rather than a test that silently never runs.
+  A `429` is retried after its `Retry-After`.
+- **`vericto policies apply [PATHS...] [--dry-run]`** sends each policy
+  document with its repository path to `PUT /api/v1/ci/policies` (scope
+  `policies:write`). The backend applies all of them or none; the CLI prints
+  per policy `created`/`updated`/`unchanged`, code and version, or the
+  per-document errors of an invalid set (exit 1, nothing written). `--dry-run`
+  validates and says nothing was written. It never deletes a policy. A write
+  whose answer is lost (5xx, dropped connection) is not retried and exits 4
+  saying the outcome is unknown; the request is idempotent, so run it again.
+
 ## [1.11.0] - 2026-10-19
 
 **Windows becomes a first-class platform: offline mode, ARM64, and Windows

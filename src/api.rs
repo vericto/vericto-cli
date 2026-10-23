@@ -842,6 +842,193 @@ async fn simulation_response(
     }
 }
 
+/// Sends the request `build` makes, retrying a `429` (honoring `Retry-After`,
+/// else exponential backoff) up to `MAX_RETRIES` times. With `retry_transient`
+/// a transport failure or a `5xx` is retried the same way; a write passes
+/// `false`, because after a lost answer the CLI can no longer tell what the
+/// first attempt did. Returns the final status and body.
+async fn send_retrying(
+    build: impl Fn() -> reqwest::RequestBuilder,
+    retry_transient: bool,
+) -> Result<(u16, String), ApiError> {
+    let mut attempt = 0u32;
+    loop {
+        let resp = match build().send().await {
+            Ok(r) => r,
+            Err(e) => {
+                if retry_transient && attempt < MAX_RETRIES {
+                    let delay = backoff_delay(attempt);
+                    eprintln!(
+                        "note: transient failure ({e}); retry {}/{MAX_RETRIES} in {}ms",
+                        attempt + 1,
+                        delay.as_millis()
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(ApiError::Transport(e.to_string()));
+            }
+        };
+        let code = resp.status().as_u16();
+        let header_hint = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        let body = resp.text().await.unwrap_or_default();
+        let retryable = code == 429 || (retry_transient && (500..=599).contains(&code));
+        if retryable && attempt < MAX_RETRIES {
+            // A 429 says when to come back: the Retry-After header, else the
+            // envelope's `error.retry_after_seconds`, else plain backoff.
+            let hint = if code == 429 {
+                header_hint.or_else(|| retry_after_in_body(&body))
+            } else {
+                None
+            };
+            let delay = hint
+                .map(Duration::from_secs)
+                .unwrap_or_else(|| backoff_delay(attempt));
+            eprintln!(
+                "note: transient failure (HTTP {code}); retry {}/{MAX_RETRIES} in {}ms",
+                attempt + 1,
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
+            attempt += 1;
+            continue;
+        }
+        return Ok((code, body));
+    }
+}
+
+/// `error.retry_after_seconds` of the backend's error envelope.
+fn retry_after_in_body(body: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("error")?
+        .get("retry_after_seconds")?
+        .as_u64()
+}
+
+/// `error.code` of the backend's error envelope (`{"error":{"code",...}}`).
+fn error_code(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("error")?
+        .get("code")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Maps a non-2xx answer: 401/403 to `Auth`, the rest to `Backend`.
+fn error_for(code: u16, body: &str) -> ApiError {
+    if code == 401 || code == 403 {
+        ApiError::Auth(extract_message(body))
+    } else {
+        ApiError::Backend {
+            status: code,
+            message: extract_message(body),
+        }
+    }
+}
+
+/// Parses a 2xx JSON body into `T`, keeping the raw value for `--format json`.
+fn parse_body<T: serde::de::DeserializeOwned>(
+    code: u16,
+    body: &str,
+    what: &str,
+) -> Result<(T, serde_json::Value), ApiError> {
+    let invalid = |e: serde_json::Error| ApiError::Backend {
+        status: code,
+        message: format!("invalid {what} body: {e}"),
+    };
+    let value: serde_json::Value = serde_json::from_str(body).map_err(invalid)?;
+    let typed = serde_json::from_value(value.clone()).map_err(invalid)?;
+    Ok((typed, value))
+}
+
+/// `POST /api/v1/ci/rules/test` (`vericto rules test`): runs the fixtures of
+/// policy documents in the backend's evaluator. Scope `ci_dryrun:execute`;
+/// does not spend the monthly CI-check allowance. Read-only, so a throttle,
+/// a `5xx` or a dropped connection is retried. 401/403 map to `Auth`; 404
+/// (the feature is off for the workspace) and 400 to `Backend`.
+pub async fn rules_test(
+    api_url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    transport: &Transport,
+) -> Result<(crate::policies::TestResponse, serde_json::Value), ApiError> {
+    let client = build_client(transport)?;
+    let url = format!("{}/api/v1/ci/rules/test", base_url(api_url)?);
+    let (code, text) = send_retrying(
+        || client.post(&url).header("X-API-Key", api_key).json(body),
+        true,
+    )
+    .await?;
+    // The evaluator answers a refused request (e.g. an unknown dialect) with
+    // its usual body and `error` set; keep it so the caller can say why.
+    if (200..300).contains(&code) {
+        return parse_body(code, &text, "rules test");
+    }
+    Err(error_for(code, &text))
+}
+
+/// What `PUT /api/v1/ci/policies` answered.
+#[derive(Debug)]
+pub enum ApplyOutcome {
+    /// `200`: applied (or, in a dry run, what would be).
+    Applied(crate::policies::ApplyResponse, serde_json::Value),
+    /// `400 INVALID_POLICIES`: nothing was written.
+    Invalid(Vec<crate::policies::PolicyError>, serde_json::Value),
+}
+
+/// `PUT /api/v1/ci/policies` (`vericto policies apply`): creates or updates
+/// the workspace's policies from the repository's documents, all or nothing.
+/// Scope `policies:write`. Only a `429` is retried (the request was refused
+/// before anything ran): after a `5xx` or a lost connection the outcome is
+/// unknown, so it is reported, not repeated. `400 INVALID_POLICIES` is
+/// `Invalid` (its `error.details`, one per invalid document); any other 400 is
+/// `Backend`. 401/403 map to `Auth`, with the error code in the message
+/// (`FORBIDDEN`, or `POLICY_OWNER_REQUIRED` for a critical or loosening change).
+pub async fn policies_apply(
+    api_url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    transport: &Transport,
+) -> Result<ApplyOutcome, ApiError> {
+    let client = build_client(transport)?;
+    let url = format!("{}/api/v1/ci/policies", base_url(api_url)?);
+    let (code, text) = send_retrying(
+        || client.put(&url).header("X-API-Key", api_key).json(body),
+        false,
+    )
+    .await?;
+    if (200..300).contains(&code) {
+        let (resp, raw) = parse_body(code, &text, "policies apply")?;
+        return Ok(ApplyOutcome::Applied(resp, raw));
+    }
+    let error_code = error_code(&text);
+    if code == 400 && error_code.as_deref() == Some("INVALID_POLICIES") {
+        #[derive(Deserialize)]
+        struct Envelope {
+            error: Details,
+        }
+        #[derive(Deserialize)]
+        struct Details {
+            details: Vec<crate::policies::PolicyError>,
+        }
+        let (env, raw) = parse_body::<Envelope>(code, &text, "policies apply")?;
+        return Ok(ApplyOutcome::Invalid(env.error.details, raw));
+    }
+    if code == 403 {
+        if let Some(c) = error_code {
+            return Err(ApiError::Auth(format!("{c}: {}", extract_message(&text))));
+        }
+    }
+    Err(error_for(code, &text))
+}
+
 /// Percent-encodes a single path segment (just enough for a rule code: letters,
 /// digits, `-`/`_` pass through; anything else — notably `/` — is escaped so a
 /// crafted code can't smuggle an extra path segment into the URL).
@@ -2359,5 +2546,227 @@ mod tests {
                 (_, other) => panic!("status {status}: unexpected {other:?}"),
             }
         }
+    }
+
+    fn test_ok_body() -> serde_json::Value {
+        serde_json::json!({
+            "results": [{ "id": "a.yaml", "check": { "valid": true, "errors": [], "warnings": [] },
+                          "fixtures": [{ "name": "f", "passed": true, "expected": "deny", "actual": "deny" }],
+                          "passed": 1, "failed": 0, "skipped": 0 }],
+            "summary": { "documents": 1, "errored": 0, "fixtures": 1, "passed": 1, "failed": 0, "skipped": 0, "ok": true },
+            "latency_ms": 1.0
+        })
+    }
+
+    /// `rules test` is read-only: a throttle is retried after Retry-After and
+    /// a 5xx with backoff, then the answer is parsed.
+    #[tokio::test]
+    async fn rules_test_retries_a_throttle_and_a_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/rules/test"))
+            .and(header("X-API-Key", "vtro_k"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+                "error": { "code": "RATE_LIMITED", "message": "slow down", "retry_after_seconds": 0 }
+            })))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/rules/test"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ci/rules/test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(test_ok_body()))
+            .with_priority(3)
+            .mount(&server)
+            .await;
+        let (resp, raw) = super::rules_test(
+            &server.uri(),
+            "vtro_k",
+            &serde_json::json!({}),
+            &transport(),
+        )
+        .await
+        .unwrap();
+        assert!(resp.summary.ok);
+        assert_eq!(resp.results[0].fixtures[0].name, "f");
+        assert_eq!(raw["latency_ms"], 1.0);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    /// The statuses the caller turns into messages and exit codes.
+    #[tokio::test]
+    async fn rules_test_maps_statuses() {
+        for (status, auth) in [(403u16, true), (404, false), (400, false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/ci/rules/test"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                        "error": { "message": "nope" }
+                    })),
+                )
+                .mount(&server)
+                .await;
+            let err = super::rules_test(
+                &server.uri(),
+                "vtro_k",
+                &serde_json::json!({}),
+                &transport(),
+            )
+            .await
+            .unwrap_err();
+            match err {
+                ApiError::Auth(m) => assert!(auth && m == "nope"),
+                ApiError::Backend { status: s, message } => {
+                    assert!(!auth && s == status && message == "nope")
+                }
+                other => panic!("{status}: {other:?}"),
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+        let err = super::rules_test(
+            &server.uri(),
+            "vtro_k",
+            &serde_json::json!({}),
+            &transport(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { message, .. } if message.contains("invalid rules test body")),
+            "{err:?}"
+        );
+    }
+
+    /// `policies apply` returns the applied list, or the per-document errors
+    /// of a 422; a 5xx is a write with an unknown outcome and is NOT retried.
+    #[tokio::test]
+    async fn policies_apply_parses_both_answers_and_does_not_retry_a_write() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/ci/policies"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({ "dry_run": true })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "dry_run": true,
+                "applied": [{ "path": "a.yaml", "name": "a", "code": "CUSTOM-001", "rule_id": "r", "result": "created", "version": 1 }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/ci/policies"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({ "dry_run": false })))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": { "code": "INVALID_POLICIES", "message": "1 policy is invalid",
+                           "details": [{ "field": "policies[0]", "path": "a.yaml", "message": "bad" }] }
+            })))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        match super::policies_apply(
+            &uri,
+            "vtro_k",
+            &serde_json::json!({ "dry_run": true }),
+            &transport(),
+        )
+        .await
+        .unwrap()
+        {
+            super::ApplyOutcome::Applied(r, _) => {
+                assert!(r.dry_run);
+                assert_eq!(r.applied[0].result, "created");
+            }
+            other => panic!("{other:?}"),
+        }
+        match super::policies_apply(
+            &uri,
+            "vtro_k",
+            &serde_json::json!({ "dry_run": false }),
+            &transport(),
+        )
+        .await
+        .unwrap()
+        {
+            super::ApplyOutcome::Invalid(errors, raw) => {
+                assert_eq!(errors[0].path.as_deref(), Some("a.yaml"));
+                assert_eq!(errors[0].field.as_deref(), Some("policies[0]"));
+                assert_eq!(raw["error"]["code"], "INVALID_POLICIES");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // An owner-only change keeps its code; another 400 stays Backend.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({ "dry_run": true })))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": { "code": "POLICY_OWNER_REQUIRED", "message": "only the owner can loosen a policy" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": { "code": "VALIDATION_ERROR", "message": "policies is required" }
+            })))
+            .mount(&server)
+            .await;
+        let err = super::policies_apply(
+            &server.uri(),
+            "vtro_k",
+            &serde_json::json!({ "dry_run": true }),
+            &transport(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Auth(m) if m == "POLICY_OWNER_REQUIRED: only the owner can loosen a policy"),
+            "{err:?}"
+        );
+        let err = super::policies_apply(
+            &server.uri(),
+            "vtro_k",
+            &serde_json::json!({}),
+            &transport(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Backend { status: 400, message } if message == "policies is required"),
+            "{err:?}"
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        let err = super::policies_apply(
+            &server.uri(),
+            "vtro_k",
+            &serde_json::json!({}),
+            &transport(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ApiError::Backend { status: 502, .. }),
+            "{err:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(matches!(
+            super::policies_apply(&dead_url(), "vtro_k", &serde_json::json!({}), &transport())
+                .await,
+            Err(ApiError::Transport(_))
+        ));
     }
 }

@@ -17,6 +17,7 @@ mod config;
 mod offline;
 mod oidc;
 mod output;
+mod policies;
 mod pubkeys;
 mod receipt;
 mod sanitize;
@@ -202,8 +203,11 @@ enum Command {
     Baseline(BaselineArgs),
     /// Verify a signed run receipt offline — no network, no account.
     VerifyReceipt(VerifyReceiptArgs),
-    /// Inspect the workspace's rule catalogue (`list` / `show <CODE>`).
+    /// Inspect the workspace's rule catalogue (`list` / `show <CODE>`), test
+    /// policy documents (`test`), simulate a rule change (`simulate`).
     Rules(RulesArgs),
+    /// Apply the repository's business policy documents to the workspace.
+    Policies(PoliciesArgs),
     /// List the workspace's API keys (read-only; manage them in the dashboard).
     Keys(KeysArgs),
     /// Links to the documentation, by topic (open one with `docs <TOPIC>`).
@@ -495,6 +499,62 @@ enum RulesCommand {
     /// an API key with the `rules:simulate` scope). Exit 1 when it would block
     /// legitimate flows.
     Simulate(RulesSimulateArgs),
+    /// Run the fixtures of business policy documents (default:
+    /// .vericto/policies/*.yaml, fixtures in .vericto/policies/tests/) in the
+    /// backend's evaluator. Exit 1 when a fixture fails or a document is invalid.
+    Test(RulesTestArgs),
+}
+
+#[derive(Parser)]
+struct PoliciesArgs {
+    #[command(subcommand)]
+    command: PoliciesCommand,
+}
+
+#[derive(Subcommand)]
+enum PoliciesCommand {
+    /// Create or update the workspace's policies from the repository's policy
+    /// documents (default: .vericto/policies/*.yaml), all or nothing. Needs an
+    /// API key with the `policies:write` scope. Never deletes a policy.
+    Apply(PoliciesApplyArgs),
+}
+
+#[derive(Parser)]
+struct RulesTestArgs {
+    /// Policy documents (.yaml/.yml) or directories of them. Default:
+    /// .vericto/policies. The fixtures of `<dir>/<name>.yaml` are read from
+    /// `<dir>/tests/<name>.yaml` (or .yml) when it exists.
+    paths: Vec<std::path::PathBuf>,
+
+    #[command(flatten)]
+    auth: RulesAuthArgs,
+
+    /// SQL dialect of the fixtures that do not name one. Falls back to the
+    /// config default, then "postgres".
+    #[arg(long)]
+    dialect: Option<String>,
+
+    /// Output format (`json` prints the API response).
+    #[arg(long, value_enum, default_value_t = RulesFormat::Text)]
+    format: RulesFormat,
+}
+
+#[derive(Parser)]
+struct PoliciesApplyArgs {
+    /// Policy documents (.yaml/.yml) or directories of them, inside the
+    /// repository (the current directory). Default: .vericto/policies.
+    paths: Vec<std::path::PathBuf>,
+
+    #[command(flatten)]
+    auth: RulesAuthArgs,
+
+    /// Validate and show what would change, without writing anything.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Output format (`json` prints the API response).
+    #[arg(long, value_enum, default_value_t = RulesFormat::Text)]
+    format: RulesFormat,
 }
 
 #[derive(Parser)]
@@ -1161,6 +1221,10 @@ async fn main() -> ExitCode {
             RulesCommand::List(a) => run_rules_list(a).await,
             RulesCommand::Show(a) => run_rules_show(a).await,
             RulesCommand::Simulate(a) => run_rules_simulate(a).await,
+            RulesCommand::Test(a) => run_rules_test(a).await,
+        },
+        Command::Policies(args) => match args.command {
+            PoliciesCommand::Apply(a) => run_policies_apply(a).await,
         },
         Command::Keys(args) => match args.command {
             KeysCommand::List(a) => run_keys_list(a).await,
@@ -2774,6 +2838,201 @@ async fn run_rules_simulate(args: RulesSimulateArgs) -> ExitCode {
         );
     }
     ExitCode::from(code)
+}
+
+/// The policy documents for `rules test` / `policies apply`, found relative
+/// to the current directory (the repository root, as for `.vericto.toml`).
+/// Errors are printed; the caller exits 2.
+fn discover_policies(
+    paths: &[std::path::PathBuf],
+    with_tests: bool,
+) -> Option<Vec<policies::PolicyFile>> {
+    let found = std::env::current_dir()
+        .map_err(|e| format!("cannot read the current directory: {e}"))
+        .and_then(|root| policies::discover(&root, paths, with_tests));
+    match found {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("error: {e}");
+            None
+        }
+    }
+}
+
+/// `vericto rules test [PATHS...]` — run the fixtures of business policy
+/// documents in the backend's evaluator (`POST /ci/rules/test`). Nothing is
+/// evaluated locally, and the run does not spend the CI-check allowance.
+/// Exit codes: 0 every fixture passed (skipped ones do not fail), 1 a fixture
+/// failed or a document is invalid, 2 bad paths, a request over the limits or
+/// a request the backend refused, 3 key/scope or the feature not enabled for
+/// the workspace, 4 backend/network.
+async fn run_rules_test(args: RulesTestArgs) -> ExitCode {
+    let Some(files) = discover_policies(&args.paths, true) else {
+        return ExitCode::from(exit::USAGE);
+    };
+    if let Err(e) = policies::check_test_limits(&files) {
+        eprintln!("error: {e}");
+        return ExitCode::from(exit::USAGE);
+    }
+    let project = match config::load_project() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    // dialect precedence: flag > .vericto.toml > user config default > "postgres".
+    let dialect = args
+        .dialect
+        .clone()
+        .or_else(|| project.default_dialect.clone())
+        .or_else(|| load_config().default_dialect)
+        .unwrap_or_else(|| "postgres".to_string());
+    let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+    let body = policies::test_request_body(&dialect, &files);
+    let (resp, raw) = match api::rules_test(&api_url, &api_key, &body, &transport).await {
+        Ok(r) => r,
+        Err(e) => {
+            return ExitCode::from(match e {
+                ApiError::Backend { status: 404, .. } => {
+                    eprintln!(
+                        "error: business policy tests are not enabled for this workspace \
+                         (or the API predates them)"
+                    );
+                    exit::AUTH
+                }
+                ApiError::Backend {
+                    status: 400,
+                    message,
+                } => {
+                    eprintln!("error: the backend refused the request: {message}");
+                    exit::USAGE
+                }
+                ApiError::Auth(m) => {
+                    eprintln!("error: {}", ApiError::Auth(m));
+                    eprintln!(
+                        "hint: `rules test` needs an API key with the `ci_dryrun:execute` scope"
+                    );
+                    exit::AUTH
+                }
+                other => {
+                    eprintln!("error: {other}");
+                    exit::BACKEND
+                }
+            });
+        }
+    };
+    if resp.error.is_none() && resp.results.len() != files.len() {
+        eprintln!(
+            "error: invalid rules test body: {} results for {} documents sent",
+            resp.results.len(),
+            files.len()
+        );
+        return ExitCode::from(exit::BACKEND);
+    }
+    let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+    match args.format {
+        RulesFormat::Json => println!("{}", serde_json::to_string_pretty(&raw).unwrap_or_default()),
+        RulesFormat::Text => print!("{}", policies::render_test_text(&resp, &paths)),
+    }
+    if let Some(e) = &resp.error {
+        eprintln!("error: the backend refused the request: {e}");
+    }
+    ExitCode::from(policies::test_exit(&resp))
+}
+
+/// `vericto policies apply [PATHS...] [--dry-run]` — create or update the
+/// workspace's policies from the repository's documents (`PUT /ci/policies`,
+/// scope `policies:write`), all or nothing. Never deletes a policy. Exit
+/// codes: 0 applied (or validated with `--dry-run`), 1 a document is invalid
+/// (nothing written), 2 bad paths or a request the backend refused, 3
+/// key/scope/role or the feature not enabled, 4 backend/network (the outcome
+/// of the write is then unknown; the request is idempotent, so run it again).
+async fn run_policies_apply(args: PoliciesApplyArgs) -> ExitCode {
+    let Some(files) = discover_policies(&args.paths, false) else {
+        return ExitCode::from(exit::USAGE);
+    };
+    let local = policies::check_apply_paths(&files)
+        .and_then(|()| files.iter().try_for_each(policies::check_document_size));
+    if let Err(e) = local {
+        eprintln!("error: {e}");
+        return ExitCode::from(exit::USAGE);
+    }
+    let (api_url, api_key, transport) = match resolve_rules_auth(&args.auth).await {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+    let body = policies::apply_request_body(&files, args.dry_run);
+    let outcome = match api::policies_apply(&api_url, &api_key, &body, &transport).await {
+        Ok(o) => o,
+        Err(e) => {
+            return ExitCode::from(match e {
+                ApiError::Backend { status: 404, .. } => {
+                    eprintln!(
+                        "error: business policies are not enabled for this workspace \
+                         (or the API predates them)"
+                    );
+                    exit::AUTH
+                }
+                ApiError::Backend {
+                    status: 400,
+                    message,
+                } => {
+                    eprintln!("error: the backend refused the request: {message}");
+                    exit::USAGE
+                }
+                ApiError::Auth(m) => {
+                    eprintln!("error: {}", ApiError::Auth(m));
+                    eprintln!(
+                        "hint: `policies apply` needs an API key with the `policies:write` scope, \
+                         created by a workspace admin or owner (owner for critical or loosening changes)"
+                    );
+                    exit::AUTH
+                }
+                // A refused request (429) wrote nothing; anything else may have.
+                other @ (ApiError::Transport(_) | ApiError::Backend { .. })
+                    if !args.dry_run && !matches!(other, ApiError::Backend { status: 429, .. }) =>
+                {
+                    eprintln!("error: {other}");
+                    eprintln!(
+                        "error: the policies may or may not have been applied; the request is \
+                         idempotent, so run it again (with --dry-run to see the current state)"
+                    );
+                    exit::BACKEND
+                }
+                other => {
+                    eprintln!("error: {other}");
+                    exit::BACKEND
+                }
+            });
+        }
+    };
+    match outcome {
+        api::ApplyOutcome::Applied(resp, raw) => {
+            match args.format {
+                RulesFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&raw).unwrap_or_default())
+                }
+                RulesFormat::Text => print!("{}", policies::render_apply_text(&resp)),
+            }
+            if args.dry_run && !resp.dry_run {
+                eprintln!("warning: --dry-run was requested but the backend reports the policies as applied");
+            }
+            ExitCode::from(exit::OK)
+        }
+        api::ApplyOutcome::Invalid(errors, raw) => {
+            match args.format {
+                RulesFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&raw).unwrap_or_default())
+                }
+                RulesFormat::Text => print!("{}", policies::render_apply_errors(&errors)),
+            }
+            ExitCode::from(exit::FINDING)
+        }
+    }
 }
 
 /// `vericto rules show <CODE>` — print one rule's full detail, including the
