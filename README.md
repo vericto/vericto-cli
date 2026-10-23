@@ -104,7 +104,7 @@ A manual install, with the checksum check (use
 `vericto-cli-aarch64-pc-windows-msvc.zip` on ARM64):
 
 ```powershell
-$v = "1.11.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
+$v = "1.12.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
 $base = "https://github.com/vericto/vericto-cli/releases/download/v$v"
 Invoke-WebRequest "$base/$zip" -OutFile $zip
 Invoke-WebRequest "$base/$zip.sha256" -OutFile "$zip.sha256"
@@ -176,6 +176,8 @@ vericto baseline prune     Remove baseline entries that no longer match any find
 vericto rules list         List the workspace's effective rule catalogue.
 vericto rules show <CODE>  Show one rule's detail (e.g. VERICTO-001), incl. its AST condition.
 vericto rules simulate <F> Run a candidate rule change against recorded production traffic.
+vericto rules test [paths] Run the fixtures of business policy documents (.vericto/policies).
+vericto policies apply     Create or update the workspace's policies from .vericto/policies.
 vericto keys list          List the workspace's API keys (read-only; manage them in the dashboard).
 vericto docs [topic]       List documentation links by topic, or open one in your browser.
 vericto feedback [msg]     Send feedback (bug/idea/other) to the Vericto team.
@@ -313,6 +315,96 @@ In GitHub Actions, on the PRs that change rule files:
 ```
 
 (`fetch-depth: 0` on checkout is needed for the diff.)
+
+## Testing business policies (`vericto rules test`)
+
+Business policies are custom rules written as policy documents, one YAML file
+each, kept in the repository and reviewed like code. Their fixtures (a SQL
+statement plus the expected outcome) run in the Vericto backend's evaluator,
+the same one that enforces the policy; nothing is evaluated on your machine.
+
+```text
+.vericto/policies/no-bulk-refunds.yaml         a policy document (its own `tests:` run too)
+.vericto/policies/tests/no-bulk-refunds.yaml   more fixtures for it (optional)
+```
+
+```bash
+vericto rules test                                     # every .vericto/policies/*.yaml|*.yml
+vericto rules test .vericto/policies/no-bulk-refunds.yaml other/policies/
+vericto rules test --dialect mysql                     # for fixtures that name no dialect
+vericto rules test --format json                       # the API response, for scripting
+```
+
+Paths are files or directories (a directory contributes its `*.yaml`/`*.yml`
+files, not its subdirectories). The fixtures of `<dir>/<name>.yaml` are read
+from `<dir>/tests/<name>.yaml` (or `.yml`) and sent with it. In a directory, a
+fixtures file with no document of the same name, or two documents with the same
+name (`a.yaml` and `a.yml`), is an error, so fixtures never silently stop
+running. Run it from the repository root; the paths in the report are relative
+to it.
+
+For each document the report shows the checker's errors and warnings (with the
+key and offset), then every fixture: `PASS`, `FAIL` with the expected and the
+actual outcome (and their reasons), or `SKIP` with the reason (a fixture that
+needs a later phase). The `--dialect` default follows `check`: the flag, then
+`default_dialect` in `.vericto.toml`, then the user config, then `postgres`.
+
+It uses the same `ci_dryrun:execute` API key as `check` and does **not** spend
+the monthly CLI check allowance (the endpoint has its own rate limit; a `429`
+is retried after its `Retry-After`). One run takes at most 50 documents, 500
+fixtures and 64 KiB per document or fixtures file; a larger run is refused
+before anything is sent (split the paths over several runs).
+
+Exit codes: `0` every fixture passed (skipped ones do not fail the run), `1` a
+fixture failed or a document is invalid, `2` bad paths, a run over the limits or
+a request the backend refused, `3` key or scope (also: business policy tests
+are not enabled for the workspace), `4` backend or network.
+
+## Applying business policies (`vericto policies apply`)
+
+Push the repository's policy documents to the workspace, typically from the CI
+job of the main branch after the PR that changed them was reviewed:
+
+```bash
+vericto policies apply --dry-run      # validate and show what would change; writes nothing
+vericto policies apply                # every .vericto/policies/*.yaml|*.yml
+vericto policies apply .vericto/policies/no-bulk-refunds.yaml --format json
+```
+
+Each document is sent with its path in the repository (relative to the root,
+`/` separators), so run it from the repository root; a file outside it is
+refused. The backend matches policies to the workspace's custom rules by name
+(the document's `rule:` key) and applies all of them or none: if any document
+is invalid, it lists the errors per document (with the checker's key and
+offset) and nothing is written. On success it prints, per policy, `created`,
+`updated` or `unchanged`, the rule code and the version. It never deletes a
+policy, even one whose file was removed; disable or delete those in the
+dashboard. Fixtures files in `tests/` are not policies and are not sent.
+
+It needs an API key with the **`policies:write`** scope (granted on the API
+keys page, never a default) whose creator is an admin or owner of the
+workspace; a critical policy or a change that loosens one (`exempt`, `mode:
+monitor`) needs the owner.
+
+Exit codes: `0` applied (or, with `--dry-run`, valid), `1` a document is
+invalid (nothing was written), `2` bad paths or a request the backend refused,
+`3` key, scope or role (also: business policies are not enabled for the
+workspace), `4` backend or network. After a `4` without `--dry-run` the CLI
+cannot know whether the write happened; the request is idempotent, so run it
+again.
+
+```yaml
+# GitHub Actions: test on every PR, apply on main
+- name: Test business policies
+  env:
+    VERICTO_API_KEY: ${{ secrets.VERICTO_API_KEY }}            # scope ci_dryrun:execute
+  run: npx -y @vericto/vericto-cli rules test
+- name: Apply business policies
+  if: github.ref == 'refs/heads/main'
+  env:
+    VERICTO_API_KEY: ${{ secrets.VERICTO_POLICIES_KEY }}       # scope policies:write
+  run: npx -y @vericto/vericto-cli policies apply
+```
 
 ## Inspecting API keys (`vericto keys`)
 

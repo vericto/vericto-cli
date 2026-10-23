@@ -152,7 +152,7 @@ Name, version and declared license (SPDX expression) of each crate:
   - rustc-hash 2.1.3: Apache-2.0 OR MIT
   - rustls 0.23.46: Apache-2.0 OR ISC OR MIT
   - rustls-pki-types 1.15.0: MIT OR Apache-2.0
-  - rustls-webpki 0.103.15: ISC
+  - rustls-webpki 0.103.16: ISC
   - ryu 1.0.23: Apache-2.0 OR BSL-1.0
   - serde 1.0.229: MIT OR Apache-2.0
   - serde_core 1.0.229: MIT OR Apache-2.0
@@ -209,7 +209,7 @@ Name, version and declared license (SPDX expression) of each crate:
   - utf8parse 0.2.2: Apache-2.0 OR MIT
   - vericto-engine 4.3.0: FSL-1.1-ALv2
   - want 0.3.1: MIT
-  - webpki-roots 1.0.8: CDLA-Permissive-2.0
+  - webpki-roots 1.0.10: CDLA-Permissive-2.0
   - windows-link 0.2.1: MIT OR Apache-2.0
   - windows-sys 0.48.0: MIT OR Apache-2.0
   - windows-sys 0.52.0: MIT OR Apache-2.0
@@ -6651,7 +6651,7 @@ DEALINGS IN THE SOFTWARE.
 
 ================================================================================
 Used by:
-  - rustls-webpki 0.103.15 (LICENSE)
+  - rustls-webpki 0.103.16 (LICENSE)
 
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
@@ -8228,7 +8228,7 @@ THE SOFTWARE.
 
 ================================================================================
 Used by:
-  - webpki-roots 1.0.8 (LICENSE)
+  - webpki-roots 1.0.10 (LICENSE)
 
 # Community Data License Agreement - Permissive - Version 2.0
 
