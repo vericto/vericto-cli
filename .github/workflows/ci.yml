@@ -44,7 +44,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # libclang for pg_query's bindgen (the `offline` feature embeds the engine).
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev clang
       - run: cargo clippy --all-targets --all-features -- -D warnings
@@ -59,7 +59,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev clang
       - run: cargo build --locked --all-targets
       - run: cargo test --locked
@@ -86,7 +86,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Lint (clippy)
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Build with the engine
