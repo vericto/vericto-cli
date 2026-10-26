@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-10-26
+
+### Security
+- **tokio 1.53.2 -> 1.54.1** (RUSTSEC-2026-0386: `AsyncFd::new` and related
+  constructors violate I/O safety). The CLI does not call `AsyncFd` directly;
+  the update keeps the shipped binaries off an unsound tokio release and
+  `cargo audit` green. No other dependency changes; THIRD_PARTY_LICENSES
+  updated for the new version.
+
 ## [1.12.0] - 2026-10-22
 
 **Business policies from the repository: `vericto rules test` and `vericto
