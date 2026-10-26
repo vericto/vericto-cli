@@ -104,7 +104,7 @@ A manual install, with the checksum check (use
 `vericto-cli-aarch64-pc-windows-msvc.zip` on ARM64):
 
 ```powershell
-$v = "1.12.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
+$v = "1.12.1"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
 $base = "https://github.com/vericto/vericto-cli/releases/download/v$v"
 Invoke-WebRequest "$base/$zip" -OutFile $zip
 Invoke-WebRequest "$base/$zip.sha256" -OutFile "$zip.sha256"
