@@ -6,6 +6,72 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-10-31
+
+**Offline mode moves to `vericto-engine` 4.7.0 (was 4.3.0), and some offline
+verdicts change.** The engine's existing standard rules now see the same
+destructive operation through more equivalent SQL forms, so `vericto check
+--offline` can block SQL that 1.12.1 allowed or only flagged. Minor release
+because offline verdicts change. Online checks are unchanged: they use the
+server's engine, as always. The rule set (42 standard rules), their default
+severities and the CI schema-migration cap are unchanged.
+
+### Upgrade notes
+- **Offline verdicts change.** A CI job running `vericto check --offline` can
+  now exit 1 on SQL it passed before. Examples, with what 1.12.1 reported:
+  `DELETE FROM users WHERE NULL IS NULL` is BLOCKED by VERICTO-003 (was
+  ALLOWED); `UPDATE users SET active = false WHERE 1 IN (1, NULL)` on MySQL by
+  VERICTO-030 (was ALLOWED); `... WHERE status = 'active' OR NULL IS NULL` by
+  VERICTO-090 (was FLAGGED by VERICTO-050); Snowflake `INSERT INTO t (SELECT *
+  FROM s)` by VERICTO-040 (was FLAGGED by VERICTO-051); SQL Server
+  `SELECT * INTO #users_copy FROM users` by VERICTO-084 (was FLAGGED by
+  VERICTO-050). Run `vericto check --offline --monitor` once to see what moves
+  before enforcing.
+- From the engine's upgrade notes: dbt-snowflake's parenthesized incremental
+  `INSERT … (SELECT …)` now matches VERICTO-040, and SQL Server
+  `SELECT … INTO #temp` matches VERICTO-084. Both copy rows by design. Trial
+  4.7.0 with `monitor_mode`, then set the affected rule action explicitly if
+  those copies are approved workflow operations (online, in the workspace's
+  rules; offline, with `--monitor`, `--baseline` or an inline
+  `-- vericto:ignore[...]`).
+- An optional-filter expression rendered with a literal NULL branch, such as
+  `status = 'active' OR NULL IS NULL`, now matches VERICTO-090 because it is
+  unconditionally true. Keep runtime values as bind parameters when the branch
+  is data-dependent; approve intentional all-row operations through policy
+  rather than disguising them as a filter.
+
+### Changed
+- **Engine 4.7.0 in the binary.** `vericto check --offline` evaluates with
+  `vericto-engine` 4.7.0 (was 4.3.0), pinned by tag (`c24ae9d`). Every
+  offline result says so: `engine 4.7.0` and `ruleset_version`
+  `standard@engine-4.7.0`. What changes for the standard rules (engine
+  CHANGELOG 4.4.0 to 4.7.0; 4.4.0 to 4.6.0 only add business policies,
+  `rewrite_limit` and VERICTO-087 fixes, which offline mode does not use):
+  - VERICTO-003/030/042 treat constant null, boolean and null-safe predicates
+    (`NULL IS NULL`, `1 IS NOT NULL`, `(1=1) IS TRUE`, `1 IS DISTINCT FROM
+    NULL`, …) and a positive `IN` with a known match (`1 IN (1, NULL)`) as no
+    `WHERE`; inside an `OR` they reach VERICTO-090.
+  - VERICTO-084 covers table copies on every dialect: MySQL / Oracle
+    `CREATE TABLE … AS SELECT`, PostgreSQL / SQL Server `SELECT … INTO
+    <table>`, materialized views.
+  - VERICTO-040 covers `INSERT … SELECT … UNION …`, parenthesized sources and
+    `INSERT … TABLE t`; VERICTO-061 counts parenthesized VALUES batches.
+  - VERICTO-070 finds a sleep call in any executed clause (JOIN, GROUP BY,
+    ORDER BY, SET, VALUES, RETURNING, nested queries, `EXPLAIN ANALYZE`).
+  - VERICTO-051 treats `table.*` as `SELECT *`.
+  - Row-dependent predicates (`id IS NOT NULL`, `name LIKE '%'`,
+    `1 IN (2, id)`, `NOT IN`) remain real filters.
+- The engine adds `regex` (with `regex-automata`, `regex-syntax` and
+  `aho-corasick`, already in the lockfile) to the binaries that embed it; THIRD_PARTY_LICENSES regenerated with
+  third-party/notices.py. No other dependency changes.
+- README (offline section, offline/online table, Windows install pin) and
+  DESIGN §13 name engine 4.7.0.
+
+### Tests
+- `engine_4_7_catches_equivalent_destructive_forms` pins the five examples
+  above and a row-dependent `IS NOT NULL` that stays allowed; the offline
+  version tests expect `engine 4.7.0` and `standard@engine-4.7.0`.
+
 ## [1.12.1] - 2026-10-26
 
 ### Security
