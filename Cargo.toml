@@ -46,7 +46,7 @@ getrandom = "0.2"
 # CLI release (the tag bump is the ruleset bump for offline mode). Offline
 # mode takes its rules, version and decision from the engine (src/offline.rs).
 # Built on every release target, Windows included since 1.11.0.
-vericto-engine = { git = "https://github.com/vericto/vericto-engine", tag = "v4.3.0", optional = true }
+vericto-engine = { git = "https://github.com/vericto/vericto-engine", tag = "v4.7.0", optional = true }
 
 [features]
 default = ["offline"]

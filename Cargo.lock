@@ -2193,10 +2193,11 @@ dependencies = [
 
 [[package]]
 name = "vericto-engine"
-version = "4.3.0"
-source = "git+https://github.com/vericto/vericto-engine?tag=v4.3.0#7382d68fde4e174cc5c7cd5204dc065ac7f6ffa4"
+version = "4.7.0"
+source = "git+https://github.com/vericto/vericto-engine?tag=v4.7.0#c24ae9d05a604711e85b4613764c2fa818f4d421"
 dependencies = [
  "pg_query",
+ "regex",
  "serde",
  "serde_json",
  "serde_norway",

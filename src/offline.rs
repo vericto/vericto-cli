@@ -404,6 +404,50 @@ mod tests {
         assert_eq!(one(&big, "postgres").status, "PARSE_ERROR");
     }
 
+    /// Engine 4.7.0 sees the same destructive operation through equivalent
+    /// forms that 4.3.0 to 4.6.0 allowed or only flagged (engine CHANGELOG
+    /// [4.7.0]): a constant predicate is no filter, a positive `IN` with a known
+    /// match is true, and table copies reach VERICTO-040 / VERICTO-084.
+    #[test]
+    fn engine_4_7_catches_equivalent_destructive_forms() {
+        for (sql, dialect, code) in [
+            (
+                "DELETE FROM users WHERE NULL IS NULL",
+                "postgres",
+                "VERICTO-003",
+            ),
+            (
+                "UPDATE users SET active = false WHERE 1 IN (1, NULL)",
+                "mysql",
+                "VERICTO-030",
+            ),
+            (
+                "SELECT id FROM users WHERE status = 'active' OR NULL IS NULL",
+                "postgres",
+                "VERICTO-090",
+            ),
+            (
+                "INSERT INTO t (SELECT * FROM s)",
+                "snowflake",
+                "VERICTO-040",
+            ),
+            (
+                "SELECT * INTO #users_copy FROM users",
+                "sqlserver",
+                "VERICTO-084",
+            ),
+        ] {
+            let r = one(sql, dialect);
+            assert_eq!(r.status, "BLOCKED", "{dialect}: {sql}");
+            assert_eq!(r.rule_code.as_deref(), Some(code), "{dialect}: {sql}");
+        }
+        // A row-dependent predicate is still a real filter.
+        assert_eq!(
+            one("DELETE FROM users WHERE id IS NOT NULL", "postgres").rule_code,
+            None
+        );
+    }
+
     #[test]
     fn dialects_are_honored() {
         // MySQL backticks parse only as MySQL.
@@ -435,7 +479,7 @@ mod tests {
         assert_eq!(resp.summary.blocked, 1);
         assert_eq!(resp.summary.allowed, 1);
         assert_eq!(resp.exit_code, 1);
-        assert_eq!(resp.summary.ruleset_version, "standard@engine-4.3.0");
+        assert_eq!(resp.summary.ruleset_version, "standard@engine-4.7.0");
         assert_eq!(
             resp.mode,
             RunMode::Offline {
