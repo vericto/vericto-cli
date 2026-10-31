@@ -2169,7 +2169,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "vericto-cli"
-version = "1.12.1"
+version = "1.13.0"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
@@ -2193,10 +2193,11 @@ dependencies = [
 
 [[package]]
 name = "vericto-engine"
-version = "4.3.0"
-source = "git+https://github.com/vericto/vericto-engine?tag=v4.3.0#7382d68fde4e174cc5c7cd5204dc065ac7f6ffa4"
+version = "4.7.0"
+source = "git+https://github.com/vericto/vericto-engine?tag=v4.7.0#c24ae9d05a604711e85b4613764c2fa818f4d421"
 dependencies = [
  "pg_query",
+ "regex",
  "serde",
  "serde_json",
  "serde_norway",

@@ -1169,7 +1169,7 @@ distributed, and nothing an offline run produces passes for the workspace's
 verdict or its audit record.
 
 **The decision.** `vericto check --offline` evaluates locally with the
-embedded engine (`vericto-engine` 4.3.0, pinned by tag) and its **standard
+embedded engine (`vericto-engine` 4.7.0, pinned by tag) and its **standard
 rules at their default severities**:
 
 - **Rule set:** the 42 standard rules, the engine's own standard ruleset
