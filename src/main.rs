@@ -183,8 +183,12 @@ impl clap::builder::TypedValueParser for EnvBool {
     override_usage = "\n       vericto <COMMAND>"
 )]
 struct Cli {
+    /// Optional so that a bare `vericto` (no arguments at all) can print a
+    /// pointer to `--help` and exit 0 instead of clap's usage error (exit 2).
+    /// Every other parse error (an unknown subcommand, a bad flag, a missing
+    /// argument) is still clap's, exit 2.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -1209,7 +1213,10 @@ fn resolve_fail_on(flag: Option<FailOn>, project: Option<&str>) -> FailOn {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
+    let Some(command) = cli.command else {
+        return run_no_command();
+    };
+    match command {
         Command::Check(args) => run_check(args).await,
         Command::Login(args) => run_login(args).await,
         Command::Logout => run_logout(),
@@ -1237,6 +1244,20 @@ async fn main() -> ExitCode {
         }
         Command::Completions(args) => run_completions(args),
     }
+}
+
+/// `vericto` with no arguments: say what the tool is and where the help is,
+/// on stdout, exit 0. Installers run the bare binary to check that it starts
+/// (winget's validation, for one), so this must not be a usage error. Only the
+/// zero-argument case lands here: any argument is either a subcommand,
+/// `--help`/`--version`, or a clap usage error (exit 2).
+fn run_no_command() -> ExitCode {
+    println!(
+        "vericto {} — validate SQL against your Vericto rules before it runs.\n\
+         Run `vericto --help` to see the commands, or `vericto <COMMAND> --help` for one command.",
+        env!("CARGO_PKG_VERSION")
+    );
+    ExitCode::from(exit::OK)
 }
 
 /// `vericto completions <shell>` — write a shell completion script to stdout.

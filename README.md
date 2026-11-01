@@ -734,6 +734,8 @@ default_dialect = "postgres"
 | `4` | Backend/network error (incl. a workspace config that can't be read — no SQL is sent) |
 
 Distinct non-zero codes let CI distinguish a real block from an outage.
+`vericto` with no arguments at all prints a pointer to `--help` and exits `0`;
+any other bad invocation (an unknown command or flag, a missing argument) is `2`.
 
 ## Offline mode
 
