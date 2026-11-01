@@ -700,6 +700,12 @@ unreachable from the first request, with a required reason and a local
 degraded-run record (`.vericto/degraded-runs.jsonl`); a stderr warning still
 prints so the exit code alone doesn't hide it from a human watching the log.)
 
+A bare `vericto`, with no arguments at all, is not a usage error: it prints
+the version, the one-line description and a pointer to `vericto --help` on
+stdout and exits `0`, because installers run the bare binary to check that it
+starts (winget's validation expects success). Every other parse error (an
+unknown subcommand or flag, a missing argument) stays clap's, exit `2`.
+
 ## 9. Distribution
 
 Define **one release pipeline** — GitHub Releases with signed cross-compiled

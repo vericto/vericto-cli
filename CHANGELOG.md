@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.13.3] - 2026-11-01
+
+`vericto` with no arguments now exits 0, so winget can validate the package.
+
+### Changed
+- **A bare `vericto` prints a pointer to the help and exits 0.** With no
+  arguments at all, it prints its version, what it does and where the help
+  is (`vericto --help`, `vericto <COMMAND> --help`) on stdout and exits 0;
+  it used to print the help on stderr and exit 2. winget's
+  post-install validation runs `vericto.exe` with no arguments and expects
+  success, so every winget submission failed with
+  `Validation-Executable-Error`. Only the zero-argument case changes: an
+  unknown command or flag, a missing argument and an unreadable file are
+  still usage errors (exit 2), and `--help`, `-h`, `vericto help`,
+  `--version` and the completion scripts are unchanged. SQL on stdin is
+  still checked only by `vericto check -`; a bare `vericto` does not read it.
+
 ## [1.13.2] - 2026-11-01
 
 Offline mode moves to `vericto-engine` 4.7.1 (was 4.7.0), a performance

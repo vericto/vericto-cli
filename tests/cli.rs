@@ -1000,6 +1000,123 @@ fn version_subcommand_prints_version() {
     assert!(s.starts_with("vericto "), "got: {s}");
 }
 
+// ── vericto with no arguments ────────────────────────────────────────────────
+
+/// What a bare `vericto` prints (stdout, exit 0).
+fn no_args_message() -> String {
+    format!(
+        "vericto {} — validate SQL against your Vericto rules before it runs.\n\
+         Run `vericto --help` to see the commands, or `vericto <COMMAND> --help` for one command.\n",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// `vericto` with no arguments at all says where the help is and exits 0:
+/// installers run the bare binary to check that it starts (winget's
+/// validation expects exit 0). Nothing on stderr, no ANSI, the same text with
+/// or without `NO_COLOR`.
+#[test]
+fn no_args_prints_a_help_pointer_and_exits_0() {
+    for no_color in [false, true] {
+        let mut cmd = vericto();
+        if no_color {
+            cmd.env("NO_COLOR", "1");
+        }
+        let out = cmd.assert().code(0).get_output().clone();
+        assert_eq!(stdout_of(&out), no_args_message(), "NO_COLOR={no_color}");
+        assert!(out.stderr.is_empty(), "stderr: {}", stderr_of(&out));
+    }
+}
+
+/// SQL piped into a bare `vericto` is not read or checked: stdin is
+/// `vericto check -`, which needs the subcommand. No backend is configured, so
+/// any attempt to check would fail; it prints the pointer and exits 0.
+#[test]
+fn no_args_does_not_read_stdin() {
+    let out = vericto()
+        .write_stdin("DELETE FROM users;")
+        .assert()
+        .code(0)
+        .get_output()
+        .clone();
+    assert_eq!(stdout_of(&out), no_args_message());
+    assert!(out.stderr.is_empty(), "stderr: {}", stderr_of(&out));
+}
+
+/// Every real usage error is still clap's exit 2, with its message on stderr
+/// and nothing on stdout.
+#[test]
+fn usage_errors_still_exit_2() {
+    let cases: &[&[&str]] = &[
+        &["nope"],              // unknown subcommand
+        &["--bogus"],           // unknown top-level flag
+        &["check", "--bogus"],  // unknown subcommand flag
+        &["rules", "show"],     // missing required argument
+        &["check", "--format"], // flag without its value
+    ];
+    for args in cases {
+        let out = vericto().args(*args).assert().code(2).get_output().clone();
+        assert!(
+            out.stdout.is_empty(),
+            "{args:?}: stdout: {}",
+            stdout_of(&out)
+        );
+        assert!(
+            stderr_of(&out).starts_with("error: "),
+            "{args:?}: stderr: {}",
+            stderr_of(&out)
+        );
+    }
+}
+
+/// `--help`, `-h` and `vericto help` print the full help on stdout, exit 0;
+/// it is not the no-arguments pointer.
+#[test]
+fn help_flags_print_the_full_help() {
+    let help = |args: &[&str]| {
+        let out = vericto().args(args).assert().code(0).get_output().clone();
+        assert!(
+            out.stderr.is_empty(),
+            "{args:?}: stderr: {}",
+            stderr_of(&out)
+        );
+        stdout_of(&out)
+    };
+    let long = help(&["--help"]);
+    assert!(
+        long.starts_with("Validate SQL against your Vericto rules before it runs"),
+        "got: {long}"
+    );
+    assert!(
+        long.contains("\nUsage: \n       vericto <COMMAND>\n"),
+        "got: {long}"
+    );
+    assert!(long.contains("\nCommands:\n  check "), "got: {long}");
+    assert_eq!(help(&["-h"]), long);
+    assert_eq!(help(&["help"]), long);
+    // A subcommand's usage line takes the invoked binary's file name, so on
+    // Windows it reads `vericto.exe check`.
+    let check = help(&["help", "check"]);
+    assert!(
+        check.contains("Usage: vericto check") || check.contains("Usage: vericto.exe check"),
+        "got: {check}"
+    );
+}
+
+/// `--version` and `-V` print `vericto <version>`, exit 0.
+#[test]
+fn version_flags_print_the_version() {
+    for flag in ["--version", "-V"] {
+        let out = vericto().arg(flag).assert().code(0).get_output().clone();
+        assert_eq!(
+            stdout_of(&out),
+            format!("vericto {}\n", env!("CARGO_PKG_VERSION")),
+            "{flag}"
+        );
+        assert!(out.stderr.is_empty(), "{flag}: stderr: {}", stderr_of(&out));
+    }
+}
+
 #[tokio::test]
 async fn no_color_produces_no_ansi() {
     let server = mock_backend(check_body(&["BLOCKED"]), "raw").await;
