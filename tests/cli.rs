@@ -1094,7 +1094,13 @@ fn help_flags_print_the_full_help() {
     assert!(long.contains("\nCommands:\n  check "), "got: {long}");
     assert_eq!(help(&["-h"]), long);
     assert_eq!(help(&["help"]), long);
-    assert!(help(&["help", "check"]).contains("Usage: vericto check"));
+    // A subcommand's usage line takes the invoked binary's file name, so on
+    // Windows it reads `vericto.exe check`.
+    let check = help(&["help", "check"]);
+    assert!(
+        check.contains("Usage: vericto check") || check.contains("Usage: vericto.exe check"),
+        "got: {check}"
+    );
 }
 
 /// `--version` and `-V` print `vericto <version>`, exit 0.
