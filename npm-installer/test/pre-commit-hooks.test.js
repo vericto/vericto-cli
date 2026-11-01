@@ -21,31 +21,74 @@ function crateVersion() {
   return m[1];
 }
 
-// The manifest is a flat list of hooks with scalar keys and one-line flow
-// lists; this reads exactly that shape, so a reformatted file fails loudly
-// here instead of being half-read.
-function hooks() {
+// The manifest is a flat list of hooks with scalar keys, one-line flow lists
+// and folded (`>-`) scalars continued on 4-space lines; this reads exactly
+// that shape, so a reformatted file fails loudly here instead of being
+// half-read. Comments are whole lines at column 0. A `#` inside a value is
+// kept: a continuation line is block-scalar text, where `#` is not a comment.
+// On a `key: value` line, YAML would read ` #` as the start of a comment;
+// the manifest has none, so one fails here rather than being half-parsed.
+function parseHooks(text) {
   const out = [];
-  for (const raw of read(".pre-commit-hooks.yaml").split(/\r?\n/)) {
-    const line = raw.replace(/\s+#.*$/, "");
-    if (/^\s*(#.*)?$/.test(line)) continue;
+  let last; // the key that a continuation line extends
+  for (const line of text.split(/\r?\n/)) {
+    if (/^(#.*)?$/.test(line)) continue;
     const item = line.match(/^- (\w+): (.*)$/);
     const key = line.match(/^ {2}(\w+): (.*)$/);
     const cont = line.match(/^ {4}(.*)$/);
-    if (item) {
-      out.push({ [item[1]]: item[2] });
-    } else if (key && out.length) {
-      out[out.length - 1][key[1]] = key[2];
-      out[out.length - 1].__last = key[1];
+    if (item || key) {
+      const [, k, v] = item || key;
+      const unquoted = v.replace(/"[^"]*"|'[^']*'/g, "");
+      if (/(^|\s)#/.test(unquoted)) {
+        assert.fail(`inline comment in .pre-commit-hooks.yaml (not supported): ${line}`);
+      }
+      if (item) {
+        out.push({});
+      } else if (!out.length) {
+        assert.fail(`key before the first hook in .pre-commit-hooks.yaml: ${line}`);
+      }
+      out[out.length - 1][k] = v;
+      last = k;
     } else if (cont && out.length) {
       const h = out[out.length - 1];
-      h[h.__last] = `${h[h.__last]} ${cont[1]}`.trim();
+      h[last] = `${h[last]} ${cont[1]}`.trim();
     } else {
-      assert.fail(`unexpected line in .pre-commit-hooks.yaml: ${raw}`);
+      assert.fail(`unexpected line in .pre-commit-hooks.yaml: ${line}`);
     }
   }
   return out;
 }
+
+const hooks = () => parseHooks(read(".pre-commit-hooks.yaml"));
+
+test("the manifest parser keeps a '#' inside a value and holds only YAML keys", () => {
+  const fixture = [
+    "# a comment line",
+    "",
+    "- id: demo",
+    "  name: \"demo #1\"",
+    "  description: >-",
+    "    Fixes #123 and",
+    "    #456, see a#b.",
+    "  entry: vericto check",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseHooks(fixture), [
+    {
+      id: "demo",
+      name: '"demo #1"',
+      description: ">- Fixes #123 and #456, see a#b.",
+      entry: "vericto check",
+    },
+  ]);
+});
+
+test("the manifest parser rejects an inline comment instead of truncating", () => {
+  for (const line of ["  entry: vericto check # offline", "- id: demo # first"]) {
+    const text = line.startsWith("-") ? line : `- id: demo\n${line}`;
+    assert.throws(() => parseHooks(text), /inline comment/, line);
+  }
+});
 
 test("both hook ids exist", () => {
   assert.deepEqual(
