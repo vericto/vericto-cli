@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-11-01
+
+pre-commit framework hooks, and the macOS Apple silicon build moves off the
+retiring macOS 14 runner. The `vericto` binary is unchanged from 1.13.0
+(same code, same engine 4.7.0, same verdicts).
+
 ### Added
 - **pre-commit framework hooks.** This repository is now a
   [pre-commit](https://pre-commit.com) hook repository
@@ -19,7 +25,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   root `package.json` (private, no dependencies) is there only so pre-commit
   can install a node hook; the npm installer's tests check that the hooks and
   the README example pin the version in `Cargo.toml`. See "pre-commit
-  framework" in the README.
+  framework" in the README. The first release with the hooks: use
+  `rev: v1.13.1` or later.
+
+### Changed
+- **Release build: `aarch64-apple-darwin` builds on `macos-15`** (was
+  cargo-dist's default, `macos-14`). GitHub retires the macOS 14 runner
+  images on 2026-11-02 and fails their jobs during brownouts until then, which
+  cancelled the v1.13.0 Apple silicon build once. `x86_64-apple-darwin` stays
+  on `macos-15-intel`. No user-visible behavior change: same targets, same
+  archives, installers and checksums.
+
+### Tests
+- The pre-commit manifest check in the npm installer's tests no longer strips
+  `#...` from lines, which would have truncated a value containing ` #`; a
+  `#` inside a value is read intact, and an inline comment fails the test
+  instead. The parsed hooks hold only YAML keys (no internal bookkeeping
+  property). New tests run the parser on in-memory fixtures.
 
 ## [1.13.0] - 2026-10-31
 

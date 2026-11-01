@@ -22,7 +22,7 @@
     account, no API key, no network; the SQL never leaves the machine.
   entry: vericto check --offline
   language: node
-  additional_dependencies: ["@vericto/vericto-cli@1.13.0"]
+  additional_dependencies: ["@vericto/vericto-cli@1.13.1"]
   types: [sql]
   verbose: true
 
@@ -33,6 +33,6 @@
     VERICTO_API_KEY in the environment or a `vericto login`.
   entry: vericto check
   language: node
-  additional_dependencies: ["@vericto/vericto-cli@1.13.0"]
+  additional_dependencies: ["@vericto/vericto-cli@1.13.1"]
   types: [sql]
   verbose: true
