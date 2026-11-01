@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(resp.summary.blocked, 1);
         assert_eq!(resp.summary.allowed, 1);
         assert_eq!(resp.exit_code, 1);
-        assert_eq!(resp.summary.ruleset_version, "standard@engine-4.7.0");
+        assert_eq!(resp.summary.ruleset_version, "standard@engine-4.7.1");
         assert_eq!(
             resp.mode,
             RunMode::Offline {
