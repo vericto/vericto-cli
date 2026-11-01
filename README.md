@@ -104,7 +104,7 @@ A manual install, with the checksum check (use
 `vericto-cli-aarch64-pc-windows-msvc.zip` on ARM64):
 
 ```powershell
-$v = "1.13.1"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
+$v = "1.13.2"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
 $base = "https://github.com/vericto/vericto-cli/releases/download/v$v"
 Invoke-WebRequest "$base/$zip" -OutFile $zip
 Invoke-WebRequest "$base/$zip.sha256" -OutFile "$zip.sha256"
@@ -590,7 +590,7 @@ hook repository. Add it to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vericto/vericto-cli
-    rev: v1.13.1 # the vericto-cli release; update it (or run `pre-commit autoupdate`)
+    rev: v1.13.2 # the vericto-cli release; update it (or run `pre-commit autoupdate`)
     hooks:
       - id: vericto-check
         # args: [--dialect, mysql]   # postgres (default), mysql, oracle, mssql, snowflake, sqlite
@@ -745,7 +745,7 @@ VERICTO_OFFLINE=1 vericto check db/migrate/
 ```
 
 `--offline` (or `VERICTO_OFFLINE=1`) evaluates on your machine with the engine
-built into the binary (`vericto-engine` 4.7.0) and its **42 standard rules at
+built into the binary (`vericto-engine` 4.7.1) and its **42 standard rules at
 their default severities**: Critical and High block, Medium flags, Low is
 monitored, and, as in every online CI check, schema changes (DROP, ALTER,
 TRUNCATE) are flagged rather than blocked. No request is made, to Vericto or
@@ -764,7 +764,7 @@ workspace's rules and for the record.
 |---|---|---|
 | Account, network | none; nothing leaves the machine | API key, login or OIDC; SQL goes to your workspace |
 | Rules | the 42 standard rules, at their default severities | your workspace's rules: standard rules with your overrides, plus custom rules |
-| Engine | the one in the binary (4.7.0 in 1.13.0) | the server's, always current |
+| Engine | the one in the binary (4.7.1 in 1.13.2) | the server's, always current |
 | Schema DDL (DROP, ALTER, TRUNCATE) | flagged, as in every CI check | your workspace's policy, with the same CI cap |
 | Sensitive columns, masking, agent allowlists, observe mode | no | yes |
 | Parse errors | allowed and reported | your workspace's parse-error policy |

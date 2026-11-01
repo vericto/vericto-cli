@@ -211,7 +211,7 @@ Name, version and declared license (SPDX expression) of each crate:
   - url 2.5.8: MIT OR Apache-2.0
   - utf8_iter 1.0.4: Apache-2.0 OR MIT
   - utf8parse 0.2.2: Apache-2.0 OR MIT
-  - vericto-engine 4.7.0: FSL-1.1-ALv2
+  - vericto-engine 4.7.1: FSL-1.1-ALv2
   - want 0.3.1: MIT
   - webpki-roots 1.0.10: CDLA-Permissive-2.0
   - windows-link 0.2.1: MIT OR Apache-2.0
@@ -8071,7 +8071,7 @@ DEALINGS IN THE SOFTWARE.
 
 ================================================================================
 Used by:
-  - vericto-engine 4.7.0 (LICENSE)
+  - vericto-engine 4.7.1 (LICENSE)
 
 # Functional Source License, Version 1.1, ALv2 Future License
 
@@ -8181,7 +8181,7 @@ specific language governing permissions and limitations under the License.
 
 ================================================================================
 Used by:
-  - vericto-engine 4.7.0 (NOTICE)
+  - vericto-engine 4.7.1 (NOTICE)
 
 vericto-engine
 Copyright 2026 Vericto S.A.S.
