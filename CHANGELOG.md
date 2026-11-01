@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-11-01
+
+Offline mode moves to `vericto-engine` 4.7.1 (was 4.7.0), a performance
+release of the engine. Offline verdicts are unchanged: same rules, same
+severities, same verdicts as 1.13.1. Online checks are unchanged: they use the
+server's engine, as always.
+
+### Changed
+- **Offline engine `vericto-engine` 4.7.1.** It recovers the per-statement
+  cost 4.7.0 added on the sqlparser path (MySQL, SQL Server, Oracle,
+  Snowflake, SQLite: about 4-6% fewer instructions per statement than 4.7.0,
+  back to 4.6.0's level); PostgreSQL is unchanged. No rule, severity, policy
+  default or rule coverage changes, so `vericto check --offline` reports the
+  same verdicts, rule codes and suggested fixes. The offline
+  `ruleset_version` reads `standard@engine-4.7.1` and the offline mode line
+  `engine 4.7.1`. The engine's one behavior change (CEL `uint()` of a
+  negative double in (-1, 0) is now a range error) is in business policies,
+  which offline mode does not evaluate; online, business policies run in the
+  server's engine.
+
 ## [1.13.1] - 2026-11-01
 
 pre-commit framework hooks, and the macOS Apple silicon build moves off the
