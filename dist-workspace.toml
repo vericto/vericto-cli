@@ -92,6 +92,14 @@ github-attestations = true
 runner = "windows-11-arm"
 host = "aarch64-pc-windows-msvc"
 
+# macOS on Apple silicon builds on macos-15, not dist 0.32's default macos-14:
+# GitHub retires the macOS 14 images on 2026-11-02 (actions/runner-images#13518)
+# and fails macos-14 jobs during its brownouts until then. Intel macOS keeps
+# dist's default, macos-15-intel (GA, not deprecated), where it builds
+# natively like every other target.
+[dist.github-custom-runners.aarch64-apple-darwin]
+runner = "macos-15"
+
 [dist.dependencies.apt]
 libclang-dev = { version = "*", targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] }
 clang = { version = "*", targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] }

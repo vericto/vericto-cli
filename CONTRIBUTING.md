@@ -164,9 +164,11 @@ disabled.
 
 Releases are cut by the maintainers:
 
-1. Bump `version` in `Cargo.toml` (and `Cargo.lock`) and turn
-   `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`, in a
-   pull request.
+1. Bump `version` in `Cargo.toml` (and `Cargo.lock`), the
+   `@vericto/vericto-cli@X.Y.Z` pins in `.pre-commit-hooks.yaml` and the
+   `rev: vX.Y.Z` of the README's pre-commit example (the installer tests fail
+   until all three match), and turn `## [Unreleased]` into
+   `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`, in a pull request.
 2. After it is merged, tag the merge commit `vX.Y.Z` and push the tag.
 3. The tag starts `release.yml` (cargo-dist): it builds the archives for every
    target, their SHA-256 checksums and build attestations, and creates the
