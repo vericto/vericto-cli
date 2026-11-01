@@ -1,0 +1,10 @@
+{
+  "name": "vericto-pre-commit-hooks",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Lets the pre-commit framework install the vericto hooks in .pre-commit-hooks.yaml (language: node). Not published; the CLI is @vericto/vericto-cli.",
+  "license": "FSL-1.1-ALv2",
+  "files": [
+    ".pre-commit-hooks.yaml"
+  ]
+}

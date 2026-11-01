@@ -582,6 +582,57 @@ vericto init --target gitlab --dialect mysql
 - **`--hook`** → `.git/hooks/pre-commit` checking staged `*.sql` (bypass with
   `git commit --no-verify`).
 
+## pre-commit framework
+
+For repositories that use [pre-commit](https://pre-commit.com), this repo is a
+hook repository. Add it to `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/vericto/vericto-cli
+    rev: v1.13.0 # the vericto-cli release; update it (or run `pre-commit autoupdate`)
+    hooks:
+      - id: vericto-check
+        # args: [--dialect, mysql]   # postgres (default), mysql, oracle, mssql, snowflake, sqlite
+```
+
+Then `pre-commit install`. Each commit checks the `.sql` files it changes.
+
+| Hook id | Runs | Needs |
+|---|---|---|
+| `vericto-check` | `vericto check --offline` on the changed `*.sql` files: the 42 standard rules, on your machine | nothing: no account, no API key, no network |
+| `vericto-check-online` | `vericto check`: your workspace's rules, and the run is recorded | `VERICTO_API_KEY` in the environment, or a `vericto login` |
+
+- **Installs itself.** The hooks use `language: node`: pre-commit installs
+  `@vericto/vericto-cli` (the version of the `rev` you pin) into its own
+  environment, and the package's postinstall downloads the release binary for
+  your platform and checks its SHA-256. Nothing else to install on Linux,
+  macOS or Windows; pre-commit uses the Node.js on your `PATH`, or downloads
+  one when there is none (and always on Windows). Downloading happens once,
+  when pre-commit builds the environment; checks run offline after that.
+- **Exit codes are the CLI's** (see [Exit codes](#exit-codes)): a BLOCKED
+  statement exits `1` and fails the commit; FLAGGED and MONITORED findings
+  exit `0`, so the commit goes through and the hook prints them (`verbose:
+  true`). To fail on FLAGGED too, add `args: [--fail-on, flag]`.
+- **Arguments** go to `vericto check`: `--dialect`, `--fail-on`,
+  `--baseline`, `--format`. `--dialect`, `--fail-on` and `--baseline` also
+  fall back to `.vericto.toml`. The hooks select files by type (`*.sql`); to
+  narrow them, set `files:`, e.g. `files: ^db/migrations/`.
+- **`vericto-check-online`** follows the CLI's mode rules: in CI a missing
+  key exits `3`; outside CI, with no key and no login, it checks offline and
+  says so. Pass the key from the environment (`VERICTO_API_KEY`), never in
+  `args`.
+- To skip a finding on purpose, use an inline
+  `-- vericto:ignore[VERICTO-030] <reason>` comment (see
+  [Baseline & suppression](#baseline--suppression)).
+
+If the environment fails to build with `npm error code EALLOWGIT`, your npm
+has a bug that pre-commit 4.7.0 and later run into with `language: node` hook
+repositories that carry a `package.json`, as this one does (we saw it with npm
+11.10.1 to 11.12.1; 10.x and 11.14.1 and later work). Update npm, or set
+`language_version: lts` on the hook so pre-commit downloads a Node.js LTS of
+its own for it.
+
 ## Getting started
 
 ```bash

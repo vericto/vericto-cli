@@ -1,0 +1,38 @@
+# Hooks for the pre-commit framework (https://pre-commit.com). Usage is in the
+# README, "pre-commit framework".
+#
+# `language: node` installs the @vericto/vericto-cli npm package into
+# pre-commit's own environment, so the hook needs no separate install and
+# runs on Linux, macOS and Windows (x64 and ARM64). The package's postinstall
+# downloads the release binary for the platform and checks its SHA-256.
+# The pinned version is this release's: keep it equal to `version` in
+# Cargo.toml (npm-installer/test/pre-commit-hooks.test.js checks it), so a
+# hook `rev: vX.Y.Z` runs vericto-cli X.Y.Z.
+#
+# The root package.json exists only because pre-commit packs the hook repo
+# with npm for node hooks; it has no dependencies and is never published.
+#
+# Exit codes are the CLI's: a BLOCKED statement exits 1 and fails the hook;
+# FLAGGED and MONITORED exit 0, and `verbose: true` prints them anyway.
+
+- id: vericto-check
+  name: vericto check (offline)
+  description: >-
+    Check SQL files offline with the standard rules built into the CLI. No
+    account, no API key, no network; the SQL never leaves the machine.
+  entry: vericto check --offline
+  language: node
+  additional_dependencies: ["@vericto/vericto-cli@1.13.0"]
+  types: [sql]
+  verbose: true
+
+- id: vericto-check-online
+  name: vericto check (workspace rules)
+  description: >-
+    Check SQL files against your Vericto workspace's rules. Needs
+    VERICTO_API_KEY in the environment or a `vericto login`.
+  entry: vericto check
+  language: node
+  additional_dependencies: ["@vericto/vericto-cli@1.13.0"]
+  types: [sql]
+  verbose: true

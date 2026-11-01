@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **pre-commit framework hooks.** This repository is now a
+  [pre-commit](https://pre-commit.com) hook repository
+  (`.pre-commit-hooks.yaml`): `vericto-check` runs `vericto check --offline`
+  on the changed `*.sql` files, with no account, no API key and no network,
+  and `vericto-check-online` checks them against the workspace's rules
+  (`VERICTO_API_KEY` or `vericto login`). Both use `language: node`, so
+  pre-commit installs `@vericto/vericto-cli` of the pinned `rev` by itself on
+  Linux, macOS and Windows. BLOCKED fails the commit; FLAGGED and MONITORED
+  pass and are printed. Pass the dialect as `args: [--dialect, mysql]`. The
+  root `package.json` (private, no dependencies) is there only so pre-commit
+  can install a node hook; the npm installer's tests check that the hooks and
+  the README example pin the version in `Cargo.toml`. See "pre-commit
+  framework" in the README.
+
 ## [1.13.0] - 2026-10-31
 
 **Offline mode moves to `vericto-engine` 4.7.0 (was 4.3.0), and some offline
