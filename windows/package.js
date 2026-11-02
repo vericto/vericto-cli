@@ -142,7 +142,7 @@ function wingetManifests(version, sums) {
     [`${WINGET_ID}.locale.en-US.yaml`]:
       head("defaultLocale") +
       "PackageLocale: en-US\n" +
-      "Publisher: Vericto S.A.S.\n" +
+      "Publisher: Vericto SAS\n" +
       "PublisherUrl: https://vericto.com\n" +
       `PublisherSupportUrl: https://github.com/${REPO}/issues\n` +
       "PackageName: Vericto CLI\n" +

@@ -6,8 +6,8 @@ targets (build and development dependencies do not ship). After the list,
 each license or notice file those crates carry appears once, with the crates
 that carry it. The C code that the pg_query crate compiles into the binary
 (libpg_query, PostgreSQL, protobuf-c and xxHash) is covered at the end of this
-file. The Windows binary is built without the embedded engine, so the engine,
-pg_query and their dependencies are not in it.
+file. Every release target, Windows included, embeds the engine for offline
+mode, so the engine, pg_query and their dependencies are in every binary.
 
 vericto-cli itself is licensed under the Functional Source License, Version
 1.1, ALv2 Future License (FSL-1.1-ALv2); see LICENSE and NOTICE next to this
