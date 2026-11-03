@@ -162,7 +162,7 @@ Name, version and declared license (SPDX expression) of each crate:
   - serde 1.0.229: MIT OR Apache-2.0
   - serde_core 1.0.229: MIT OR Apache-2.0
   - serde_derive 1.0.229: MIT OR Apache-2.0
-  - serde_json 1.0.151: MIT OR Apache-2.0
+  - serde_json 1.0.154: MIT OR Apache-2.0
   - serde_norway 0.9.42: MIT OR Apache-2.0
   - serde_spanned 0.6.9: MIT OR Apache-2.0
   - serde_urlencoded 0.7.1: MIT/Apache-2.0
@@ -578,7 +578,7 @@ Used by:
   - serde 1.0.229 (LICENSE-APACHE)
   - serde_core 1.0.229 (LICENSE-APACHE)
   - serde_derive 1.0.229 (LICENSE-APACHE)
-  - serde_json 1.0.151 (LICENSE-APACHE)
+  - serde_json 1.0.154 (LICENSE-APACHE)
   - serde_norway 0.9.42 (LICENSE-APACHE)
   - serde_urlencoded 0.7.1 (LICENSE-APACHE)
   - syn 2.0.118 (LICENSE-APACHE)
@@ -782,7 +782,7 @@ Used by:
   - serde 1.0.229 (LICENSE-MIT)
   - serde_core 1.0.229 (LICENSE-MIT)
   - serde_derive 1.0.229 (LICENSE-MIT)
-  - serde_json 1.0.151 (LICENSE-MIT)
+  - serde_json 1.0.154 (LICENSE-MIT)
   - serde_norway 0.9.42 (LICENSE-MIT)
   - syn 2.0.118 (LICENSE-MIT)
   - syn 3.0.8 (LICENSE-MIT)
