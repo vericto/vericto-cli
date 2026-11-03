@@ -7,9 +7,13 @@
 
 use std::fs;
 
+/// A repository file as text, with line endings normalised to `\n`. Git checks
+/// text files out with CRLF on Windows (`core.autocrlf`), and the checks below
+/// match multi-line passages, so they must not depend on the checkout.
 fn root(path: &str) -> String {
     fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path))
         .unwrap_or_else(|error| panic!("cannot read {path}: {error}"))
+        .replace("\r\n", "\n")
 }
 
 /// The `version` of the `[[package]]` named `name` in Cargo.lock, with its source.
