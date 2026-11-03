@@ -1,14 +1,19 @@
 # Licensing
 
-vericto-cli is **source-available** under the
-[Functional Source License, Version 1.1, ALv2 Future License](LICENSE)
-(SPDX `FSL-1.1-ALv2`), from version 1.10.0 on. Each version becomes
-**open source under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)**
-two years after Vericto makes it available.
+vericto-cli is **dual-licensed**. New versions are available under:
+
+- the [GNU Affero General Public License, version 3 only](LICENSE)
+  (SPDX `AGPL-3.0-only`), an [OSI-approved](https://opensource.org/licenses)
+  open source license; or
+- a **commercial license** from Vericto S.A.S., for anyone who cannot or does
+  not want to comply with the AGPL.
+
+Earlier versions stay under the license they were released with:
 
 | Versions | License |
 |---|---|
-| 1.10.0 and later | [FSL-1.1-ALv2](LICENSE); each version also under Apache-2.0 from the second anniversary of its publication |
+| 2.0.0 and later | [AGPL-3.0-only](LICENSE), or a commercial license from Vericto |
+| 1.10.0 to 1.13.3 | [FSL-1.1-ALv2](https://github.com/vericto/vericto-cli/blob/v1.13.3/LICENSE), unchanged; each version also under Apache-2.0 from the second anniversary of its publication |
 | 1.9.1 and earlier | [Elastic License 2.0](https://www.elastic.co/licensing/elastic-license) (SPDX `Elastic-2.0`), unchanged |
 
 The licensor is Vericto S.A.S. (see [NOTICE](NOTICE)). This page is a summary
@@ -19,12 +24,23 @@ If this page and [LICENSE](LICENSE) disagree, LICENSE applies.
 
 Since 1.9.0, offline mode (`vericto check --offline`) runs
 [vericto-engine](https://github.com/vericto/vericto-engine), Vericto's own SQL
-engine, compiled into the binary (every target except Windows). That is why
-the CLI is under the same license as the engine. vericto-cli 1.10.0 pins
-vericto-engine v4.3.0, the first engine release under FSL-1.1-ALv2, so the
-engine's crate metadata and its entry in `THIRD_PARTY_LICENSES` say
-`FSL-1.1-ALv2` too (see [NOTICE](NOTICE)). Earlier engine releases, up to
-4.2.0, stay under the Elastic License 2.0, as earlier CLI releases do.
+engine, compiled into the binary through the default `offline` feature, on
+every release target (Windows included since 1.11.0). That is why the CLI
+and the engine share a license.
+
+vericto-engine uses the same dual license as the CLI from its 5.0.0 release:
+AGPL-3.0-only, or a commercial license from Vericto S.A.S. vericto-cli 2.0.0,
+the first CLI release under the AGPL, embeds vericto-engine 5.0.0, so the whole
+binary, engine included, is under one license, and the engine's crate metadata
+and its entry in `THIRD_PARTY_LICENSES` say `AGPL-3.0-only` too. A commercial license
+for vericto-cli also covers the engine it embeds. Engine releases up to
+v4.7.1 stay under the license they were released with (FSL-1.1-ALv2 from 4.3.0,
+the Elastic License 2.0 up to 4.2.0), as earlier CLI releases do; vericto-cli
+1.10.0 to 1.13.3 embed those FSL-1.1-ALv2 engine releases.
+
+A build without the `offline` feature (`cargo build --no-default-features`)
+does not contain the engine; `vericto check --offline` then exits 2 and every
+online command works as before.
 
 The third-party crates and C libraries in the binary keep their own licenses.
 Every release archive, the files the npm package installs and the container
@@ -39,127 +55,91 @@ CLI.
 
 ## FAQ
 
-### Is vericto-cli open source?
+### What does the AGPL let me do?
 
-Not yet. The FSL is not an [OSI-approved](https://opensource.org/licenses)
-license, so we call vericto-cli "source-available". Every version becomes open
-source on a fixed date: two years after we make it available, it is also
-licensed under the Apache License 2.0, irrevocably.
+Almost anything, with obligations only in the cases in the next question. You
+can:
 
-### What can I do with it?
+- run vericto-cli for any purpose, including in production and commercially:
+  in your CI, on your laptops, in pipelines you run for customers, inside a
+  for-profit company;
+- read, build, copy and modify the code;
+- redistribute it, modified or not, under the AGPL.
 
-Anything that is not a Competing Use (next question). In particular, you can:
+If you run vericto-cli **unmodified**, the AGPL asks nothing of you beyond
+keeping its license and notices when you pass copies on.
 
-- read, build, run, copy and modify the code;
-- use it in production for your own organization, including inside a
-  for-profit company ("internal use and access");
-- build it into your own product or service, as long as that product or
-  service is not a Competing Use;
-- use it for non-commercial education and non-commercial research;
-- provide professional services, such as consulting or integration, to a
-  customer who uses it under the license;
-- redistribute copies, modified or not, with a copy of (or a link to) the
-  license, keeping the copyright notices.
+### When do the AGPL's obligations apply?
 
-### What is not allowed?
+In two cases:
 
-A **Competing Use**: making the software available to others in a commercial
-product or service that
+- **You distribute it.** If you give others a copy of vericto-cli (the binary
+  or the source, modified or not, on its own or inside your product), you must
+  pass it on under the AGPL, with the license and notices, and make the
+  corresponding source code available to the recipients.
+- **You modify it and offer it over a network.** If you change vericto-cli
+  and let other people use your modified version remotely, for example as
+  part of a hosted service, you must offer those users the source code of
+  your modified version under the AGPL (section 13 of the license).
 
-1. substitutes for the software;
-2. substitutes for any other product or service Vericto offers using the
-   software that exists when that version is made available; or
-3. offers the same or substantially similar functionality as the software.
+If you distribute a larger program that includes vericto-cli, or offer a
+modified version over a network, that program as a whole must be under the
+AGPL. If that does not work for you, there is the commercial license.
 
-For example, selling a SQL-checking product or service built on vericto-cli or
-its offline mode is a Competing Use. Running `vericto check` in your own CI,
-on your laptop or in a pipeline you run for a customer is not.
+### Why "version 3 only"?
 
-How Vericto reads these terms, for example:
-
-- Selling others a hosted or managed service that checks, blocks or rewrites
-  their SQL with vericto-cli is a Competing Use, including when it runs inside
-  each customer's own account. Operating vericto-cli for one customer as part
-  of consulting or integration work, where that customer holds the license and
-  the work is not sold as a product, is a permitted professional service.
-- A product that costs nothing but is offered as part of a commercial business
-  (to win customers for a paid product, bundled with one, or as the free tier
-  of one) is still a commercial product.
-- Building vericto-cli into a larger product that blocks, flags or rewrites SQL
-  for others offers substantially similar functionality, even when guardrails
-  are not that product's main purpose.
-
-Not sure whether your case is a Competing Use? Write to
-[legal@vericto.com](mailto:legal@vericto.com) before you rely on it.
-
-### When does a version become Apache-2.0?
-
-On the second anniversary of the date Vericto made that version available:
-a published release, a pushed commit or a published package each count. A
-version released on 2026-11-01 is available under the Apache License 2.0 from
-2028-11-01, while newer versions are still under the FSL until their own date.
-To find the newest commit that is already two years old:
-
-```sh
-git rev-list -n 1 --before="2 years ago" main
-```
-
-### What about versions released before 1.10.0?
-
-vericto-cli 1.9.1 and earlier, and every commit before the one that introduced
-the FSL, were released under the Elastic License 2.0 and stay under it. Nothing
-you received under it is taken away. The FSL applies only to 1.10.0 and later.
-If you move to a newer version, the FSL applies to that version.
-
-Those versions are no longer maintained and receive no security fixes (see
-[SECURITY.md](SECURITY.md)). The Elastic License 2.0 does not allow providing
-them to others as a hosted or managed service, or removing their license
-notices, and it grants no right to the Vericto marks: a modified build must not
-carry a Vericto name (see [TRADEMARKS.md](TRADEMARKS.md)).
+The AGPL lets a licensor choose "version 3 only" or "version 3 or any later
+version". Vericto chose **only**, the usual choice for dual-licensed projects:
+it keeps the license terms in Vericto's hands rather than letting a future AGPL
+version, published by the Free Software Foundation, apply automatically. If a
+later version is ever wanted, Vericto can offer it.
 
 ### Can I get a commercial license?
 
-Yes. You probably don't need one: the FSL already lets you run vericto-cli to
-check your own organization's SQL, and build it into a product that is not a
-Competing Use. Integrating with Vericto through its API or MCP server needs no
-commercial license either; that use is governed by the [Terms of
+Yes. A commercial license from Vericto S.A.S. is available on request for
+anyone who cannot or does not want to comply with the AGPL: for example, to
+embed vericto-cli in a closed-source product, or because your organization
+does not accept the AGPL. Its terms are agreed with Vericto in each case.
+Write to [legal@vericto.com](mailto:legal@vericto.com).
+
+Integrating with Vericto through its API or MCP server needs no commercial
+license; that use is governed by the [Terms of
 Service](https://vericto.com/terms).
 
-A commercial license is for cases the FSL does not cover:
+### What about versions released before the AGPL?
 
-- **OEM / embedding.** You want SQL guardrails inside your own product or
-  hosted service (for example a CI platform, a code-review tool or a developer
-  tool) in a way that would be a Competing Use. An OEM license lets you embed
-  and distribute vericto-cli, modified or not, in the product named in the
-  agreement. An OEM license for vericto-cli also covers the vericto-engine it
-  embeds for offline mode. OEM agreements normally include attribution, such as
-  "powered by Vericto"; the agreement grants the trademark permission that
-  [TRADEMARKS.md](TRADEMARKS.md) otherwise requires in writing, and sets how
-  modified builds may be described.
-- **Other terms.** Your organization cannot accept the FSL and needs
-  vericto-cli under different terms.
+They stay under the license they were released with. Nothing you received
+under them is taken away, and the move to the AGPL does not change them.
 
-Scope, price, support and update commitments are agreed in each contract. OEM
-and Enterprise agreements can include a continuity clause: if Vericto stops
-offering and maintaining the licensed component and no successor takes it over,
-the licensee receives the version covered by its agreement under the Apache
-License 2.0. Vericto reviews every request and may decline it. Until an
-agreement is signed, the FSL applies. A commercial license does not change the
-FSL for anyone else, and every FSL version still becomes Apache-2.0 on its
-second anniversary.
+- **1.10.0 to 1.13.3**, and every commit from the one that introduced the FSL
+  up to the one that introduced the AGPL, are under FSL-1.1-ALv2. Each of
+  those versions still becomes available under the Apache License 2.0 on the
+  second anniversary of the date Vericto made it available, as its "Grant of
+  Future License" states: for example, a version released on 2026-11-01 is
+  available under Apache-2.0 from 2028-11-01. [LICENSE_HISTORY.md](LICENSE_HISTORY.md)
+  lists each FSL release with its tag, commit, documented public date and the
+  date from which it is also available under Apache-2.0. A commit date alone
+  does not establish when a version was made available.
 
-To ask, write to [enterprise@vericto.com](mailto:enterprise@vericto.com) with
-your company, the product vericto-cli would go into, how it is distributed
-(hosted, self-managed or both), the SQL dialects you need and the expected
-scale. Not sure whether you need a license? Write to
-[legal@vericto.com](mailto:legal@vericto.com) first.
+- **1.9.1 and earlier**, and every commit before the one that introduced the
+  FSL, are under the Elastic License 2.0. Those versions are no longer
+  maintained and receive no security fixes (see [SECURITY.md](SECURITY.md)).
+  The Elastic License 2.0 does not allow providing them to others as a hosted
+  or managed service, or removing their license notices, and it grants no
+  right to the Vericto marks: a modified build must not carry a Vericto name
+  (see [TRADEMARKS.md](TRADEMARKS.md)).
+
+If you move to a newer version, the license of that version applies to it.
 
 ### How are contributions licensed?
 
-Contributors sign the Vericto Contributor License Agreement ([CLA.md](CLA.md)),
-which lets Vericto distribute contributions under this license, under the
-Apache License 2.0 when a version converts, and under its commercial licenses.
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributors sign the Vericto Individual Contributor License Agreement
+([CLA.md](CLA.md) is the index; the current text is
+[legal/cla/1.1.md](legal/cla/1.1.md)). It lets Vericto distribute contributions
+under the project's license and under its commercial licenses while the
+contributor keeps the copyright. That is what makes the dual license possible.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[CLA privacy notice](CLA_PRIVACY_NOTICE.md).
 
 ### Can I use the Vericto name and logo?
 

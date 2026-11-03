@@ -34,12 +34,16 @@ allow = [
 confidence-threshold = 0.9
 # MPL-2.0 is file-level copyleft: accepted for this one crate, used unmodified
 # (dirs -> dirs-sys -> option-ext), not as a blanket allowance.
-# FSL-1.1-ALv2 is Vericto's own license: accepted for this crate (since 1.10.0)
-# and the engine it embeds (since engine 4.3.0), not for any third party.
+# AGPL-3.0-only is Vericto's own license: accepted for this crate and for the
+# engine it embeds (vericto-engine 5.0.0 and later), not for any third party:
+# Vericto dual-licenses its own crates, and a third-party AGPL dependency would
+# bind the binary to the AGPL with no commercial option. Engine releases up to
+# v4.7.1 are FSL-1.1-ALv2 and are not accepted any more: the pin must stay on
+# 5.0.0 or later.
 exceptions = [
     { allow = ["MPL-2.0"], crate = "option-ext" },
-    { allow = ["FSL-1.1-ALv2"], crate = "vericto-cli" },
-    { allow = ["FSL-1.1-ALv2"], crate = "vericto-engine" },
+    { allow = ["AGPL-3.0-only"], crate = "vericto-cli" },
+    { allow = ["AGPL-3.0-only"], crate = "vericto-engine" },
 ]
 
 [bans]

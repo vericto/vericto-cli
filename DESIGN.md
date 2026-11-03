@@ -772,8 +772,10 @@ keeps the whole distribution surface as config, not hand-maintained scripts.
     --strict` calls redundant, and refuses a formula whose SHA-256 are not the
     release's `sha256.sum`. The tap's own CI audits, installs and tests the
     formula on all four platforms. homebrew-core is not a target: it accepts
-    only OSI/DFSG-licensed software built from source, and neither
-    FSL-1.1-ALv2 (since 1.10.0) nor Elastic-2.0 (before) is.
+    only OSI/DFSG-licensed software built from source. Neither FSL-1.1-ALv2
+    (1.10.0 to 1.13.3) nor Elastic-2.0 (before) is. AGPL-3.0-only (2.0.0
+    and later, engine 5.0.0 included) is; whether to submit to homebrew-core is a separate decision,
+    and the tap stays the channel until then.
   - **Windows — 1.11.0:** see "Windows channels" below.
 
 ### Windows channels
@@ -814,7 +816,7 @@ pinned by their SHA-256:
 - **MSI: not shipped.** cargo-dist can build one (`installers = ["msi"]`), but
   it needs a committed WiX v3 source (`wix/main.wxs`) with upgrade GUIDs that
   must never change, WiX v3 itself is end-of-life, cargo-wix has no license
-  page for FSL-1.1-ALv2, and an unsigned MSI meets the same SmartScreen
+  page for AGPL-3.0-only, and an unsigned MSI meets the same SmartScreen
   prompt. winget and Scoop install the zip, so an MSI adds no channel.
 
 Both publish jobs run behind the `prod` approval like npm and Homebrew, and
@@ -862,9 +864,10 @@ attestations (§9 Notes) prove provenance but are not Authenticode. Options:
   longer skips SmartScreen's reputation check, so for a CLI it buys little
   over OV.
 - **SignPath Foundation (free for open source):** requires an OSI-approved
-  license for every component and no commercial dual-licensing. FSL-1.1-ALv2 is
-  not OSI-approved (it becomes Apache-2.0 two years after each release), so the
-  CLI does not qualify; SignPath's paid plans do not have that condition.
+  license for every component and no commercial dual-licensing. The CLI is
+  dual-licensed (AGPL-3.0-only or commercial), and versions up to 1.13.3 are
+  FSL-1.1-ALv2, which is not OSI-approved, so it does not qualify; SignPath's
+  paid plans do not have that condition.
 
 Where it would go: cargo-dist 0.32 signs inside its own build step, and its
 only Windows hook is `ssldotcom-windows-sign` (SSL.com eSigner), which reads
@@ -1175,7 +1178,7 @@ distributed, and nothing an offline run produces passes for the workspace's
 verdict or its audit record.
 
 **The decision.** `vericto check --offline` evaluates locally with the
-embedded engine (`vericto-engine` 4.7.1, pinned by tag) and its **standard
+embedded engine (`vericto-engine` 5.0.0, pinned by tag) and its **standard
 rules at their default severities**:
 
 - **Rule set:** the 42 standard rules, the engine's own standard ruleset

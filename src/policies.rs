@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Vericto S.A.S.
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! Business policy documents in the repository (business policy rules,
 //! Phase 1, M3): `vericto rules test` and `vericto policies apply`.

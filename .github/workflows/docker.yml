@@ -62,11 +62,11 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           # metadata-action fills this label from the license GitHub detects for
-          # the repo, which is never FSL-1.1-ALv2 (GitHub's license detection
-          # knows neither the FSL nor ELv2 before it; 1.7.0 shipped it empty):
-          # set the SPDX id here.
+          # the repo, which is AGPL-3.0 at best, never the exact SPDX id
+          # AGPL-3.0-only (and was nothing for the FSL and ELv2 before it;
+          # 1.7.0 shipped it empty): set the SPDX id here.
           labels: |
-            org.opencontainers.image.licenses=FSL-1.1-ALv2
+            org.opencontainers.image.licenses=AGPL-3.0-only
 
       - name: Build and push
         id: build
