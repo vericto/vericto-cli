@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Vericto S.A.S.
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: AGPL-3.0-only
 
 // Tests for the Windows packaging (node --test, no dependencies). The
 // installer tests at the end run the rendered PowerShell installer for real,
@@ -67,7 +67,7 @@ test("the Scoop manifest pins both architectures and updates from the release", 
   const m = scoopManifest("1.11.0", SUMS);
   assert.equal(m.version, "1.11.0");
   assert.equal(m.bin, "vericto.exe");
-  assert.equal(m.license.identifier, "FSL-1.1-ALv2");
+  assert.equal(m.license.identifier, "AGPL-3.0-only");
   assert.deepEqual(m.architecture["64bit"], {
     url: `https://github.com/vericto/vericto-cli/releases/download/v1.11.0/${X64}`,
     hash: "a".repeat(64),
@@ -96,7 +96,7 @@ test("the winget manifests are a zip with a portable vericto.exe, x64 and arm64"
     assert.match(text, /^PackageVersion: 1\.11\.0$/m, name);
     assert.match(text, /^ManifestVersion: 1\.10\.0$/m, name);
   }
-  assert.match(files["Vericto.VerictoCLI.locale.en-US.yaml"], /^License: FSL-1\.1-ALv2$/m);
+  assert.match(files["Vericto.VerictoCLI.locale.en-US.yaml"], /^License: AGPL-3\.0-only$/m);
   assert.equal(ARCHIVES.length, 2);
 });
 

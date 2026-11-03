@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2022-2024 axodotdev
 // SPDX-FileCopyrightText: 2026 Vericto S.A.S.
-// SPDX-License-Identifier: FSL-1.1-ALv2 AND (MIT OR Apache-2.0)
+// SPDX-License-Identifier: AGPL-3.0-only AND (MIT OR Apache-2.0)
 
 // npm installer for the prebuilt `vericto` binary, with integrity checks.
 //

@@ -59,7 +59,7 @@ COPY --from=build /vericto /usr/local/bin/vericto
 # where distroless keeps package docs. The label is set here too, so a local
 # `docker build` carries it, not only the image docker.yml publishes.
 COPY LICENSE NOTICE THIRD_PARTY_LICENSES /usr/share/doc/vericto/
-LABEL org.opencontainers.image.licenses="FSL-1.1-ALv2"
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 # The image is for CI runners, and a container does not see the runner's `CI`
 # variable unless it is passed in. Without this, a pipeline whose
 # VERICTO_API_KEY secret went missing (`-e VERICTO_API_KEY` passes nothing)

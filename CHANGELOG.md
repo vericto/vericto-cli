@@ -6,6 +6,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Version 2.0.0: a new license and a new major version, with no change in
+rules or decisions.** From 2.0.0 on, the CLI is dual-licensed: open source under
+the GNU Affero General Public License, version 3 only (SPDX `AGPL-3.0-only`),
+or under a commercial license from Vericto S.A.S. for anyone who cannot comply
+with the AGPL. **All previously released versions keep their license:** 1.10.0
+to 1.13.3 remain under FSL-1.1-ALv2, each still becoming Apache-2.0 on the
+second anniversary of its release, and 1.9.1 and earlier remain under the
+Elastic License 2.0. Every command, flag, exit code and decision is unchanged.
+
+### Changed
+- **License: AGPL-3.0-only, or a commercial license.** `LICENSE` is the
+  official GNU AGPL 3.0 text, unmodified. Running the CLI, including in
+  production and commercially, carries no obligations; distributing it, or
+  offering a modified version over a network, requires providing the source
+  under the AGPL. "Only" rather than "or later": a future AGPL version does not
+  apply automatically. The commercial license is available on request from
+  legal@vericto.com.
+- **Major version.** The AGPL tree is published as 2.0.0, never as a 1.x
+  number, so each version number maps to one license. `LICENSE_HISTORY.md`
+  records the tag, commit and documented public date of every FSL release
+  (`v1.10.0` to `v1.13.3`) and the date from which each also becomes available
+  under Apache-2.0. Tag `v2.0.0` identifies the first AGPL release.
+- **The embedded engine is vericto-engine 5.0.0**, pinned by tag (from 4.7.1).
+  It is under AGPL-3.0-only as well, so the whole binary, engine included, is
+  under one license, and the engine's entry in `THIRD_PARTY_LICENSES` says so.
+  Engine 5.0.0 changes no rule, severity or evaluation code from 4.7.1. One
+  value you can see changes: offline results report `engine_version` `5.0.0`
+  and `ruleset_version` `standard@engine-5.0.0` (the format is the same), and
+  the offline notes that `vericto check` prints name engine 5.0.0.
+  A `--no-default-features` build does not contain the engine.
+- **Contributor License Agreement 1.1.** It aligns the contribution grant with
+  dual licensing: the contributor keeps the copyright and Vericto receives a
+  license it can sublicense, plus a patent license, moral-right consent,
+  enforcement cooperation, employer authorization and disclosure of
+  AI-assisted material. CLA 1.0 is kept as history (`legal/cla/1.0.md`,
+  `CLA.md` is now an index) and nobody had signed it. New signatures are
+  recorded under `signatures/v1.1/` with the CLA version and the SHA-256 of the
+  document. `CLA_PRIVACY_NOTICE.md` describes the data recorded and
+  `AI_POLICY.md` the disclosure rules.
+- **The CLA check no longer uses the archived `contributor-assistant` action.**
+  `.github/workflows/cla.yml` is a script of our own that reads the pull
+  request through the API and never runs its code. It reads every commit and
+  comment (not only the first page), rejects a commit whose author has no
+  linked GitHub account or that has a `Co-authored-by` trailer, accepts only
+  the exact signature comment, and requires a verified signature on bot
+  commits. The maintainer accounts and the bots that commit here are exempt.
+- **Metadata:** `Cargo.toml` declares `license = "AGPL-3.0-only"`, which dist
+  carries into the npm package's `license` and the Homebrew formula's
+  `license`. The Scoop and winget manifests (`windows/package.js`), the
+  private `package.json` files and the container image label
+  (`org.opencontainers.image.licenses`, `Dockerfile` and `docker.yml`) say
+  `AGPL-3.0-only` too, and every `SPDX-License-Identifier` line in the source
+  files does. The pre-commit hooks pin `@vericto/vericto-cli@2.0.0`.
+- `NOTICE` states the copyright, the AGPL, the commercial license, the license
+  history and the engine. `LICENSING.md` is rewritten for the AGPL and the
+  commercial license; README (License section), CONTRIBUTING, TRADEMARKS,
+  DESIGN and the `THIRD_PARTY_LICENSES` header name the new license.
+- `deny.toml`: `AGPL-3.0-only` is allowed for vericto-cli and vericto-engine
+  only, so a third-party dependency under the AGPL or a source-available
+  license still fails `cargo deny check`, and an engine release under FSL no
+  longer passes.
+
+### Tests
+- `tests/license_metadata.rs` fails the build when the manifest, `Cargo.lock`,
+  the pre-commit hooks, the README pins, the engine tag, `deny.toml` or the
+  CLA workflow disagree with each other.
+
 ## [1.13.3] - 2026-11-01
 
 `vericto` with no arguments now exits 0, so winget can validate the package.

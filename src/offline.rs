@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Vericto S.A.S.
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! Offline mode (DESIGN §13): `vericto check --offline` evaluates with
 //! the embedded `vericto-engine` and its standard rules at their default
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(resp.summary.blocked, 1);
         assert_eq!(resp.summary.allowed, 1);
         assert_eq!(resp.exit_code, 1);
-        assert_eq!(resp.summary.ruleset_version, "standard@engine-4.7.1");
+        assert_eq!(resp.summary.ruleset_version, "standard@engine-5.0.0");
         assert_eq!(
             resp.mode,
             RunMode::Offline {

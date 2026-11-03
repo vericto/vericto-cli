@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Vericto S.A.S.
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! End-to-end integration tests: spawn the built `vericto` binary against an
 //! in-process mock backend. These exercise the `run_*` command paths in main.rs
@@ -3878,7 +3878,7 @@ fn no_credential_outside_ci_checks_offline() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("mode: offline (engine 4.7.1, 42 standard rules"),
+        stdout.contains("mode: offline (engine 5.0.0, 42 standard rules"),
         "{stdout}"
     );
 }
@@ -3915,8 +3915,8 @@ fn offline_json_names_mode_engine_and_ruleset() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["mode"], "offline");
-    assert_eq!(v["engine_version"], "4.7.1");
-    assert_eq!(v["summary"]["ruleset_version"], "standard@engine-4.7.1");
+    assert_eq!(v["engine_version"], "5.0.0");
+    assert_eq!(v["summary"]["ruleset_version"], "standard@engine-5.0.0");
     assert_eq!(v["queries"][0]["status"], "FLAGGED");
     assert_eq!(v["queries"][0]["rule_code"], "VERICTO-010");
 }
@@ -3941,7 +3941,7 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
     let (_, text) = offline_run("text", sql);
     assert!(
         text.contains(
-            "(ruleset standard@engine-4.7.1 · mode: offline (engine 4.7.1, 42 standard rules"
+            "(ruleset standard@engine-5.0.0 · mode: offline (engine 5.0.0, 42 standard rules"
         ),
         "{text}"
     );
@@ -3955,16 +3955,16 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
         ),
         (
             &serde_json::json!("offline"),
-            &serde_json::json!("4.7.1"),
-            &serde_json::json!("standard@engine-4.7.1")
+            &serde_json::json!("5.0.0"),
+            &serde_json::json!("standard@engine-5.0.0")
         )
     );
     let (_, sarif) = offline_run("sarif", sql);
     let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
     let props = &v["runs"][0]["properties"];
     assert_eq!(props["mode"], "offline");
-    assert_eq!(props["engine_version"], "4.7.1");
-    assert_eq!(props["ruleset_version"], "standard@engine-4.7.1");
+    assert_eq!(props["engine_version"], "5.0.0");
+    assert_eq!(props["ruleset_version"], "standard@engine-5.0.0");
     for (format, field) in [
         ("gitlab-codequality", "/0/description"),
         ("gitlab-sast", "/vulnerabilities/0/message"),
@@ -3976,8 +3976,8 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
             .and_then(|m| m.as_str())
             .unwrap_or_default();
         assert!(
-            msg.contains("mode: offline (engine 4.7.1")
-                && msg.contains("ruleset standard@engine-4.7.1"),
+            msg.contains("mode: offline (engine 5.0.0")
+                && msg.contains("ruleset standard@engine-5.0.0"),
             "{format}: {v}"
         );
     }

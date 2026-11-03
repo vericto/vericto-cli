@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-FileCopyrightText: 2026 Vericto S.A.S.
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: AGPL-3.0-only
 
 // Windows packaging for a release, from its archives' published SHA-256
 // (sha256.sum and the per-archive .sha256, as cargo-dist writes them):
@@ -40,7 +40,7 @@ const ARCHIVES = [
 ].map((a) => ({ ...a, name: `vericto-cli-${a.target}.zip` }));
 
 const DESCRIPTION = "Validate SQL against your Vericto workspace's security rules before it runs";
-const LICENSE = "FSL-1.1-ALv2";
+const LICENSE = "AGPL-3.0-only";
 const LICENSE_URL = `https://github.com/${REPO}/blob/main/LICENSE`;
 
 function checkVersion(version) {
