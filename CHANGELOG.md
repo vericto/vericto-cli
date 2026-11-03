@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-03
+
 **Version 2.0.0: a new license and a new major version, with no change in
 rules or decisions.** From 2.0.0 on, the CLI is dual-licensed: open source under
 the GNU Affero General Public License, version 3 only (SPDX `AGPL-3.0-only`),
