@@ -6,6 +6,65 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-04
+
+### Added
+- **`vericto serve --stdio`: a local evaluation server for the SDKs.** It is
+  a long-lived process that speaks JSON Lines on stdin/stdout (protocol 1,
+  specified in `docs/serve-protocol.md`). The offline modes of the Python and
+  Node SDKs spawn it once instead of linking the AGPL engine. It writes a hello
+  line first (`protocol`, `cli_version`, `engine_version`, `profiles`,
+  `max_line_bytes`), then answers `check`, `ping` and `shutdown` requests by
+  `id`.
+  - **Same results as the CLI.** A `check` result is the document that
+    `vericto check --offline --format json` prints for the same SQL, built by
+    the same code.
+  - **Two profiles.** `runtime` is the default and matches the Runtime API,
+    MCP `check_sql` and the proxy's local mode, where a DROP TABLE is BLOCKED.
+    `ci` matches `check --offline`, where the DDL rules VERICTO-010..019 are
+    capped at FLAGGED.
+  - **Errors.** A malformed line gets `INVALID_REQUEST`, an unknown dialect
+    `UNSUPPORTED_DIALECT`, a line over `--max-line-bytes` (default 1 MiB)
+    `TOO_LARGE`, and an engine failure `INTERNAL`. The server keeps running
+    after each of them.
+  - **Pipelining and memory.** Pipelined requests are answered in order, and
+    memory stays bounded by one line.
+  - **Offline only.** No network listener, no request to any host, no account,
+    no config file or environment variable read. SQL never reaches stderr.
+  - **Speed.** On Apple silicon, startup to the hello line takes about 7 ms,
+    and a short statement takes about 20 µs per round trip (12 µs pipelined).
+  - **Feature flag.** It needs the `offline` feature, which every release
+    build has. Without it, `serve` exits `2` with a clear error.
+
+### Fixed
+- **`vericto check <directory>` works.** The README showed `vericto check
+  db/migrate/`, but a directory was read as a file and the run failed with
+  exit `2`. A directory now contributes the `*.sql` files under it,
+  recursively, sorted by path (the same order on every platform), in place
+  among the other arguments. Other files are ignored. Links to directories
+  inside it are not followed, so a link loop cannot recurse. A directory with
+  no `.sql` file is a usage error (exit `2`) that names it. This applies to
+  `check`, `baseline`, `baseline prune` and `--stdin-file-list`, online and
+  offline.
+- **The failure summary no longer calls a flagged statement blocked.** With
+  `--fail-on flag` (or `any`, or `fail_on` in `.vericto.toml`), a run that
+  failed only on a FLAGGED finding printed `✖ Vericto blocked 1 statement`.
+  The header now counts the failing statements by verdict and names the
+  threshold, e.g. `✖ Vericto: 1 statement flagged; failing because --fail-on
+  flag`, or `3 statements (1 blocked, 1 flagged, 1 monitored); failing because
+  --fail-on any`. A run that fails on BLOCKED statements only keeps the header
+  it had. Exit codes are unchanged. The text, JSON, SARIF, GitLab and GitHub
+  annotation outputs were checked: they already reported each finding's own
+  verdict.
+
+### Changed
+- **Release workflow: `WINGET_PUBLISH` pauses winget submissions.** With the
+  repository variable `WINGET_PUBLISH` set to `false`, the winget job skips
+  and says so, instead of opening another microsoft/winget-pkgs pull request.
+  A new package waits for moderator review, and a second pull request would
+  only queue behind the first. npm, Homebrew and Scoop are unaffected; delete
+  the variable or set it to `true` to submit again.
+
 ## [2.0.0] - 2026-11-03
 
 **Version 2.0.0: a new license and a new major version, with no change in

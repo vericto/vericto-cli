@@ -104,7 +104,7 @@ A manual install, with the checksum check (use
 `vericto-cli-aarch64-pc-windows-msvc.zip` on ARM64):
 
 ```powershell
-$v = "2.0.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
+$v = "2.1.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
 $base = "https://github.com/vericto/vericto-cli/releases/download/v$v"
 Invoke-WebRequest "$base/$zip" -OutFile $zip
 Invoke-WebRequest "$base/$zip.sha256" -OutFile "$zip.sha256"
@@ -170,7 +170,7 @@ workflow.
 ## Commands
 
 ```
-vericto check [files...]   Evaluate SQL files (or '-' for stdin). The core command.
+vericto check [files...]   Evaluate SQL files or directories (or '-' for stdin). The core command.
 vericto baseline [files]   Record current findings to .vericto-baseline.json.
 vericto baseline prune     Remove baseline entries that no longer match any finding.
 vericto rules list         List the workspace's effective rule catalogue.
@@ -188,6 +188,7 @@ vericto init               Scaffold a CI workflow (+ pre-commit hook with --hook
 vericto verify-receipt <f> Verify a signed run receipt offline (no network/account).
 vericto version            Print the CLI version.
 vericto completions <sh>   Print a shell completion script (bash|zsh|fish|powershell|elvish).
+vericto serve --stdio      Local evaluation server for the SDKs: JSON Lines on stdin/stdout, offline.
 ```
 
 Enable completions by writing the script where your shell looks for them, e.g.:
@@ -590,7 +591,7 @@ hook repository. Add it to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vericto/vericto-cli
-    rev: v2.0.0 # the vericto-cli release; update it (or run `pre-commit autoupdate`)
+    rev: v2.1.0 # the vericto-cli release; update it (or run `pre-commit autoupdate`)
     hooks:
       - id: vericto-check
         # args: [--dialect, mysql]   # postgres (default), mysql, oracle, mssql, snowflake, sqlite
@@ -661,6 +662,9 @@ VERICTO_API_KEY=vtro_... vericto check migrations/0001_init.sql --dialect postgr
 # Multiple files / globs (shell-expanded)
 vericto check migrations/*.sql
 
+# A directory: every *.sql file under it, recursively, in sorted order
+vericto check db/migrate/
+
 # From stdin (pre-commit hooks)
 git show :migrations/0001_init.sql | vericto check - --dialect mysql
 
@@ -675,7 +679,7 @@ vericto check schema.sql --monitor
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `[files...]` | — | SQL files; `-` reads stdin. Optional with `--changed`/`--since` |
+| `[files...]` | — | SQL files or directories; `-` reads stdin. Optional with `--changed`/`--since`. A directory contributes the `*.sql` files under it, recursively, sorted by path; other files are ignored, links to directories are not followed, and a directory with no `.sql` file is exit `2` |
 | `--changed` | off | Check only `*.sql` changed vs the CI merge base |
 | `--since <ref>` | — | Explicit base ref for changed-file selection |
 | `--stdin-file-list` | off | Read file paths from stdin, one per line (e.g. `git diff --name-only ... \| vericto check --stdin-file-list`) |
@@ -734,6 +738,14 @@ default_dialect = "postgres"
 | `4` | Backend/network error (incl. a workspace config that can't be read — no SQL is sent) |
 
 Distinct non-zero codes let CI distinguish a real block from an outage.
+
+When a run fails, stderr explains why, whatever `--format` and `--output`
+are. A blocked statement reads `✖ Vericto blocked 1 statement`. A run that
+fails only because of a stricter threshold names the verdicts and the
+threshold, e.g. `✖ Vericto: 1 statement flagged; failing because --fail-on
+flag`. The JSON `exit_code` field is the verdict's (`1` iff something is
+BLOCKED), as the backend reports it; the process exit code also applies
+`--fail-on`, `--monitor`, the baseline and inline ignores.
 `vericto` with no arguments at all prints a pointer to `--help` and exits `0`;
 any other bad invocation (an unknown command or flag, a missing argument) is `2`.
 
@@ -805,6 +817,42 @@ ruleset version) in SARIF, a note on each finding in the GitLab reports, and
 A file with several statements reports the finding with the strongest action:
 in `DROP TABLE a; UPDATE accounts SET balance = 0;` the DROP is flagged, but
 the WHERE-less UPDATE blocks, so the file is BLOCKED and the run fails.
+
+## Local evaluation server (`vericto serve --stdio`)
+
+```bash
+vericto serve --stdio            # JSON Lines on stdin/stdout
+vericto serve --stdio --max-line-bytes 4194304
+```
+
+A long-lived process that evaluates SQL with the embedded engine. The Vericto
+SDKs (`vericto-python`, `vericto-node`) use it for their offline mode: they
+spawn the CLI once and send one JSON request per line. No network, no
+account, no config file. Each `check` result is the document that `vericto
+check --offline --format json` prints for the same SQL.
+
+```text
+server: {"type":"hello","protocol":1,"cli_version":"…","engine_version":"5.0.0","profiles":["runtime","ci"],"max_line_bytes":1048576}
+client: {"id":"1","op":"check","sql":"DROP TABLE users","dialect":"postgres","profile":"runtime"}
+server: {"id":"1","ok":true,"result":{"summary":{…},"queries":[{"status":"BLOCKED","rule_code":"VERICTO-010",…}],…}}
+client: {"id":"2","op":"ping"}
+server: {"id":"2","ok":true}
+client: {"op":"shutdown"}
+```
+
+- `profile` is `runtime` by default, as in the Runtime API, MCP `check_sql` and
+  the proxy's local mode, where a DROP TABLE is BLOCKED. `ci` reproduces
+  `vericto check --offline`, where the DDL rules VERICTO-010..019 are capped at
+  FLAGGED.
+- Errors are `{"id":…,"ok":false,"error":{"code":…,"message":…}}`, with code
+  `INVALID_REQUEST`, `UNSUPPORTED_DIALECT`, `TOO_LARGE` (a line over
+  `--max-line-bytes`, 1 MiB by default) or `INTERNAL`. The server keeps
+  running after any of them.
+- Requests may be pipelined. They are answered one at a time, in request
+  order. Logs go to stderr and never contain SQL.
+- It needs the `offline` feature, which every release build has.
+
+The full contract is in [`docs/serve-protocol.md`](docs/serve-protocol.md).
 
 ## CI/CD
 

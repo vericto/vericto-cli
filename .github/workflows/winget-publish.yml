@@ -36,13 +36,20 @@ jobs:
       WINGETCREATE_SHA256: 24042bd37915805615e6cf969ac57c6439124c3fe85823327f5f3fb24bd9ffea
     steps:
       # Only whether the token is set reaches the shell, never its value.
+      # The repository variable WINGET_PUBLISH=false pauses submissions without
+      # removing the token: while a new package waits for moderator review on
+      # microsoft/winget-pkgs, a second pull request would only queue behind it.
       - name: Check for the winget token
         id: token
         shell: bash
         env:
           HAS_TOKEN: ${{ secrets.WINGET_TOKEN != '' }}
+          WINGET_PUBLISH: ${{ vars.WINGET_PUBLISH }}
         run: |
-          if [ "$HAS_TOKEN" = "true" ]; then
+          if [ "$WINGET_PUBLISH" = "false" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=winget not published::The WINGET_PUBLISH repository variable is false, so no winget pull request was opened. Set it to true (or delete it) to submit again."
+          elif [ "$HAS_TOKEN" = "true" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"

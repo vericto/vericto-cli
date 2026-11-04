@@ -22,6 +22,8 @@ mod pubkeys;
 mod receipt;
 mod sanitize;
 mod scaffold;
+#[cfg(feature = "offline")]
+mod serve;
 mod simulate;
 mod text;
 
@@ -222,7 +224,52 @@ enum Command {
     Version,
     /// Print a shell completion script to stdout (bash|zsh|fish|powershell|elvish).
     Completions(CompletionsArgs),
+    /// Run a local evaluation server for the SDKs: JSON Lines over stdin/stdout,
+    /// offline, no network (see docs/serve-protocol.md).
+    Serve(ServeArgs),
 }
+
+/// `vericto serve --stdio`. The long help is the protocol summary the SDKs
+/// implement; `docs/serve-protocol.md` is the full contract.
+#[derive(Parser)]
+#[command(after_long_help = SERVE_PROTOCOL_HELP)]
+struct ServeArgs {
+    /// Talk JSON Lines on stdin/stdout (the only transport; required).
+    #[arg(long)]
+    stdio: bool,
+
+    /// Largest request line accepted, in bytes (1 KiB to 64 MiB). A longer
+    /// line is answered with a TOO_LARGE error and the server keeps running.
+    #[arg(
+        long,
+        value_name = "BYTES",
+        default_value_t = 1024 * 1024,
+        value_parser = clap::value_parser!(u64).range(1024..=64 * 1024 * 1024)
+    )]
+    max_line_bytes: u64,
+}
+
+const SERVE_PROTOCOL_HELP: &str = "\
+Protocol v1 (docs/serve-protocol.md):
+  Transport  JSON Lines on stdin/stdout, one UTF-8 JSON object per line.
+             stdout carries protocol lines only; diagnostics go to stderr.
+  Startup    {\"type\":\"hello\",\"protocol\":1,\"cli_version\":\"…\",
+              \"engine_version\":\"…\",\"profiles\":[\"runtime\",\"ci\"],\"max_line_bytes\":N}
+  check      {\"id\":\"1\",\"op\":\"check\",\"sql\":\"…\",\"dialect\":\"postgres\",\"profile\":\"runtime\"}
+             -> {\"id\":\"1\",\"ok\":true,\"result\":<check --offline --format json document>}
+             dialect: postgres (default), mysql, oracle, mssql, snowflake, sqlite
+             profile: runtime (default; DROP TABLE blocks) or ci (as check --offline;
+             DDL rules VERICTO-010..019 capped at FLAGGED)
+  ping       {\"id\":\"2\",\"op\":\"ping\"} -> {\"id\":\"2\",\"ok\":true}
+  shutdown   {\"op\":\"shutdown\"} (or EOF on stdin): exit 0; with an id, answered first
+  Errors     {\"id\":…,\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST|UNSUPPORTED_DIALECT|
+             TOO_LARGE|INTERNAL\",\"message\":\"…\"}}; id is null when the line had none.
+             The server keeps running after every error.
+  Order      Requests may be pipelined. They are evaluated one at a time and
+             answered in request order; match responses by id.
+
+Offline only: no network, no account, no config file. Needs the `offline`
+feature (in every release build).";
 
 #[derive(Parser)]
 struct CompletionsArgs {
@@ -262,8 +309,8 @@ enum BaselineCommand {
 
 #[derive(Parser)]
 struct BaselinePruneArgs {
-    /// SQL files to re-check against the baseline. Use '-' for stdin. Supports
-    /// --changed/--since. Should match the file set the baseline was recorded
+    /// SQL files or directories (their *.sql files, recursively) to re-check
+    /// against the baseline. Use '-' for stdin. Supports --changed/--since. Should match the file set the baseline was recorded
     /// against — pruning against a different (smaller) set would drop entries
     /// for files that simply weren't re-checked, not ones that actually fixed.
     files: Vec<String>,
@@ -306,7 +353,8 @@ struct BaselineArgs {
     #[command(subcommand)]
     command: Option<BaselineCommand>,
 
-    /// SQL files to baseline. Use '-' for stdin. Supports --changed/--since.
+    /// SQL files or directories (their *.sql files, recursively) to baseline.
+    /// Use '-' for stdin. Supports --changed/--since.
     files: Vec<String>,
 
     /// Baseline only files changed vs the CI merge base (auto-detected), or
@@ -831,8 +879,10 @@ enum RulesFormat {
 
 #[derive(Parser)]
 struct CheckArgs {
-    /// SQL files to check. Use '-' to read from stdin. Optional when --changed
-    /// or --since selects files from the git diff.
+    /// SQL files or directories to check. A directory contributes the *.sql
+    /// files under it, recursively, in sorted order (links to directories are
+    /// not followed). Use '-' to read from stdin. Optional when --changed or
+    /// --since selects files from the git diff.
     files: Vec<String>,
 
     /// Check only *.sql files changed vs the CI merge base (auto-detected), or
@@ -1243,7 +1293,37 @@ async fn main() -> ExitCode {
             ExitCode::from(exit::OK)
         }
         Command::Completions(args) => run_completions(args),
+        Command::Serve(args) => run_serve(args),
     }
+}
+
+/// `vericto serve --stdio` (DESIGN §17). Usage errors exit 2 before anything
+/// is written to stdout.
+fn run_serve(args: ServeArgs) -> ExitCode {
+    if !args.stdio {
+        eprintln!(
+            "error: vericto serve needs --stdio (JSON Lines on stdin/stdout, the only \
+             transport; there is no network listener)."
+        );
+        return ExitCode::from(exit::USAGE);
+    }
+    serve_stdio(args.max_line_bytes)
+}
+
+#[cfg(feature = "offline")]
+fn serve_stdio(max_line_bytes: u64) -> ExitCode {
+    // Bounded by the clap range, so it fits in usize on every target.
+    serve::run(usize::try_from(max_line_bytes).unwrap_or(serve::DEFAULT_MAX_LINE_BYTES))
+}
+
+#[cfg(not(feature = "offline"))]
+fn serve_stdio(_max_line_bytes: u64) -> ExitCode {
+    eprintln!(
+        "error: vericto serve: this build of vericto was compiled without the `offline` \
+         feature, so it has no embedded engine to serve. Use a release build (every release \
+         target has the engine), or build with the default features."
+    );
+    ExitCode::from(exit::USAGE)
 }
 
 /// `vericto` with no arguments: say what the tool is and where the help is,
@@ -1635,7 +1715,13 @@ fn finish_check(
         // suppresses the per-finding detail; the framing line still helps.
         if !args.quiet {
             let on_github = ci_env::Provider::detect() == ci_env::Provider::GitHub;
-            output::render_ci_failure_summary(&resp, &failing, &files, on_github);
+            output::render_ci_failure_summary(
+                &resp,
+                &failing,
+                &files,
+                on_github,
+                &fail_on_label(fail_on, args.fail_on.is_some()),
+            );
         }
         ExitCode::from(exit::FINDING)
     } else {
@@ -3364,7 +3450,10 @@ fn resolve_files(
         if list.is_empty() {
             return FileResolution::EmptyDiff("No files on stdin — nothing to check.".to_string());
         }
-        return FileResolution::Files(list);
+        return match expand_dirs(&list) {
+            Ok(f) => FileResolution::Files(f),
+            Err(msg) => FileResolution::Usage(msg),
+        };
     }
 
     let use_changed = changed || since.is_some();
@@ -3395,8 +3484,82 @@ fn resolve_files(
             "no files given. Pass SQL files, '-' for stdin, or --changed.".to_string(),
         )
     } else {
-        FileResolution::Files(files.to_vec())
+        match expand_dirs(files) {
+            Ok(f) => FileResolution::Files(f),
+            Err(msg) => FileResolution::Usage(msg),
+        }
     }
+}
+
+/// Replaces each directory in `paths` with the `*.sql` files under it,
+/// recursively (DESIGN §5). Files and `-` (stdin) are kept as given, in
+/// place. A directory's files come in a deterministic order: sorted by path,
+/// component by component, so `db/a.sql` < `db/b/c.sql` < `db/c.sql` on every
+/// platform and file system. The extension match is exact (`.sql`, as the
+/// `--changed` pathspec `*.sql`), other files are ignored.
+///
+/// Symbolic links inside a directory are not followed into directories, so a
+/// link loop (`db/loop -> ..`) cannot recurse; a link to a `.sql` file is
+/// checked like the file. A directory named on the command line is read even
+/// when the name itself is a link, since the user chose it. A directory with
+/// no `.sql` file at all is a usage error (exit 2) naming it, the same outcome
+/// as a run whose inputs are all empty.
+fn expand_dirs(paths: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let path = std::path::Path::new(p);
+        if p == "-" || !path.is_dir() {
+            out.push(p.clone());
+            continue;
+        }
+        let mut found = Vec::new();
+        sql_files_in(path, &mut found)?;
+        if found.is_empty() {
+            return Err(format!(
+                "no .sql files in directory '{p}' (searched recursively)."
+            ));
+        }
+        found.sort();
+        for f in found {
+            match f.into_os_string().into_string() {
+                Ok(s) => out.push(s),
+                Err(bad) => {
+                    return Err(format!(
+                        "'{}' is not a valid UTF-8 path; rename it or pass the file explicitly.",
+                        std::path::Path::new(&bad).display()
+                    ))
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Collects the `*.sql` files under `dir` into `out` (unsorted). Entries are
+/// classified without following links (`DirEntry::file_type`), so a link to a
+/// directory is never entered; a link is kept only when it resolves to a
+/// regular `.sql` file.
+fn sql_files_in(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read '{}': {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read '{}': {e}", dir.display()))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
+        let is_sql = path.extension().is_some_and(|x| x == "sql");
+        if kind.is_dir() {
+            sql_files_in(&path, out)?;
+        } else if kind.is_file() {
+            if is_sql {
+                out.push(path);
+            }
+        } else if kind.is_symlink() && is_sql && path.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Reads each file (or stdin) whole into one query item per file, indexed by
@@ -3496,6 +3659,22 @@ fn read_source(path: &str) -> std::io::Result<String> {
         text::read_stdin()
     } else {
         text::read_file(path)
+    }
+}
+
+/// The `--fail-on` threshold as the user set it, for the failure summary:
+/// the flag when it was passed, otherwise `.vericto.toml`'s `fail_on` (the
+/// only other source of a threshold other than the default `block`).
+fn fail_on_label(fail_on: FailOn, from_flag: bool) -> String {
+    let level = match fail_on {
+        FailOn::Block => "block",
+        FailOn::Flag => "flag",
+        FailOn::Any => "any",
+    };
+    if from_flag || fail_on == FailOn::Block {
+        format!("--fail-on {level}")
+    } else {
+        format!("fail_on = \"{level}\" in .vericto.toml")
     }
 }
 
