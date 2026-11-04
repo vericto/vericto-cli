@@ -183,7 +183,13 @@ pub fn render(
 fn render_json(resp: &CheckResponse) -> String {
     // Re-serialize the parsed response so output is stable/pretty regardless of
     // how the server formatted it.
-    let value = serde_json::json!({
+    serde_json::to_string_pretty(&json_document(resp)).unwrap_or_default()
+}
+
+/// The `--format json` document. `vericto serve` returns the same value as a
+/// check's `result`, so the SDKs read one shape from both.
+pub(crate) fn json_document(resp: &CheckResponse) -> serde_json::Value {
+    serde_json::json!({
         "summary": {
             "total": resp.summary.total,
             "blocked": resp.summary.blocked,
@@ -209,8 +215,7 @@ fn render_json(resp: &CheckResponse) -> String {
         // embedded engine's version) for a local one.
         "mode": resp.mode.as_str(),
         "engine_version": resp.mode.engine_version(),
-    });
-    serde_json::to_string_pretty(&value).unwrap_or_default()
+    })
 }
 
 // ── SARIF 2.1.0 (GitHub Code Scanning) ───────────────────────────────────────
@@ -535,11 +540,17 @@ fn status_style(status: &str) -> (&'static str, Style) {
 /// filtered for suppression by the caller). When running under GitHub Actions,
 /// also emits `::error::` workflow commands so the findings surface as inline
 /// annotations even without GitHub Advanced Security / Code Scanning.
+///
+/// `fail_on` names the threshold as the user set it (`--fail-on flag`, or
+/// `fail_on = "flag"` in `.vericto.toml`). The header counts the failing
+/// statements by verdict and, when any of them is not BLOCKED, says the run
+/// fails because of that threshold (`failure_headline`).
 pub fn render_ci_failure_summary(
     resp: &CheckResponse,
     failing: &[&QueryResult],
     files: &[String],
     on_github: bool,
+    fail_on: &str,
 ) {
     if failing.is_empty() {
         return;
@@ -575,12 +586,11 @@ pub fn render_ci_failure_summary(
     let hdr = Style::new().fg_color(Some(AnsiColor::Red.into())).bold();
     let dim = Style::new().dimmed();
 
-    let n = failing.len();
     let _ = writeln!(err);
     let _ = writeln!(
         err,
-        "{hdr}✖ Vericto blocked {n} statement{}{hdr:#}  {dim}(ruleset {ver}{mode}){dim:#}",
-        if n == 1 { "" } else { "s" },
+        "{hdr}✖ {headline}{hdr:#}  {dim}(ruleset {ver}{mode}){dim:#}",
+        headline = failure_headline(failing, fail_on),
         ver = s.ruleset_version,
         mode = mode_note(resp),
     );
@@ -622,6 +632,39 @@ pub fn render_ci_failure_summary(
             .find_map(|q| q.rule_code.as_deref())
             .unwrap_or("RULE"),
     );
+}
+
+/// The header of the CI failure summary. When every failing statement was
+/// BLOCKED it reads as it always has, `Vericto blocked 2 statements`. Otherwise
+/// a stricter `fail_on` threshold is why the run fails, and the header says so
+/// with the count of each verdict, e.g. `Vericto: 1 statement flagged; failing
+/// because --fail-on flag` or `Vericto: 3 statements (1 blocked, 2 flagged);
+/// failing because --fail-on flag`. Until 2.1.0 it said "blocked" for every
+/// failing statement, so a FLAGGED one read as blocked.
+pub(crate) fn failure_headline(failing: &[&QueryResult], fail_on: &str) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let n = failing.len();
+    let count = |status: &str| failing.iter().filter(|q| q.status == status).count();
+    let blocked = count("BLOCKED");
+    if blocked == n {
+        return format!("Vericto blocked {n} statement{}", plural(n));
+    }
+    let kinds: Vec<(usize, &str)> = [
+        (blocked, "blocked"),
+        (count("FLAGGED"), "flagged"),
+        (count("MONITORED"), "monitored"),
+    ]
+    .into_iter()
+    .filter(|(c, _)| *c > 0)
+    .collect();
+    let counts = match kinds.as_slice() {
+        [(c, word)] => format!("{c} statement{} {word}", plural(*c)),
+        _ => {
+            let parts: Vec<String> = kinds.iter().map(|(c, w)| format!("{c} {w}")).collect();
+            format!("{n} statement{} ({})", plural(n), parts.join(", "))
+        }
+    };
+    format!("Vericto: {counts}; failing because {fail_on}")
 }
 
 /// Percent-encodes the characters GitHub workflow commands treat specially in a
@@ -1089,6 +1132,42 @@ mod tests {
         assert!(quiet.contains("blocked"));
     }
 
+    /// The failure header counts each verdict and names the threshold when a
+    /// non-BLOCKED finding fails the run; it never calls a FLAGGED or
+    /// MONITORED statement blocked.
+    #[test]
+    fn failure_headline_counts_by_verdict_and_names_fail_on() {
+        let b = q("BLOCKED", Some("VERICTO-001"), Some("critical"));
+        let f = q("FLAGGED", Some("VERICTO-010"), Some("high"));
+        let m = q("MONITORED", Some("VERICTO-060"), Some("low"));
+        assert_eq!(
+            failure_headline(&[&b], "--fail-on block"),
+            "Vericto blocked 1 statement"
+        );
+        assert_eq!(
+            failure_headline(&[&b, &b], "--fail-on flag"),
+            "Vericto blocked 2 statements"
+        );
+        assert_eq!(
+            failure_headline(&[&f], "--fail-on flag"),
+            "Vericto: 1 statement flagged; failing because --fail-on flag"
+        );
+        assert_eq!(
+            failure_headline(&[&f, &f], "--fail-on flag"),
+            "Vericto: 2 statements flagged; failing because --fail-on flag"
+        );
+        assert_eq!(
+            failure_headline(&[&m], "fail_on = \"any\" in .vericto.toml"),
+            "Vericto: 1 statement monitored; failing because fail_on = \"any\" in .vericto.toml"
+        );
+        let h = failure_headline(&[&b, &f, &f, &m], "--fail-on any");
+        assert_eq!(
+            h,
+            "Vericto: 4 statements (1 blocked, 2 flagged, 1 monitored); failing because --fail-on any"
+        );
+        assert!(!failure_headline(&[&f], "--fail-on flag").contains("blocked"));
+    }
+
     #[test]
     fn gha_encode_escapes_command_breakers() {
         assert_eq!(gha_encode("a\nb"), "a%0Ab");
@@ -1102,8 +1181,8 @@ mod tests {
         // Empty failing set must not write annotations or panic (both branches).
         let files = vec!["m.sql".to_string()];
         let r = resp(vec![q("ALLOWED", None, None)]);
-        render_ci_failure_summary(&r, &[], &files, true);
-        render_ci_failure_summary(&r, &[], &files, false);
+        render_ci_failure_summary(&r, &[], &files, true, "--fail-on block");
+        render_ci_failure_summary(&r, &[], &files, false, "--fail-on block");
     }
 
     #[test]
@@ -1112,8 +1191,8 @@ mod tests {
         let files = vec!["m.sql".to_string()];
         let r = resp(vec![q("BLOCKED", Some("VERICTO-001"), Some("critical"))]);
         let failing: Vec<&QueryResult> = r.queries.iter().collect();
-        render_ci_failure_summary(&r, &failing, &files, true);
-        render_ci_failure_summary(&r, &failing, &files, false);
+        render_ci_failure_summary(&r, &failing, &files, true, "--fail-on block");
+        render_ci_failure_summary(&r, &failing, &files, false, "--fail-on block");
     }
 
     #[test]

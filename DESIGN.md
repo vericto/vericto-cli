@@ -172,7 +172,7 @@ not on the roadmap.
 ## 4. Commands
 
 ```
-vericto check [files...]     Evaluate SQL files (or stdin with '-'). The core command.
+vericto check [files...]     Evaluate SQL files or directories (or stdin with '-'). The core command.
 vericto login                Browser login (default, §6.0), or --api-key (verified, §6.0.1) / --oidc (§6.1).
 vericto logout               Remove stored credentials.
 vericto doctor               Verify config, connectivity, auth, and plan entitlement.
@@ -186,12 +186,13 @@ vericto init                 Scaffold CI workflow + pre-commit hook (§10); --oi
 vericto verify-receipt <f>   Verify a signed run receipt offline (§7.1).
 vericto version              Print the CLI version (same as --version).
 vericto completions <shell>  Print a shell completion script (bash|zsh|fish|powershell|elvish).
+vericto serve --stdio        Local evaluation server for the SDKs, JSON Lines, offline (§17).
 ```
 
 ### `vericto check` — flags
 | Flag | Default | Description |
 |------|---------|-------------|
-| `[files...]` | — | One or more `.sql` files or globs; `-` reads stdin |
+| `[files...]` | — | One or more `.sql` files, globs or directories (their `*.sql`, recursively); `-` reads stdin |
 | `--changed` | off | Check only files changed vs the CI merge base (§10) |
 | `--since <ref>` | — | Explicit base ref for changed-file selection (§10) |
 | `--stdin-file-list` | off | Read the file paths to check from stdin, one per line (§10) |
@@ -223,6 +224,20 @@ vericto completions <shell>  Print a shell completion script (bash|zsh|fish|powe
   the backend splits them, returning every statement with its `line` and
   `file_index`; otherwise each file is one `{line: N, sql: <file>}` item indexed
   by argument position. Empty inputs are skipped.
+- **Directories (2.1.0):** `vericto check db/migrate/` replaces the directory,
+  in place among the other arguments, with the `*.sql` files under it,
+  recursively, sorted by path component by component. The order is the same
+  on every platform and file system, so reports and baselines are stable. The
+  extension match is exact (`.sql`), as in the `--changed` pathspec, and every
+  other file is ignored. Inside a directory, links to directories are not
+  followed, so a link loop cannot recurse; a link to a `.sql` file is checked.
+  A directory named on the command line is read even through a link. A
+  directory with no `.sql` file at all is a usage error (exit 2) that names
+  it. If its `.sql` files are all empty, it is the existing "no SQL to check"
+  error, also exit 2. The same applies to `baseline`, `baseline prune` and
+  `--stdin-file-list`, which share the file resolution. Until 2.1.0 a
+  directory was read as a file and failed with exit 2, although the README
+  showed `vericto check db/migrate/`.
 - **stdin:** `vericto check - < migration.sql`, or `git show :file.sql | vericto
   check -` for pre-commit hooks.
 - **Batching (v0.2):** the endpoint accepts ≤500 queries per call. v0.1 sends one
@@ -1497,3 +1512,84 @@ documents (YAML with the engine's policy keys: `when`, `deny_if`, `require`,
   `3` key/scope/role, and `404` (the feature is off for the workspace: "business
   policy tests are not enabled for this workspace"); `4` backend/network.
   Skipped fixtures (they need a later phase) do not fail a run.
+
+## 17. Local evaluation server: `vericto serve --stdio` (2.1.0)
+
+**Why.** The SDKs (`vericto-python`, `vericto-node`) get an offline mode with
+the same verdicts as the CLI. The SDKs are Apache-2.0 and the engine is
+AGPL-3.0-only, so an SDK must not link the engine into its own process. It
+spawns this binary once and talks to it over stdin/stdout instead. The
+process boundary is also the license boundary. A process per check would
+spend milliseconds on startup each time, so the server is long-lived.
+
+**Contract.** `docs/serve-protocol.md` is the normative spec that the SDKs
+link to. In short:
+
+- **Transport.** JSON Lines on stdin/stdout, UTF-8. stdout carries the hello
+  line and the responses only; diagnostics go to stderr. There is no network
+  listener and no other transport. `--stdio` is required, so that another
+  transport could be added later behind its own flag.
+- **Hello.** `{"type":"hello","protocol":1,"cli_version","engine_version",
+  "profiles":["runtime","ci"],"max_line_bytes"}` comes before any request is
+  read.
+- **Ops.** `check` (`id`, `sql`, `dialect` default `postgres`, `profile`
+  default `runtime`) answers `{"id","ok":true,"result":<check --offline
+  --format json document>}`. `ping` answers `{"id","ok":true}`. `shutdown`, or
+  EOF, exits 0; a `shutdown` with an id is answered first. Errors are
+  `{"id","ok":false,"error":{"code","message"}}` with code `INVALID_REQUEST`,
+  `UNSUPPORTED_DIALECT`, `TOO_LARGE` or `INTERNAL`. `id` is null when the line
+  had no usable id, and the server keeps running after every error.
+- **Profiles.** `ci` is `offline::Profile::Ci`, the policy of `check
+  --offline`: the engine default plus `schema_migration_cap = Flag`.
+  `runtime` is the engine default without the cap, the policy of the Runtime
+  API, MCP `check_sql` and the proxy's local mode. That one setting is the
+  only difference between the two (§13).
+
+**Implementation.**
+
+- **One code path.** A `check` calls `offline::check_with`, the function that
+  `check --offline` calls with `Profile::Ci`. Its `result` is built by
+  `output::json_document`, the function behind `--format json`. No rule logic,
+  status mapping or JSON shape is duplicated, so parity holds by construction.
+  An integration test compares a `ci` result with the CLI's own JSON.
+- **Granularity.** Each request is one input, the same granularity as a file
+  given to `check --offline`: several statements give one result, with the
+  strongest action. Per-statement results need the statement splitter in the
+  engine, a separate change.
+- **Ordering and memory.** The server is single-threaded. It reads a line,
+  evaluates it, writes the answer, and answers in request order. A pipelining
+  client is supported: output is flushed once no further complete line is
+  buffered, so a batch costs a few writes. Memory is bounded by one line
+  buffer of at most `--max-line-bytes` (default 1 MiB, from 1 KiB to 64 MiB),
+  with no queue. A longer line is read to its end, dropped and answered with
+  `TOO_LARGE`. Backpressure is the pipe's. Out-of-order answers from a
+  concurrent evaluator would need `protocol` 2.
+- **Failure isolation.** An engine panic is caught per request and answered
+  with `INTERNAL`. The panic hook logs the source location only, because a
+  panic message could quote the SQL.
+- **Inputs that change verdicts.** The server reads only the request and the
+  embedded engine: no environment variable, no config file and no
+  `.vericto.toml`. The rule table is built once per process (`OnceLock`); it
+  is the same table on every request.
+- **Feature flag.** `serve` needs the `offline` feature. A build without it
+  still has the subcommand, which prints a clear error and exits 2 before
+  writing anything to stdout.
+- **Exit codes.** 0 on EOF, on `shutdown` and when the client closes stdout
+  (broken pipe). 2 for usage errors, a build without the engine, and other
+  I/O errors.
+
+**Measured** (2026-11-03, macOS arm64 on Apple silicon, release build). The
+client is a Python script on the same machine, so the times include its own
+overhead:
+
+| | p50 | p95 | p99 |
+|---|---|---|---|
+| spawn to hello line | 6.9 ms | 8.1 ms | — |
+| `ping` round trip | 5 µs | 9 µs | 11 µs |
+| `check`, short statement (30 B), round trip | 20 µs | 24 µs | 29 µs |
+| `check`, medium input (921 B, 4 statements), round trip | 169 µs | 183 µs | 198 µs |
+
+Pipelined, 10,000 requests: 11.8 µs per short request (about 85,000/s) and
+160 µs per medium one (about 6,200/s). Both profiles cost the same. For
+comparison, one `vericto check --offline --sql …` process takes 9 ms from
+spawn to exit.

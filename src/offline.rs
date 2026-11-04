@@ -119,10 +119,55 @@ impl std::fmt::Display for OfflineError {
     }
 }
 
-/// Evaluates every input locally and returns a response shaped exactly like
-/// the backend's, marked `RunMode::Offline`. No I/O of any kind.
+/// Which hosted channel an offline evaluation reproduces. The two differ in
+/// one setting only, the schema-migration cap on DDL rules (VERICTO-010..019).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    /// `POST /api/v1/ci/check-key`, i.e. `vericto check`: schema DDL (DROP,
+    /// ALTER, TRUNCATE) is capped at FLAGGED. What `check --offline` uses.
+    Ci,
+    /// The Runtime API (`POST /api/v1/proxy/query`), MCP `check_sql` and the
+    /// proxy's local mode: no cap, so a DROP TABLE is BLOCKED. `vericto serve`
+    /// uses it by default, for the SDKs' offline mode.
+    #[cfg_attr(not(feature = "offline"), allow(dead_code))]
+    Runtime,
+}
+
+impl Profile {
+    /// The profile's wire name (`ci` / `runtime`).
+    #[cfg_attr(not(feature = "offline"), allow(dead_code))]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Profile::Ci => "ci",
+            Profile::Runtime => "runtime",
+        }
+    }
+
+    /// Parses a wire name; anything else is `None`.
+    #[cfg_attr(not(feature = "offline"), allow(dead_code))]
+    pub fn parse(name: &str) -> Option<Profile> {
+        match name {
+            "ci" => Some(Profile::Ci),
+            "runtime" => Some(Profile::Runtime),
+            _ => None,
+        }
+    }
+}
+
+/// Evaluates every input locally under the CI profile (`check --offline`).
 pub fn check(queries: &[QueryInput], dialect: &str) -> Result<CheckResponse, OfflineError> {
-    let results = engine::evaluate_all(queries, dialect)?;
+    check_with(queries, dialect, Profile::Ci)
+}
+
+/// Evaluates every input locally under `profile` and returns a response
+/// shaped exactly like the backend's, marked `RunMode::Offline`. No I/O of
+/// any kind.
+pub fn check_with(
+    queries: &[QueryInput],
+    dialect: &str,
+    profile: Profile,
+) -> Result<CheckResponse, OfflineError> {
+    let results = engine::evaluate_all(queries, dialect, profile)?;
     let count = |s: &str| results.iter().filter(|q| q.status == s).count() as u32;
     let blocked = count("BLOCKED");
     Ok(CheckResponse {
@@ -152,12 +197,20 @@ pub fn check(queries: &[QueryInput], dialect: &str) -> Result<CheckResponse, Off
 
 #[cfg(feature = "offline")]
 mod engine {
-    use super::OfflineError;
+    use super::{OfflineError, Profile};
     use crate::api::{QueryInput, QueryResult};
+    use std::sync::OnceLock;
     use vericto_engine::parser::{parser_for, Dialect};
     use vericto_engine::{
-        standard_rules, Decision, EnforcementAction, EnforcementPolicy, RuleEngine,
+        standard_rules, Decision, EnforcementAction, EnforcementPolicy, Rule, RuleEngine,
     };
+
+    /// The standard rules, built once per process rather than per input:
+    /// `vericto serve` evaluates many requests with the same table.
+    fn rules() -> &'static [Rule] {
+        static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
+        RULES.get_or_init(standard_rules)
+    }
 
     /// Largest input evaluated. Online, the sidecar refuses analysis past
     /// 64 KiB per statement because it is multi-tenant; offline the input is a
@@ -205,14 +258,23 @@ mod engine {
         }
     }
 
+    /// The policy of the runtime channels: the engine default, no cap.
+    fn runtime_policy() -> EnforcementPolicy {
+        EnforcementPolicy::default()
+    }
+
     pub(super) fn evaluate_all(
         queries: &[QueryInput],
         dialect: &str,
+        profile: Profile,
     ) -> Result<Vec<QueryResult>, OfflineError> {
         let dialect =
             Dialect::parse_dialect(dialect).map_err(|_| OfflineError::Dialect(dialect.into()))?;
-        let rules = standard_rules();
-        let policy = ci_policy();
+        let rules = rules();
+        let policy = match profile {
+            Profile::Ci => ci_policy(),
+            Profile::Runtime => runtime_policy(),
+        };
         let parser = parser_for(dialect);
         Ok(queries
             .iter()
@@ -227,7 +289,7 @@ mod engine {
                 // all violations (engine 4.2.0), and `rule_code` is the
                 // violation that holds it, so every output format and the exit
                 // code agree on it.
-                let o = RuleEngine::evaluate(&parsed, &rules, &policy);
+                let o = RuleEngine::evaluate(&parsed, rules, &policy);
                 // vericto-eval's mapping (proxy.rs), so statuses read the same.
                 let status = match (o.decision, o.action) {
                     (Decision::Allow, Some(EnforcementAction::Monitor)) => "MONITORED",
@@ -254,12 +316,13 @@ mod engine {
 
 #[cfg(not(feature = "offline"))]
 mod engine {
-    use super::OfflineError;
+    use super::{OfflineError, Profile};
     use crate::api::{QueryInput, QueryResult};
 
     pub(super) fn evaluate_all(
         _queries: &[QueryInput],
         _dialect: &str,
+        _profile: Profile,
     ) -> Result<Vec<QueryResult>, OfflineError> {
         Err(OfflineError::Unavailable)
     }
@@ -366,6 +429,41 @@ mod tests {
         let r = one("DROP TABLE a;\nSELECT * FROM t;", "postgres");
         assert_eq!(r.status, "FLAGGED");
         assert_eq!(r.rule_code.as_deref(), Some("VERICTO-010"));
+    }
+
+    /// The runtime profile differs from CI only on the schema DDL cap: a DROP
+    /// TABLE blocks, a DELETE without WHERE blocks in both, and the decision
+    /// of a statement no DDL rule matches is the same.
+    #[test]
+    fn runtime_profile_blocks_ddl_and_matches_ci_otherwise() {
+        let rt = |sql: &str| {
+            check_with(&q(sql), "postgres", Profile::Runtime)
+                .unwrap()
+                .queries
+                .remove(0)
+        };
+        let r = rt("DROP TABLE users");
+        assert_eq!(r.status, "BLOCKED");
+        assert_eq!(r.rule_code.as_deref(), Some("VERICTO-010"));
+        assert_eq!(r.action.as_deref(), Some("block"));
+        for sql in [
+            "DELETE FROM users",
+            "SELECT * FROM t",
+            "INSERT INTO t VALUES (1)",
+            "SELECT id FROM users WHERE id = 1 LIMIT 1",
+            "SELEC broken",
+        ] {
+            let (a, b) = (rt(sql), one(sql, "postgres"));
+            assert_eq!(
+                (&a.status, &a.rule_code, &a.action),
+                (&b.status, &b.rule_code, &b.action),
+                "{sql}"
+            );
+        }
+        assert_eq!(Profile::parse("runtime"), Some(Profile::Runtime));
+        assert_eq!(Profile::parse("ci"), Some(Profile::Ci));
+        assert_eq!(Profile::parse("CI"), None);
+        assert_eq!(Profile::Runtime.as_str(), "runtime");
     }
 
     #[test]

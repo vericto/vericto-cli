@@ -4492,3 +4492,264 @@ fn online_only_option_without_credentials_does_not_go_offline() {
         .unwrap();
     assert_eq!(out.status.code(), Some(3), "{}", stderr_of(&out));
 }
+
+// ── directories as inputs (2.1.0) ────────────────────────────────────────────
+
+/// The text-report lines of an offline check, `STATUS path  rule sev`, with
+/// the paths relative to `root` and `/`-separated.
+#[cfg(feature = "offline")]
+fn offline_check_paths(
+    root: &std::path::Path,
+    args: &[&str],
+) -> (Option<i32>, Vec<String>, String) {
+    let out = vericto()
+        .args(["check", "--offline", "--no-color", "--fail-on", "any"])
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let paths = stdout_of(&out)
+        .lines()
+        .filter(|l| l.starts_with("BLOCKED ") || l.starts_with("FLAGGED "))
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .map(|p| p.replace('\\', "/"))
+        .collect();
+    (out.status.code(), paths, stderr_of(&out))
+}
+
+/// `vericto check db/migrate/` (the README's example) checks the `.sql`
+/// files under the directory, recursively and in sorted order, and ignores
+/// every other file. Exit 2 before 2.1.0.
+#[cfg(feature = "offline")]
+#[test]
+fn check_accepts_a_directory_recursively_in_sorted_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let m = root.join("db/migrate");
+    std::fs::create_dir_all(m.join("2026/b")).unwrap();
+    std::fs::create_dir_all(m.join("2026/a")).unwrap();
+    for (name, body) in [
+        ("db/migrate/0002_drop.sql", "DROP TABLE old;"),
+        ("db/migrate/0001_init.sql", "DELETE FROM users;"),
+        ("db/migrate/2026/b/0004.sql", "DELETE FROM b;"),
+        ("db/migrate/2026/a/0003.sql", "DELETE FROM a;"),
+        ("db/migrate/2026/README.md", "DELETE FROM not_sql;"),
+        ("db/migrate/notes.txt", "DELETE FROM not_sql;"),
+        ("db/migrate/0005.SQL.bak", "DELETE FROM not_sql;"),
+        ("db/migrate/empty.sql", "  \n"),
+    ] {
+        std::fs::write(root.join(name), body).unwrap();
+    }
+    let want = vec![
+        "db/migrate/0001_init.sql",
+        "db/migrate/0002_drop.sql",
+        "db/migrate/2026/a/0003.sql",
+        "db/migrate/2026/b/0004.sql",
+    ];
+    for arg in ["db/migrate/", "db/migrate", "db"] {
+        let (code, paths, err) = offline_check_paths(root, &[arg]);
+        assert_eq!(code, Some(1), "{arg}: {err}");
+        assert_eq!(paths, want, "{arg}: {err}");
+    }
+    // A file and a directory together keep their command-line order.
+    let (_, paths, err) =
+        offline_check_paths(root, &["db/migrate/2026/b/0004.sql", "db/migrate/2026"]);
+    assert_eq!(
+        paths,
+        vec![
+            "db/migrate/2026/b/0004.sql",
+            "db/migrate/2026/a/0003.sql",
+            "db/migrate/2026/b/0004.sql"
+        ],
+        "{err}"
+    );
+    // In JSON: one result per file, the empty one skipped.
+    let out = vericto()
+        .args(["check", "--offline", "--format", "json", "db"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["summary"]["total"], 4,
+        "empty.sql is skipped like any empty input"
+    );
+}
+
+/// An empty directory, or one with no `.sql` file, is a usage error (exit 2)
+/// that names it; one whose `.sql` files are all empty is the existing "no
+/// SQL to check" error, also exit 2.
+#[cfg(feature = "offline")]
+#[test]
+fn check_of_a_directory_without_sql_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("empty")).unwrap();
+    std::fs::create_dir_all(root.join("docs/sub")).unwrap();
+    std::fs::write(root.join("docs/sub/a.md"), "DELETE FROM t;").unwrap();
+    std::fs::create_dir_all(root.join("blank")).unwrap();
+    std::fs::write(root.join("blank/a.sql"), "\n").unwrap();
+    for (arg, msg) in [
+        ("empty", "no .sql files in directory 'empty'"),
+        ("docs", "no .sql files in directory 'docs'"),
+        ("blank", "no SQL to check"),
+    ] {
+        let (code, _, err) = offline_check_paths(root, &[arg]);
+        assert_eq!(code, Some(2), "{arg}: {err}");
+        assert!(err.contains(msg), "{arg}: {err}");
+    }
+}
+
+/// Links to directories are not followed, so a link loop cannot recurse; a
+/// link to a `.sql` file is checked. A directory named on the command line
+/// through a link is read.
+#[cfg(all(feature = "offline", unix))]
+#[test]
+fn check_of_a_directory_does_not_follow_directory_links() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("db/sub")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(root.join("db/a.sql"), "DELETE FROM a;").unwrap();
+    std::fs::write(root.join("other/x.sql"), "DELETE FROM x;").unwrap();
+    symlink("..", root.join("db/sub/loop")).unwrap(); // db/sub/loop -> db
+    symlink(root.join("db"), root.join("db/self")).unwrap();
+    symlink(root.join("other"), root.join("db/to_other")).unwrap();
+    symlink(root.join("other/x.sql"), root.join("db/b.sql")).unwrap();
+    symlink(root.join("missing.sql"), root.join("db/dangling.sql")).unwrap();
+    let (code, paths, err) = offline_check_paths(root, &["db"]);
+    assert_eq!(code, Some(1), "{err}");
+    assert_eq!(paths, vec!["db/a.sql", "db/b.sql"], "{err}");
+    symlink(root.join("db"), root.join("db_link")).unwrap();
+    let (_, paths, err) = offline_check_paths(root, &["db_link"]);
+    assert_eq!(paths, vec!["db_link/a.sql", "db_link/b.sql"], "{err}");
+}
+
+// ── failure summary wording (2.1.0) ──────────────────────────────────────────
+
+/// With `--fail-on flag`, a run that fails on a FLAGGED finding says so: the
+/// header counts it as flagged and names the threshold, in every format, and
+/// never calls it blocked. Exit codes are unchanged.
+#[cfg(feature = "offline")]
+#[test]
+fn fail_on_flag_summary_says_flagged_not_blocked() {
+    for format in ["text", "json", "sarif", "gitlab-codequality", "gitlab-sast"] {
+        let out = vericto()
+            .args([
+                "check",
+                "--offline",
+                "--no-color",
+                "--fail-on",
+                "flag",
+                "--format",
+                format,
+                "-",
+            ])
+            .write_stdin("SELECT * FROM t;")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{format}");
+        let err = stderr_of(&out);
+        assert!(
+            err.contains("Vericto: 1 statement flagged; failing because --fail-on flag"),
+            "{format}: {err}"
+        );
+        assert!(!err.contains("blocked 1"), "{format}: {err}");
+        let body = stdout_of(&out);
+        match format {
+            "text" => assert!(body.contains("0 blocked · 0 allowed · 1 flagged"), "{body}"),
+            "json" => {
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(v["summary"]["blocked"], 0);
+                assert_eq!(v["summary"]["flagged"], 1);
+                assert_eq!(v["queries"][0]["status"], "FLAGGED");
+            }
+            "sarif" => assert!(body.contains("[FLAGGED]"), "{body}"),
+            _ => assert!(
+                body.contains("[FLAGGED]") && !body.contains("BLOCKED"),
+                "{body}"
+            ),
+        }
+    }
+    // The GitHub annotation's title carries the real verdict.
+    let out = vericto()
+        .args(["check", "--offline", "--no-color", "--fail-on", "flag", "-"])
+        .env("GITHUB_ACTIONS", "true")
+        .write_stdin("SELECT * FROM t;")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_of(&out);
+    assert!(err.contains("title=Vericto (offline) VERICTO-"), "{err}");
+    assert!(err.contains("[FLAGGED]::"), "{err}");
+    // A blocked finding keeps the header it always had, whatever --fail-on.
+    for fail_on in ["block", "flag", "any"] {
+        let out = vericto()
+            .args([
+                "check",
+                "--offline",
+                "--no-color",
+                "--fail-on",
+                fail_on,
+                "-",
+            ])
+            .write_stdin("DELETE FROM users;")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            stderr_of(&out).contains("✖ Vericto blocked 1 statement"),
+            "{}",
+            stderr_of(&out)
+        );
+    }
+    // Mixed verdicts are counted separately.
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_sql(dir.path(), "a.sql", "DELETE FROM users;");
+    let b = write_sql(dir.path(), "b.sql", "SELECT * FROM t;");
+    let c = write_sql(dir.path(), "c.sql", "INSERT INTO t VALUES (1);");
+    let out = vericto()
+        .args([
+            "check",
+            "--offline",
+            "--no-color",
+            "--fail-on",
+            "any",
+            &a,
+            &b,
+            &c,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr_of(&out).contains(
+            "Vericto: 3 statements (1 blocked, 1 flagged, 1 monitored); failing because --fail-on any"
+        ),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// A threshold from `.vericto.toml` is named as such.
+#[cfg(feature = "offline")]
+#[test]
+fn fail_on_from_vericto_toml_is_named_in_the_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".vericto.toml"), "fail_on = \"any\"\n").unwrap();
+    let out = vericto()
+        .args(["check", "--offline", "--no-color", "-"])
+        .current_dir(dir.path())
+        .write_stdin("INSERT INTO t VALUES (1);")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains(
+            "Vericto: 1 statement monitored; failing because fail_on = \"any\" in .vericto.toml"
+        ),
+        "{}",
+        stderr_of(&out)
+    );
+}
