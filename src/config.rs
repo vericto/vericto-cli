@@ -119,7 +119,7 @@ impl Config {
 /// directory the CLI creates is not listable by other users: `0700` on Unix,
 /// and on Windows a protected DACL for the current user, inherited by what is
 /// created inside it. An existing directory is left as it is on both.
-fn create_private_dir(dir: &std::path::Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(dir: &std::path::Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

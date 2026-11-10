@@ -818,6 +818,38 @@ A file with several statements reports the finding with the strongest action:
 in `DROP TABLE a; UPDATE accounts SET balance = 0;` the DROP is flagged, but
 the WHERE-less UPDATE blocks, so the file is BLOCKED and the run fails.
 
+### Connect tip (and how to turn it off)
+
+After an interactive offline check that produces a result, the CLI prints
+one line on stderr, once per user on the machine:
+
+```text
+Tip: connect a free Vericto workspace to keep a history of checks and share rules with your team: https://app.vericto.com/register?utm_source=cli&utm_medium=nudge&utm_campaign=first-check&v=<cli version>
+```
+
+It is not telemetry: the CLI makes no request for it and sends nothing.
+The link only carries the CLI version and campaign parameters, which the
+site sees if you open it. The CLI remembers it showed the tip with a small
+marker file next to the config file,
+`$XDG_CONFIG_HOME/vericto/connect-nudge-shown` (default
+`~/.config/vericto/connect-nudge-shown`; on Windows
+`%APPDATA%\vericto\connect-nudge-shown`). Delete that file and the tip can
+show once more. If the file cannot be written, the tip is skipped silently.
+Stdout and the exit code are the same with or without it.
+
+It never shows when:
+
+- `VERICTO_NO_NUDGE=1` or `DO_NOT_TRACK=1` is set;
+- the run is in CI (any of the CI variables listed above, or `TRAVIS`,
+  `APPVEYOR`, `DRONE`, `SEMAPHORE`, `BITRISE_IO`, `CIRRUS_CI`,
+  `HARNESS_BUILD_ID`);
+- stderr is not a terminal;
+- `--format` is not `text`, or `--quiet` is passed;
+- a credential is present: an API key (`--api-key`, `VERICTO_API_KEY` or
+  `vericto login`), OIDC, or a workspace id;
+- the command is anything other than `vericto check`, `vericto serve --stdio`
+  (the SDKs' offline mode) included.
+
 ## Local evaluation server (`vericto serve --stdio`)
 
 ```bash

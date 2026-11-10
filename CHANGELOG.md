@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **A one-time tip to connect a workspace, after an offline check.** When an
+  interactive `vericto check` ran offline with no credential and produced a
+  result, stderr gets one line, once per user on the machine: `Tip: connect a
+  free Vericto workspace to keep a history of checks and share rules with
+  your team:` and a signup link with campaign parameters and the CLI version.
+  - **No telemetry.** The tip makes no network request. A marker file,
+    `connect-nudge-shown` next to `config.toml`, records that it was shown. If
+    it cannot be written, the tip is skipped and the check is unaffected.
+  - **Never in automation.** It does not show in CI, when stderr is not a
+    terminal, with a `--format` other than `text`, with `--quiet`, with any
+    credential (API key, login, OIDC, workspace id), or from `vericto serve`.
+  - **Opt-out.** Set `VERICTO_NO_NUDGE=1` or `DO_NOT_TRACK=1`.
+  - Stdout and exit codes are unchanged.
+
 ## [2.1.0] - 2026-11-04
 
 ### Added
