@@ -4753,3 +4753,75 @@ fn fail_on_from_vericto_toml_is_named_in_the_summary() {
         stderr_of(&out)
     );
 }
+
+// ── connect tip after an offline check (src/nudge.rs) ───────────────────────
+
+/// One offline run without credentials, its config directory in `config`,
+/// with `env` set: (exit code, stdout, stderr).
+#[cfg(feature = "offline")]
+fn nudge_run(
+    config: &std::path::Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    sql: &str,
+) -> (Option<i32>, String, String) {
+    let mut cmd = vericto();
+    cmd.args(["check", "--no-color"])
+        .args(args)
+        .arg("-")
+        .env("XDG_CONFIG_HOME", config)
+        .env("VERICTO_API_URL", "http://127.0.0.1:1");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.write_stdin(sql.to_string()).output().unwrap();
+    (out.status.code(), stdout_of(&out), stderr_of(&out))
+}
+
+/// The tip needs a terminal on stderr. A spawned process has a pipe there,
+/// so whatever else allows it, nothing is printed and no state file is
+/// written. (The terminal and env checks are unit-tested in src/nudge.rs.)
+#[cfg(feature = "offline")]
+#[test]
+fn connect_nudge_needs_a_terminal_and_writes_no_state_without_one() {
+    let config = tempfile::tempdir().unwrap();
+    for args in [&[][..], &["--offline"][..]] {
+        let (code, _, stderr) = nudge_run(config.path(), args, &[], "SELECT 1;");
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(!stderr.contains("Tip:"), "{stderr}");
+        assert!(!stderr.contains("app.vericto.com/register"), "{stderr}");
+    }
+    assert!(!config
+        .path()
+        .join("vericto")
+        .join("connect-nudge-shown")
+        .exists());
+}
+
+/// Stdout and the exit code are the same with the tip allowed, opted out
+/// (both variables) and already shown, in text and JSON, passing and failing.
+#[cfg(feature = "offline")]
+#[test]
+fn connect_nudge_leaves_stdout_and_exit_code_unchanged() {
+    for format in ["text", "json"] {
+        for (sql, expected) in [("SELECT 1;", 0), ("DELETE FROM users;", 1)] {
+            let fresh = tempfile::tempdir().unwrap();
+            let args = ["--format", format];
+            let base = nudge_run(fresh.path(), &args, &[], sql);
+            assert_eq!(base.0, Some(expected), "{}", base.2);
+
+            let shown = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(shown.path().join("vericto")).unwrap();
+            std::fs::write(shown.path().join("vericto").join("connect-nudge-shown"), "").unwrap();
+            let runs = [
+                nudge_run(fresh.path(), &args, &[("VERICTO_NO_NUDGE", "1")], sql),
+                nudge_run(fresh.path(), &args, &[("DO_NOT_TRACK", "1")], sql),
+                nudge_run(shown.path(), &args, &[], sql),
+            ];
+            for run in runs {
+                assert_eq!(run.0, base.0, "{format} {sql}: {}", run.2);
+                assert_eq!(run.1, base.1, "{format} {sql}");
+            }
+        }
+    }
+}

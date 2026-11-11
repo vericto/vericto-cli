@@ -76,21 +76,25 @@ pub fn ruleset_version() -> String {
 /// systems set. A miss here only means a CI job without credentials runs
 /// offline, and says so on stderr and in every output format.
 pub fn in_ci() -> bool {
-    const VARS: &[&str] = &[
-        "CI",
-        "GITHUB_ACTIONS",
-        "GITLAB_CI",
-        "BUILDKITE",
-        "CIRCLECI",
-        "JENKINS_URL",
-        "TF_BUILD",
-        "BITBUCKET_BUILD_NUMBER",
-        "TEAMCITY_VERSION",
-        "CODEBUILD_BUILD_ID",
-    ];
-    VARS.iter()
+    CI_ENV_VARS
+        .iter()
         .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()))
 }
+
+/// The variables `in_ci` looks at: one of them set and not empty means CI.
+/// The connect tip (`nudge`) uses the same list.
+pub const CI_ENV_VARS: &[&str] = &[
+    "CI",
+    "GITHUB_ACTIONS",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "CIRCLECI",
+    "JENKINS_URL",
+    "TF_BUILD",
+    "BITBUCKET_BUILD_NUMBER",
+    "TEAMCITY_VERSION",
+    "CODEBUILD_BUILD_ID",
+];
 
 /// Why an offline check could not run at all.
 #[derive(Debug, PartialEq, Eq)]

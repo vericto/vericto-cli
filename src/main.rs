@@ -14,6 +14,7 @@ mod baseline;
 mod browser_login;
 mod ci_env;
 mod config;
+mod nudge;
 mod offline;
 mod oidc;
 mod output;
@@ -1513,7 +1514,11 @@ async fn run_check(args: CheckArgs) -> ExitCode {
                 return ExitCode::from(exit::USAGE);
             }
         };
-        return finish_check(&args, resp, files, baseline_path, fail_on);
+        let code = finish_check(&args, resp, files, baseline_path, fail_on);
+        if code == ExitCode::from(exit::OK) || code == ExitCode::from(exit::FINDING) {
+            show_connect_nudge(&args, has_static_key, &file, &project);
+        }
+        return code;
     }
 
     // Pre-flight (§6.2): learn the workspace's telemetry query mode BEFORE
@@ -1612,6 +1617,41 @@ async fn run_check(args: CheckArgs) -> ExitCode {
     }
 
     finish_check(&args, resp, files, baseline_path, fail_on)
+}
+
+/// The one-time connect tip after an offline check that produced a result
+/// (see `nudge`). Stderr only, no request; it never changes the exit code.
+fn show_connect_nudge(
+    args: &CheckArgs,
+    has_static_key: bool,
+    file: &Config,
+    project: &config::ProjectConfig,
+) {
+    let token_env = args
+        .oidc_token_env
+        .clone()
+        .or_else(|| project.oidc_token_env.clone())
+        .unwrap_or_else(|| oidc::DEFAULT_GITLAB_TOKEN_ENV.to_string());
+    let authenticated = has_static_key
+        || args.oidc
+        || args.workspace.is_some()
+        || file.workspace_id.is_some()
+        || project.workspace_id.is_some()
+        || oidc::availability(&token_env).is_some();
+    let var = |name: &str| std::env::var_os(name);
+    let ctx = nudge::Context {
+        stderr_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stderr()),
+        text_format: args.format == Format::Text,
+        quiet: args.quiet,
+        authenticated,
+        var: &var,
+    };
+    nudge::maybe_show(
+        &ctx,
+        nudge::state_path().as_deref(),
+        env!("CARGO_PKG_VERSION"),
+        &mut std::io::stderr(),
+    );
 }
 
 /// Renders a check's verdict and turns it into the exit code: output, receipt,
