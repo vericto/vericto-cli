@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-10
+
 ### Added
 - **A one-time tip to connect a workspace, after an offline check.** When an
   interactive `vericto check` ran offline with no credential and produced a
