@@ -551,6 +551,7 @@ pub fn render_ci_failure_summary(
     files: &[String],
     on_github: bool,
     fail_on: &str,
+    hint: IgnoreHint,
 ) {
     if failing.is_empty() {
         return;
@@ -620,18 +621,51 @@ pub fn render_ci_failure_summary(
         err,
         "{dim}This is Vericto enforcing a rule — the exit code is intentional, not a crash.{dim:#}"
     );
-    let _ = writeln!(
-        err,
-        "{dim}To allow a finding on purpose, add an inline comment on the statement:{dim:#}"
-    );
-    let _ = writeln!(
-        err,
-        "{dim}    -- vericto:ignore[{rule}] <reason>   (a reason is required){dim:#}",
-        rule = failing
-            .iter()
-            .find_map(|q| q.rule_code.as_deref())
-            .unwrap_or("RULE"),
-    );
+    let rule = failing
+        .iter()
+        .find_map(|q| q.rule_code.as_deref())
+        .unwrap_or("RULE");
+    for line in ignore_hint_lines(hint, rule) {
+        let _ = writeln!(err, "{dim}{line}{dim:#}");
+    }
+}
+
+/// Where the failing findings came from, for the escape hatch the failure
+/// summary suggests. An inline `-- vericto:ignore[RULE] reason` is honoured in
+/// files (reviewed in version control) and, only with `--allow-inline-ignore`,
+/// in `--sql` / stdin input, which nobody reviews.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IgnoreHint {
+    /// Every failing finding is in a file (or `--allow-inline-ignore` is set).
+    Files,
+    /// Every failing finding is in `--sql` / stdin input, without the flag.
+    Inline,
+    /// Some of each.
+    Both,
+}
+
+/// The lines of the failure summary that say how to allow a finding.
+pub(crate) fn ignore_hint_lines(hint: IgnoreHint, rule: &str) -> Vec<String> {
+    let comment = format!("    -- vericto:ignore[{rule}] <reason>   (a reason is required)");
+    match hint {
+        IgnoreHint::Files => vec![
+            "To allow a finding on purpose, add an inline comment on the statement:".to_string(),
+            comment,
+        ],
+        IgnoreHint::Inline => vec![
+            "Inline ignores are not honoured for --sql/stdin input. To allow a finding on \
+             purpose, put the SQL in a reviewed file with an inline comment on the statement:"
+                .to_string(),
+            comment,
+            "or pass --allow-inline-ignore to honour that comment in --sql/stdin input."
+                .to_string(),
+        ],
+        IgnoreHint::Both => vec![
+            "To allow a finding on purpose, add an inline comment on the statement:".to_string(),
+            comment,
+            "(in a file; for --sql/stdin input only with --allow-inline-ignore)".to_string(),
+        ],
+    }
 }
 
 /// The header of the CI failure summary. When every failing statement was
@@ -1181,8 +1215,8 @@ mod tests {
         // Empty failing set must not write annotations or panic (both branches).
         let files = vec!["m.sql".to_string()];
         let r = resp(vec![q("ALLOWED", None, None)]);
-        render_ci_failure_summary(&r, &[], &files, true, "--fail-on block");
-        render_ci_failure_summary(&r, &[], &files, false, "--fail-on block");
+        render_ci_failure_summary(&r, &[], &files, true, "--fail-on block", IgnoreHint::Files);
+        render_ci_failure_summary(&r, &[], &files, false, "--fail-on block", IgnoreHint::Files);
     }
 
     #[test]
@@ -1191,8 +1225,38 @@ mod tests {
         let files = vec!["m.sql".to_string()];
         let r = resp(vec![q("BLOCKED", Some("VERICTO-001"), Some("critical"))]);
         let failing: Vec<&QueryResult> = r.queries.iter().collect();
-        render_ci_failure_summary(&r, &failing, &files, true, "--fail-on block");
-        render_ci_failure_summary(&r, &failing, &files, false, "--fail-on block");
+        render_ci_failure_summary(
+            &r,
+            &failing,
+            &files,
+            true,
+            "--fail-on block",
+            IgnoreHint::Files,
+        );
+        render_ci_failure_summary(
+            &r,
+            &failing,
+            &files,
+            false,
+            "--fail-on block",
+            IgnoreHint::Inline,
+        );
+    }
+
+    /// The ignore comment is suggested for files; for `--sql`/stdin input the
+    /// summary says it needs `--allow-inline-ignore`.
+    #[test]
+    fn ignore_hint_depends_on_the_input() {
+        let files = ignore_hint_lines(IgnoreHint::Files, "VERICTO-001").join("\n");
+        assert!(files.contains("-- vericto:ignore[VERICTO-001] <reason>"));
+        assert!(!files.contains("--allow-inline-ignore"));
+        let inline = ignore_hint_lines(IgnoreHint::Inline, "VERICTO-010").join("\n");
+        assert!(inline.contains("not honoured for --sql/stdin"));
+        assert!(inline.contains("reviewed file"));
+        assert!(inline.contains("--allow-inline-ignore"));
+        assert!(inline.contains("vericto:ignore[VERICTO-010]"));
+        let both = ignore_hint_lines(IgnoreHint::Both, "VERICTO-001").join("\n");
+        assert!(both.contains("only with --allow-inline-ignore"));
     }
 
     #[test]

@@ -346,6 +346,14 @@ pub struct ProjectConfig {
     /// token itself lives only in the CI env, never in this file.
     #[serde(default)]
     pub oidc_token_env: Option<String>,
+    /// Paths (relative to the repo root) whose files `check --offline` treats
+    /// as versioned migrations, in addition to the directories and file names
+    /// it recognises on its own (`crate::migration`): the CI profile's schema
+    /// DDL cap (DROP TABLE, ALTER TABLE… reported as FLAGGED) applies to
+    /// migrations only. Safe to commit, and meant to be reviewed: it only
+    /// says which files are migrations.
+    #[serde(default)]
+    pub migration_paths: Vec<String>,
     // Trap fields: present only to detect and reject secrets/decisions that must
     // not live in a committed file (see load_project's validation).
     #[serde(default)]

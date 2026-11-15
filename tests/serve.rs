@@ -96,46 +96,54 @@ fn hello_names_protocol_versions_and_profiles() {
     assert_eq!(hello["type"], "hello");
     assert_eq!(hello["protocol"], 1);
     assert_eq!(hello["cli_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(hello["engine_version"], "5.0.0");
+    assert_eq!(hello["engine_version"], "5.1.0");
     assert_eq!(hello["profiles"], serde_json::json!(["runtime", "ci"]));
     assert_eq!(hello["max_line_bytes"], 1024 * 1024);
     let (code, rest) = s.finish();
     assert_eq!((code, rest.as_str()), (Some(0), ""), "EOF exits 0");
 }
 
-/// `runtime` (the default) blocks a DROP TABLE; `ci` caps it at FLAGGED, and
-/// its result is byte for byte what `check --offline --format json` prints.
+/// `runtime` (the default) blocks a DROP TABLE; `ci` caps it at FLAGGED in a
+/// migration (`"migration": true`, 2.3.0) and blocks it otherwise, and its
+/// result is byte for byte what `check --offline --format json` prints.
 #[cfg(feature = "offline")]
 #[test]
 fn check_runtime_vs_ci_on_drop_table() {
     let (mut s, _) = started();
     let sql = "DROP TABLE users;";
-    for (profile, status, action, exit) in [
-        (None, "BLOCKED", "block", 1),
-        (Some("runtime"), "BLOCKED", "block", 1),
-        (Some("ci"), "FLAGGED", "flag", 0),
+    for (profile, migration, status, action, exit) in [
+        (None, None, "BLOCKED", "block", 1),
+        (Some("runtime"), None, "BLOCKED", "block", 1),
+        (Some("runtime"), Some(true), "BLOCKED", "block", 1),
+        (Some("ci"), None, "BLOCKED", "block", 1),
+        (Some("ci"), Some(false), "BLOCKED", "block", 1),
+        (Some("ci"), Some(true), "FLAGGED", "flag", 0),
     ] {
         let mut req =
             serde_json::json!({"id": "d", "op": "check", "sql": sql, "dialect": "postgres"});
         if let Some(p) = profile {
             req["profile"] = p.into();
         }
+        if let Some(m) = migration {
+            req["migration"] = m.into();
+        }
         let r = s.call(req);
         assert_eq!(r["id"], "d");
         assert_eq!(r["ok"], true, "{r}");
         let q = &r["result"]["queries"][0];
-        assert_eq!(q["status"], status, "{profile:?}: {r}");
+        assert_eq!(q["status"], status, "{profile:?} {migration:?}: {r}");
         assert_eq!(q["action"], action);
         assert_eq!(q["rule_code"], "VERICTO-010");
         assert_eq!(r["result"]["exit_code"], exit);
         assert_eq!(r["result"]["mode"], "offline");
         assert_eq!(
             r["result"]["summary"]["ruleset_version"],
-            "standard@engine-5.0.0"
+            "standard@engine-5.1.0"
         );
     }
 
-    // Parity with the CLI's own JSON for the ci profile.
+    // Parity with the CLI's own JSON for the ci profile (stdin: not a
+    // migration).
     let r = s.call(serde_json::json!({"id": "p", "op": "check", "sql": sql, "profile": "ci"}));
     let out = Command::new(assert_cmd::cargo::cargo_bin("vericto"))
         .args(["check", "--offline", "--format", "json", "-"])
@@ -155,13 +163,13 @@ fn check_runtime_vs_ci_on_drop_table() {
 
 /// Several statements in one request are one input, reported like a file:
 /// one result with the strongest finding (the WHERE-less UPDATE blocks even
-/// though the DROP is only flagged under `ci`).
+/// though the DROP is only flagged in a `ci` migration).
 #[cfg(feature = "offline")]
 #[test]
 fn multi_statement_input_reports_the_strongest_finding() {
     let (mut s, _) = started();
     let r = s.call(serde_json::json!({
-        "id": "m", "op": "check", "profile": "ci",
+        "id": "m", "op": "check", "profile": "ci", "migration": true,
         "sql": "DROP TABLE a;\nUPDATE accounts SET balance = 0;\nSELECT 1;",
     }));
     assert_eq!(r["result"]["summary"]["total"], 1);
@@ -278,7 +286,7 @@ fn a_thousand_pipelined_requests_are_all_answered_in_order() {
                     serde_json::json!({"id": i.to_string(), "op": "check", "sql": "DELETE FROM users"})
                 }
                 1 => {
-                    serde_json::json!({"id": i.to_string(), "op": "check", "sql": "DROP TABLE t", "profile": "ci"})
+                    serde_json::json!({"id": i.to_string(), "op": "check", "sql": "DROP TABLE t", "profile": "ci", "migration": true})
                 }
                 _ => serde_json::json!({"id": i.to_string(), "op": "ping"}),
             };

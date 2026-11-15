@@ -27,7 +27,7 @@ error and exits `2`.
 Before reading any request, the server writes one hello line:
 
 ```json
-{"type":"hello","protocol":1,"cli_version":"2.1.0","engine_version":"5.0.0","profiles":["runtime","ci"],"max_line_bytes":1048576}
+{"type":"hello","protocol":1,"cli_version":"2.3.0","engine_version":"5.1.0","profiles":["runtime","ci"],"max_line_bytes":1048576}
 ```
 
 | Field | Meaning |
@@ -57,17 +57,21 @@ server may add fields within protocol 1.
 | `sql` | yes | The SQL text, with one or more statements. Must not be empty or whitespace only. |
 | `dialect` | no, default `postgres` | `postgres`, `mysql`, `oracle`, `mssql`, `snowflake`, `sqlite`, or the aliases the engine also accepts (`postgresql`, `sqlserver`, `tsql`, `sqlite3`). |
 | `profile` | no, default `runtime` | `runtime` or `ci`, see below. |
+| `migration` | no, default `false` | Under `ci`: whether the SQL is a versioned migration, see below. Ignored under `runtime`. Since CLI 2.3.0; older servers ignore it. |
 
-Unknown fields are ignored. A `null` `dialect` or `profile` counts as absent.
+Unknown fields are ignored. A `null` `dialect`, `profile` or `migration`
+counts as absent. A `migration` that is not a boolean is `INVALID_REQUEST`.
 
 Response:
 
 ```json
-{"id":"42","ok":true,"result":{"summary":{…},"queries":[…],"exit_code":1,"mode":"offline","engine_version":"5.0.0"}}
+{"id":"42","ok":true,"result":{"summary":{…},"queries":[…],"exit_code":1,"mode":"offline","engine_version":"5.1.0"}}
 ```
 
 `result` is exactly the JSON document that `vericto check --offline --format
-json` prints for the same SQL (under the `ci` profile), as one compact value.
+json` prints for the same SQL (under the `ci` profile: for `--sql` or stdin
+without `migration`, for a migration file with `"migration": true`), as one
+compact value.
 The document is built by the same function:
 
 - `summary`: `total`, `blocked`, `allowed`, `flagged`, `monitored`,
@@ -84,8 +88,9 @@ The document is built by the same function:
 **Granularity.** Each request is one input, as a file is for `check
 --offline`. Several statements in one `sql` produce one result: the finding
 with the strongest action across all of them. In `DROP TABLE a; UPDATE
-accounts SET balance = 0;` the result is BLOCKED by `VERICTO-030`, under both
-profiles. To get a verdict per statement, send each statement as its own
+accounts SET balance = 0;` the result is BLOCKED under both profiles: by
+`VERICTO-030` in a `ci` migration (the DROP is only flagged there), and by
+`VERICTO-010` otherwise (both block; the lower code is reported). To get a verdict per statement, send each statement as its own
 request.
 
 **Size.** Input over 10 MiB is a `PARSE_ERROR` result, as in `check
@@ -100,9 +105,14 @@ The hosted API has two channels, and they differ in one setting only:
   /api/v1/proxy/query`), MCP `check_sql` and the proxy's local mode. There is
   no schema-migration cap, so `DROP TABLE users` is BLOCKED (`VERICTO-010`,
   action `block`).
-- **`ci`** matches `vericto check --offline` and `POST /api/v1/ci/check-key`.
-  The DDL rules VERICTO-010..019 (DROP, ALTER, TRUNCATE…) are capped at
-  FLAGGED, so `DROP TABLE users` is FLAGGED (action `flag`, `exit_code` 0).
+- **`ci`** matches `vericto check --offline`. With `"migration": true` the
+  engine's schema DDL rules (DROP TABLE, ALTER TABLE, DROP INDEX / TRIGGER,
+  the Snowflake and SQLite schema rules) are capped at FLAGGED, as in a
+  migration file, so `DROP TABLE users` is FLAGGED (action `flag`,
+  `exit_code` 0). Without it (CLI 2.3.0 and later) the SQL is checked as
+  `check --offline --sql` checks it, exactly like `runtime`: `DROP TABLE
+  users` is BLOCKED. Until 2.2.0 every `ci` request was capped. TRUNCATE and
+  DROP SCHEMA / DATABASE are never capped (engine 5.1.0).
 
 Everything else is the same under both profiles: the 42 standard rules at
 their default severities (Critical and High block, Medium flags, Low is
@@ -191,9 +201,9 @@ not parse it.
 
 ```text
 $ vericto serve --stdio
-{"cli_version":"2.1.0","engine_version":"5.0.0","max_line_bytes":1048576,"profiles":["runtime","ci"],"protocol":1,"type":"hello"}
+{"cli_version":"2.3.0","engine_version":"5.1.0","max_line_bytes":1048576,"profiles":["runtime","ci"],"protocol":1,"type":"hello"}
 {"id":"1","op":"check","sql":"DROP TABLE users"}
-{"id":"1","ok":true,"result":{"engine_version":"5.0.0","exit_code":1,"mode":"offline","queries":[{"action":"block","ast_node_path":"DropStmt","file_index":null,"line":1,"rule_code":"VERICTO-010","severity":"critical","sql_preview":"DROP TABLE users","status":"BLOCKED","suggested_fix":"Use a versioned migration tool (Flyway, Prisma Migrate, Alembic, Rails migrations)"}],"summary":{"allowed":0,"blocked":1,"flagged":0,"monitored":0,"parse_errors":0,"ruleset_version":"standard@engine-5.0.0","total":1}}}
+{"id":"1","ok":true,"result":{"engine_version":"5.1.0","exit_code":1,"mode":"offline","queries":[{"action":"block","ast_node_path":"DropStmt","file_index":null,"line":1,"rule_code":"VERICTO-010","severity":"critical","sql_preview":"DROP TABLE users","status":"BLOCKED","suggested_fix":"Use a versioned migration tool (Flyway, Prisma Migrate, Alembic, Rails migrations)"}],"summary":{"allowed":0,"blocked":1,"flagged":0,"monitored":0,"parse_errors":0,"ruleset_version":"standard@engine-5.1.0","total":1}}}
 {"id":"2","op":"ping"}
 {"id":"2","ok":true}
 {"op":"shutdown"}
