@@ -80,6 +80,8 @@ first if you run `vericto check --offline` in CI or use `vericto serve`'s
   handling) and the quinn-udp receive-loop advisory, all flagged by
   cargo-audit. They are listed in the lockfile as optional dependencies of
   reqwest (HTTP/3) and are not compiled into the CLI; the bump clears the audit.
+- **rustix 1.1.6** (`Cargo.lock` only), for RUSTSEC-2026-0486 (xattr functions
+  with a zero-length buffer).
 
 ### Tests
 - `migration.rs` unit tests (directories, file names, `migration_paths`,
