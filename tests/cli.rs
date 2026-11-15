@@ -3878,7 +3878,7 @@ fn no_credential_outside_ci_checks_offline() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("mode: offline (engine 5.0.0, 42 standard rules"),
+        stdout.contains("mode: offline (engine 5.1.0, 42 standard rules"),
         "{stdout}"
     );
 }
@@ -3910,14 +3910,14 @@ fn offline_json_names_mode_engine_and_ruleset() {
         .write_stdin("DROP TABLE users;")
         .output()
         .unwrap();
-    // DROP TABLE is FLAGGED in CI (schema-migration cap), so the default
-    // --fail-on block passes.
-    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    // stdin is not a migration: since 2.3.0 DROP TABLE blocks there, as at
+    // run time (the CI schema-migration cap is for migration files).
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["mode"], "offline");
-    assert_eq!(v["engine_version"], "5.0.0");
-    assert_eq!(v["summary"]["ruleset_version"], "standard@engine-5.0.0");
-    assert_eq!(v["queries"][0]["status"], "FLAGGED");
+    assert_eq!(v["engine_version"], "5.1.0");
+    assert_eq!(v["summary"]["ruleset_version"], "standard@engine-5.1.0");
+    assert_eq!(v["queries"][0]["status"], "BLOCKED");
     assert_eq!(v["queries"][0]["rule_code"], "VERICTO-010");
 }
 
@@ -3932,6 +3932,28 @@ fn offline_run(format: &str, sql: &str) -> (Option<i32>, String) {
     (out.status.code(), stdout_of(&out))
 }
 
+/// `offline_run` on a migration file, `migrations/0001_init.sql` relative to
+/// a fresh working directory: the CI schema-migration cap applies.
+#[cfg(feature = "offline")]
+fn offline_run_migration(format: &str, sql: &str) -> (Option<i32>, String) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("migrations")).unwrap();
+    std::fs::write(dir.path().join("migrations").join("0001_init.sql"), sql).unwrap();
+    let out = vericto()
+        .current_dir(dir.path())
+        .args([
+            "check",
+            "--offline",
+            "--no-color",
+            "--format",
+            format,
+            "migrations/0001_init.sql",
+        ])
+        .output()
+        .unwrap();
+    (out.status.code(), stdout_of(&out))
+}
+
 /// Every output format states the mode, the engine version and the ruleset
 /// version.
 #[cfg(feature = "offline")]
@@ -3941,7 +3963,7 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
     let (_, text) = offline_run("text", sql);
     assert!(
         text.contains(
-            "(ruleset standard@engine-5.0.0 · mode: offline (engine 5.0.0, 42 standard rules"
+            "(ruleset standard@engine-5.1.0 · mode: offline (engine 5.1.0, 42 standard rules"
         ),
         "{text}"
     );
@@ -3955,16 +3977,16 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
         ),
         (
             &serde_json::json!("offline"),
-            &serde_json::json!("5.0.0"),
-            &serde_json::json!("standard@engine-5.0.0")
+            &serde_json::json!("5.1.0"),
+            &serde_json::json!("standard@engine-5.1.0")
         )
     );
     let (_, sarif) = offline_run("sarif", sql);
     let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
     let props = &v["runs"][0]["properties"];
     assert_eq!(props["mode"], "offline");
-    assert_eq!(props["engine_version"], "5.0.0");
-    assert_eq!(props["ruleset_version"], "standard@engine-5.0.0");
+    assert_eq!(props["engine_version"], "5.1.0");
+    assert_eq!(props["ruleset_version"], "standard@engine-5.1.0");
     for (format, field) in [
         ("gitlab-codequality", "/0/description"),
         ("gitlab-sast", "/vulnerabilities/0/message"),
@@ -3976,8 +3998,8 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
             .and_then(|m| m.as_str())
             .unwrap_or_default();
         assert!(
-            msg.contains("mode: offline (engine 5.0.0")
-                && msg.contains("ruleset standard@engine-5.0.0"),
+            msg.contains("mode: offline (engine 5.1.0")
+                && msg.contains("ruleset standard@engine-5.1.0"),
             "{format}: {v}"
         );
     }
@@ -3987,19 +4009,20 @@ fn every_offline_format_names_mode_engine_and_ruleset() {
 /// CLI 1.9.0 corrected engine 4.1.3's severity-first winner locally): a
 /// capped DROP TABLE (Critical, FLAG) must not hide the WHERE-less UPDATE
 /// (Critical, BLOCK) after it. Every format reports BLOCKED and the run fails.
+/// A migration file, the only input where DROP TABLE is capped (2.3.0).
 #[cfg(feature = "offline")]
 #[test]
 fn offline_strongest_action_blocks_in_every_format() {
     let sql = "DROP TABLE a; UPDATE accounts SET balance = 0;";
-    let (code, text) = offline_run("text", sql);
+    let (code, text) = offline_run_migration("text", sql);
     assert_eq!(code, Some(1), "{text}");
     assert!(
-        text.contains("BLOCKED <stdin>  VERICTO-030 critical"),
+        text.contains("BLOCKED migrations/0001_init.sql  VERICTO-030 critical"),
         "{text}"
     );
     assert!(text.contains("1 blocked · 0 allowed · 0 flagged"), "{text}");
 
-    let (code, json) = offline_run("json", sql);
+    let (code, json) = offline_run_migration("json", sql);
     assert_eq!(code, Some(1));
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["queries"][0]["status"], "BLOCKED");
@@ -4009,21 +4032,21 @@ fn offline_strongest_action_blocks_in_every_format() {
     assert_eq!(v["summary"]["flagged"], 0);
     assert_eq!(v["exit_code"], 1);
 
-    let (code, sarif) = offline_run("sarif", sql);
+    let (code, sarif) = offline_run_migration("sarif", sql);
     assert_eq!(code, Some(1));
     let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
     let r = &v["runs"][0]["results"][0];
     assert_eq!(r["ruleId"], "VERICTO-030");
     assert_eq!(r["level"], "error");
 
-    let (code, cq) = offline_run("gitlab-codequality", sql);
+    let (code, cq) = offline_run_migration("gitlab-codequality", sql);
     assert_eq!(code, Some(1));
     let v: serde_json::Value = serde_json::from_str(&cq).unwrap();
     assert_eq!(v.as_array().map(Vec::len), Some(1), "{v}");
     assert_eq!(v[0]["check_name"], "VERICTO-030");
     assert_eq!(v[0]["severity"], "blocker");
 
-    let (code, sast) = offline_run("gitlab-sast", sql);
+    let (code, sast) = offline_run_migration("gitlab-sast", sql);
     assert_eq!(code, Some(1));
     let v: serde_json::Value = serde_json::from_str(&sast).unwrap();
     assert_eq!(v["vulnerabilities"][0]["name"], "VERICTO-030");
@@ -4824,4 +4847,248 @@ fn connect_nudge_leaves_stdout_and_exit_code_unchanged() {
             }
         }
     }
+}
+
+/// 2.3.0: the CI profile's schema DDL cap applies to migration files only. A
+/// DROP TABLE in a migration is FLAGGED (exit 0); in `--sql`, stdin or an
+/// ordinary file it is BLOCKED (exit 1), with a note saying why.
+#[cfg(feature = "offline")]
+#[test]
+fn offline_drop_table_is_flagged_only_in_migration_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |rel: &str| {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "DROP TABLE legacy_users;\n").unwrap();
+    };
+    for rel in [
+        "db/migrate/20260101000000_drop_legacy.sql",
+        "sql/V2__drop_legacy.sql",
+        "sql/0002_drop.up.sql",
+        "drizzle/0001_drop.sql",
+        "schema/drop.sql",
+    ] {
+        write(rel);
+    }
+    let run = |rel: &str| {
+        vericto()
+            .current_dir(dir.path())
+            .args(["check", "--offline", "--no-color", "--format", "json", rel])
+            .output()
+            .unwrap()
+    };
+    for rel in [
+        "db/migrate/20260101000000_drop_legacy.sql",
+        "sql/V2__drop_legacy.sql",
+        "sql/0002_drop.up.sql",
+    ] {
+        let out = run(rel);
+        assert_eq!(out.status.code(), Some(0), "{rel}: {}", stderr_of(&out));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["queries"][0]["status"], "FLAGGED", "{rel}");
+    }
+    for rel in ["drizzle/0001_drop.sql", "schema/drop.sql"] {
+        let out = run(rel);
+        assert_eq!(out.status.code(), Some(1), "{rel}: {}", stderr_of(&out));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["queries"][0]["status"], "BLOCKED", "{rel}");
+        assert!(
+            stderr_of(&out).contains("note: VERICTO-010 is schema DDL"),
+            "{}",
+            stderr_of(&out)
+        );
+    }
+    // `.vericto.toml` names more migration paths.
+    std::fs::write(
+        dir.path().join(".vericto.toml"),
+        "migration_paths = [\"drizzle\"]\n",
+    )
+    .unwrap();
+    assert_eq!(run("drizzle/0001_drop.sql").status.code(), Some(0));
+    assert_eq!(run("schema/drop.sql").status.code(), Some(1));
+    // --sql is never a migration, whatever the config says.
+    let out = vericto()
+        .current_dir(dir.path())
+        .args(["check", "--offline", "--sql", "DROP TABLE users"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    // TRUNCATE (engine 5.1.0) blocks in a migration too.
+    std::fs::write(
+        dir.path().join("db/migrate/20260101000000_drop_legacy.sql"),
+        "TRUNCATE audit_log;\n",
+    )
+    .unwrap();
+    let out = run("db/migrate/20260101000000_drop_legacy.sql");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["queries"][0]["rule_code"], "VERICTO-011");
+}
+
+/// 2.3.0: an inline `-- vericto:ignore[RULE] reason` in `--sql` / stdin input
+/// is honoured only with `--allow-inline-ignore` (that text is not reviewed and
+/// may come from the agent being checked). Without the flag it is reported in
+/// a note and the exit code stays; files keep honouring ignores.
+#[cfg(feature = "offline")]
+#[test]
+fn offline_inline_ignore_in_sql_and_stdin_needs_the_flag() {
+    let ignored =
+        "DELETE FROM users -- vericto:ignore[VERICTO-001] nightly reset of a scratch table";
+    let sql_run = |extra: &[&str], sql: &str| {
+        vericto()
+            .args(["check", "--offline", "--no-color"])
+            .args(extra)
+            .args(["--sql", sql])
+            .output()
+            .unwrap()
+    };
+
+    // 1) --sql without the flag: not suppressed, said so, exit unchanged.
+    let out = sql_run(&[], ignored);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(
+            "note: <inline>: inline ignores are not honoured for --sql/stdin; pass \
+             --allow-inline-ignore or put the SQL in a reviewed file"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("suppressed inline"), "{err}");
+    // The block message points at the flag and at a reviewed file.
+    assert!(
+        err.contains("Inline ignores are not honoured for --sql/stdin input"),
+        "{err}"
+    );
+    assert!(err.contains("or pass --allow-inline-ignore"), "{err}");
+
+    // 2) --sql with the flag: honoured exactly as in a file.
+    let out = sql_run(&["--allow-inline-ignore"], ignored);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains(
+            "note: <inline>: VERICTO-001 suppressed inline — nightly reset of a scratch table"
+        ),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(stdout_of(&out).contains("BLOCKED"), "{}", stdout_of(&out));
+    // Reason required and code must match, with the flag too.
+    for sql in [
+        "DELETE FROM users -- vericto:ignore[VERICTO-001]",
+        "DELETE FROM users -- vericto:ignore[VERICTO-003] wrong rule",
+    ] {
+        assert_eq!(
+            sql_run(&["--allow-inline-ignore"], sql).status.code(),
+            Some(1),
+            "{sql}"
+        );
+    }
+    // One --sql entry's ignore does not cover another entry.
+    let out = vericto()
+        .args([
+            "check",
+            "--offline",
+            "--allow-inline-ignore",
+            "--sql",
+            "DELETE FROM a -- vericto:ignore[VERICTO-001] approved",
+            "--sql",
+            "DELETE FROM b",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+
+    // stdin: the same rule, both ways.
+    let piped = "-- vericto:ignore[VERICTO-001] one-off backfill, JIRA-42\nDELETE FROM users;\n";
+    let out = vericto()
+        .args(["check", "--offline", "--no-color", "-"])
+        .write_stdin(piped)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("note: <stdin>: inline ignores are not honoured"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = vericto()
+        .args([
+            "check",
+            "--offline",
+            "--no-color",
+            "--allow-inline-ignore",
+            "-",
+        ])
+        .write_stdin(piped)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out)
+            .contains("note: <stdin>: VERICTO-001 suppressed inline — one-off backfill, JIRA-42"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    // 3) A file honours its ignore without any flag, and a failing file's
+    //    message suggests the comment without mentioning the flag.
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("purge.sql");
+    std::fs::write(&f, format!("{ignored};\n")).unwrap();
+    let out = vericto()
+        .args(["check", "--offline", "--no-color", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("VERICTO-001 suppressed inline"),
+        "{}",
+        stderr_of(&out)
+    );
+    std::fs::write(&f, "DELETE FROM users;\n").unwrap();
+    let out = vericto()
+        .args(["check", "--offline", "--no-color", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("add an inline comment on the statement"),
+        "{err}"
+    );
+    assert!(!err.contains("--allow-inline-ignore"), "{err}");
+}
+
+/// The same online: the backend's result for an `--sql` entry is suppressed
+/// by the ignore in that entry only with `--allow-inline-ignore`.
+#[tokio::test]
+async fn online_inline_ignore_in_sql_needs_the_flag() {
+    let server = mock_backend(check_body(&["BLOCKED"]), "raw").await;
+    let sql = "DELETE FROM payments -- vericto:ignore[VERICTO-001] archived ledger, FIN-7";
+    let out = vericto()
+        .args(["check", "--sql", sql])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("inline ignores are not honoured for --sql/stdin"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = vericto()
+        .args(["check", "--allow-inline-ignore", "--sql", sql])
+        .env("VERICTO_API_KEY", "vtro_k")
+        .env("VERICTO_API_URL", server.uri())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out)
+            .contains("<inline>: VERICTO-001 suppressed inline — archived ledger, FIN-7"),
+        "{}",
+        stderr_of(&out)
+    );
 }

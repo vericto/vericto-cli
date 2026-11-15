@@ -989,7 +989,15 @@ turns the build red on day one — the fastest way to get uninstalled. So:
   `--fail-on` trip the exit code.
 - Inline suppression: a `-- vericto:ignore[VERICTO-001] reason` comment on/above a
   statement suppresses that one finding (reason required, surfaced in reports for
-  auditability).
+  auditability). In `--sql` entries and stdin (whose text is kept in memory,
+  since it cannot be read again from a path) it is honoured only with
+  `--allow-inline-ignore` (2.3.0, no environment variable): that text is not
+  reviewed and may come from the agent being checked. Without the flag a
+  matching ignore is reported in a note and the exit code stays; the failure
+  message suggests the comment only for files and names the flag for
+  `--sql`/stdin. Only `check`'s exit code reads it: `serve`, the SDKs, MCP,
+  the Runtime API and the proxy never do, so SQL cannot approve itself where
+  it runs.
 - Baseline drift (a baselined finding that disappeared) is reported so stale
   entries can be pruned.
 - **`vericto baseline prune [files...] [--file <baseline>] [--dry-run]`** (✅ —
@@ -1193,7 +1201,7 @@ distributed, and nothing an offline run produces passes for the workspace's
 verdict or its audit record.
 
 **The decision.** `vericto check --offline` evaluates locally with the
-embedded engine (`vericto-engine` 5.0.0, pinned by tag) and its **standard
+embedded engine (`vericto-engine` 5.1.0, pinned by tag) and its **standard
 rules at their default severities**:
 
 - **Rule set:** the 42 standard rules, the engine's own standard ruleset
@@ -1205,9 +1213,15 @@ rules at their default severities**:
 - **Policy:** what a CI check gets in a workspace with no overrides —
   `EnforcementPolicy::default()` (Critical/High → BLOCK, Medium → FLAG,
   Low/Informational → MONITOR, parse errors allowed and reported) plus the CI
-  channel's `schema_migration_cap = flag`, as the backend sets for every CI
-  check. Without the cap a migration's DROP/ALTER would block offline and only
-  flag online.
+  channel's `schema_migration_cap = flag` **for migration inputs**
+  (`src/migration.rs`: a `migrations` / `migration` / `migrate` directory, a
+  Flyway or golang-migrate file name, or `.vericto.toml`'s
+  `migration_paths`). Since 2.3.0 every other input (`--sql`, stdin, any other
+  file) gets the engine default without the cap, as at run time: the cap
+  exists because a migration legitimately drops and alters tables, and an
+  ad-hoc `DROP TABLE` is not a migration. The backend still caps every online
+  CI check; it is expected to follow (it receives the file paths in
+  per-statement mode).
 - **Statuses:** vericto-eval's mapping (`ALLOWED`, `MONITORED`, `FLAGGED`,
   `BLOCKED`, `PARSE_ERROR`), so a result reads the same in both modes.
 - **Granularity:** one result per input file (the shape older backends return,
@@ -1540,7 +1554,8 @@ link to. In short:
   `UNSUPPORTED_DIALECT`, `TOO_LARGE` or `INTERNAL`. `id` is null when the line
   had no usable id, and the server keeps running after every error.
 - **Profiles.** `ci` is `offline::Profile::Ci`, the policy of `check
-  --offline`: the engine default plus `schema_migration_cap = Flag`.
+  --offline`: the engine default, plus `schema_migration_cap = Flag` when the
+  request says `"migration": true` (2.3.0).
   `runtime` is the engine default without the cap, the policy of the Runtime
   API, MCP `check_sql` and the proxy's local mode. That one setting is the
   only difference between the two (§13).

@@ -10,11 +10,23 @@
 //! `vericto-proxy` seeds as its built-in ruleset, kept equal to the engine's
 //! catalogue by a test below), the engine's default enforcement policy
 //! (Critical/High → BLOCK, Medium → FLAG, Low → MONITOR, parse errors allowed
-//! and reported), plus the CI channel's schema-migration cap: DROP/ALTER/
-//! TRUNCATE are FLAGGED, not BLOCKED, as the backend does for every CI check
-//! (`CI_SCHEMA_MIGRATION_CAP` in vericto-fmw's ci-service.ts). The status
+//! and reported), plus the CI channel's schema-migration cap: the engine's
+//! `SchemaMigration` rules (DROP TABLE, ALTER TABLE, DROP INDEX / TRIGGER, the
+//! Snowflake and SQLite schema rules) are FLAGGED, not BLOCKED. The status
 //! mapping is vericto-eval's (`proxy.rs`), so a result reads the same as the
 //! online one.
+//!
+//! Since 2.3.0 the cap applies to **migration inputs only** (`crate::migration`:
+//! a file under a `migrations` / `migration` / `migrate` directory, a Flyway
+//! or golang-migrate file name, or a path listed in `.vericto.toml`'s
+//! `migration_paths`). The cap exists because a versioned migration
+//! legitimately drops and alters tables; SQL passed with `--sql`, read from
+//! stdin, or in any other file is evaluated like the runtime channels, so a
+//! `DROP TABLE` there is BLOCKED. Until 2.2.0 every input was capped, as the
+//! backend still does for every online CI check (`CI_SCHEMA_MIGRATION_CAP`
+//! in vericto-fmw's ci-service.ts): offline and online differ there until the
+//! backend follows. TRUNCATE and DROP SCHEMA / DATABASE are never capped
+//! (engine 5.1.0 moved them out of `SchemaMigration`), online or offline.
 //!
 //! What it cannot reproduce, by construction: custom rules, severity and
 //! action overrides, sensitive columns and masking, agent allowlists, the
@@ -68,6 +80,19 @@ pub const STANDARD_RULE_COUNT: usize = 0;
 /// dashboards that read it keep working.
 pub fn ruleset_version() -> String {
     format!("standard@engine-{ENGINE_VERSION}")
+}
+
+/// Whether `code` is one of the engine's `SchemaMigration` rules, the ones
+/// the CI profile caps in migration inputs.
+#[cfg(feature = "offline")]
+pub fn is_schema_migration_rule(code: &str) -> bool {
+    vericto_engine::RuleClass::for_code(code) == vericto_engine::RuleClass::SchemaMigration
+}
+
+/// A build with no engine never reports an offline result.
+#[cfg(not(feature = "offline"))]
+pub fn is_schema_migration_rule(_code: &str) -> bool {
+    false
 }
 
 /// Whether this looks like a CI job, where a missing credential must stay an
@@ -124,11 +149,13 @@ impl std::fmt::Display for OfflineError {
 }
 
 /// Which hosted channel an offline evaluation reproduces. The two differ in
-/// one setting only, the schema-migration cap on DDL rules (VERICTO-010..019).
+/// one setting only, the schema-migration cap on the engine's
+/// `SchemaMigration` rules, which `Ci` applies to migration inputs only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
-    /// `POST /api/v1/ci/check-key`, i.e. `vericto check`: schema DDL (DROP,
-    /// ALTER, TRUNCATE) is capped at FLAGGED. What `check --offline` uses.
+    /// `POST /api/v1/ci/check-key`, i.e. `vericto check`: in a migration
+    /// input, schema DDL (DROP TABLE, ALTER TABLE…) is capped at FLAGGED;
+    /// any other input is evaluated as `Runtime`. What `check --offline` uses.
     Ci,
     /// The Runtime API (`POST /api/v1/proxy/query`), MCP `check_sql` and the
     /// proxy's local mode: no cap, so a DROP TABLE is BLOCKED. `vericto serve`
@@ -158,20 +185,26 @@ impl Profile {
     }
 }
 
-/// Evaluates every input locally under the CI profile (`check --offline`).
-pub fn check(queries: &[QueryInput], dialect: &str) -> Result<CheckResponse, OfflineError> {
-    check_with(queries, dialect, Profile::Ci)
+/// Evaluates every input locally under the CI profile (`check --offline`);
+/// `is_migration` says which inputs are migrations (the cap applies to them).
+pub fn check(
+    queries: &[QueryInput],
+    dialect: &str,
+    is_migration: &dyn Fn(&QueryInput) -> bool,
+) -> Result<CheckResponse, OfflineError> {
+    check_with(queries, dialect, Profile::Ci, is_migration)
 }
 
 /// Evaluates every input locally under `profile` and returns a response
 /// shaped exactly like the backend's, marked `RunMode::Offline`. No I/O of
-/// any kind.
+/// any kind. `is_migration` is read under `Profile::Ci` only.
 pub fn check_with(
     queries: &[QueryInput],
     dialect: &str,
     profile: Profile,
+    is_migration: &dyn Fn(&QueryInput) -> bool,
 ) -> Result<CheckResponse, OfflineError> {
-    let results = engine::evaluate_all(queries, dialect, profile)?;
+    let results = engine::evaluate_all(queries, dialect, profile, is_migration)?;
     let count = |s: &str| results.iter().filter(|q| q.status == s).count() as u32;
     let blocked = count("BLOCKED");
     Ok(CheckResponse {
@@ -271,18 +304,22 @@ mod engine {
         queries: &[QueryInput],
         dialect: &str,
         profile: Profile,
+        is_migration: &dyn Fn(&QueryInput) -> bool,
     ) -> Result<Vec<QueryResult>, OfflineError> {
         let dialect =
             Dialect::parse_dialect(dialect).map_err(|_| OfflineError::Dialect(dialect.into()))?;
         let rules = rules();
-        let policy = match profile {
-            Profile::Ci => ci_policy(),
-            Profile::Runtime => runtime_policy(),
-        };
+        let (ci, runtime) = (ci_policy(), runtime_policy());
         let parser = parser_for(dialect);
         Ok(queries
             .iter()
             .map(|q| {
+                // The cap is for migrations: any other input is evaluated as
+                // the runtime channels evaluate it.
+                let policy = match profile {
+                    Profile::Ci if is_migration(q) => &ci,
+                    Profile::Ci | Profile::Runtime => &runtime,
+                };
                 if q.sql.len() > MAX_INPUT_BYTES {
                     return parse_error(q.line, &q.sql);
                 }
@@ -293,7 +330,7 @@ mod engine {
                 // all violations (engine 4.2.0), and `rule_code` is the
                 // violation that holds it, so every output format and the exit
                 // code agree on it.
-                let o = RuleEngine::evaluate(&parsed, rules, &policy);
+                let o = RuleEngine::evaluate(&parsed, rules, policy);
                 // vericto-eval's mapping (proxy.rs), so statuses read the same.
                 let status = match (o.decision, o.action) {
                     (Decision::Allow, Some(EnforcementAction::Monitor)) => "MONITORED",
@@ -327,6 +364,7 @@ mod engine {
         _queries: &[QueryInput],
         _dialect: &str,
         _profile: Profile,
+        _is_migration: &dyn Fn(&QueryInput) -> bool,
     ) -> Result<Vec<QueryResult>, OfflineError> {
         Err(OfflineError::Unavailable)
     }
@@ -345,8 +383,20 @@ mod tests {
         }]
     }
 
+    /// Not a migration (`--sql`, stdin, an ordinary file).
     fn one(sql: &str, dialect: &str) -> QueryResult {
-        check(&q(sql), dialect).unwrap().queries.remove(0)
+        check(&q(sql), dialect, &|_| false)
+            .unwrap()
+            .queries
+            .remove(0)
+    }
+
+    /// A migration file: the schema DDL cap applies.
+    fn migration(sql: &str, dialect: &str) -> QueryResult {
+        check(&q(sql), dialect, &|_| true)
+            .unwrap()
+            .queries
+            .remove(0)
     }
 
     /// Offline evaluates the engine's whole standard ruleset: 42 rules, one per
@@ -393,13 +443,122 @@ mod tests {
         assert_eq!(r.action.as_deref(), Some("block"));
     }
 
-    /// The CI channel caps schema DDL at FLAG, as the backend does.
+    /// The CI channel caps schema DDL at FLAG in a migration (2.3.0: only
+    /// there); anywhere else a DROP TABLE blocks, as at run time.
     #[test]
-    fn drop_table_is_flagged_not_blocked() {
-        let r = one("DROP TABLE users", "postgres");
+    fn drop_table_is_flagged_in_a_migration_and_blocked_elsewhere() {
+        let r = migration("DROP TABLE users", "postgres");
         assert_eq!(r.status, "FLAGGED");
         assert_eq!(r.rule_code.as_deref(), Some("VERICTO-010"));
         assert_eq!(r.action.as_deref(), Some("flag"));
+        let r = migration("ALTER TABLE users DROP COLUMN email", "postgres");
+        assert_eq!(r.status, "FLAGGED");
+        assert_eq!(r.rule_code.as_deref(), Some("VERICTO-015"));
+        let r = one("DROP TABLE users", "postgres");
+        assert_eq!(r.status, "BLOCKED");
+        assert_eq!(r.rule_code.as_deref(), Some("VERICTO-010"));
+        assert_eq!(r.action.as_deref(), Some("block"));
+        let r = one("ALTER TABLE users DROP COLUMN email", "postgres");
+        assert_eq!(r.status, "BLOCKED");
+        assert_eq!(r.rule_code.as_deref(), Some("VERICTO-015"));
+    }
+
+    /// Engine 5.1.0: TRUNCATE and DROP SCHEMA / DATABASE are never capped,
+    /// in a migration either.
+    #[test]
+    fn truncate_and_namespace_drops_block_even_in_a_migration() {
+        for (sql, in_migration, elsewhere) in [
+            ("TRUNCATE audit_log", "VERICTO-011", "VERICTO-011"),
+            (
+                "COMMIT; DROP SCHEMA public CASCADE;",
+                "VERICTO-012",
+                "VERICTO-012",
+            ),
+            // DROP DATABASE matches 010 and 012. In a migration 010 is capped
+            // and 012 blocks; elsewhere both block and 010 (lowest code) wins.
+            ("DROP DATABASE prod", "VERICTO-012", "VERICTO-010"),
+        ] {
+            for (r, code) in [
+                (migration(sql, "postgres"), in_migration),
+                (one(sql, "postgres"), elsewhere),
+            ] {
+                assert_eq!(r.status, "BLOCKED", "{sql}");
+                assert_eq!(r.rule_code.as_deref(), Some(code), "{sql}");
+            }
+        }
+    }
+
+    /// Only the inputs `is_migration` names are capped.
+    #[test]
+    fn the_cap_is_per_input() {
+        let inputs = [
+            QueryInput {
+                line: 1,
+                sql: "DROP TABLE a".into(),
+            },
+            QueryInput {
+                line: 2,
+                sql: "DROP TABLE b".into(),
+            },
+        ];
+        let resp = check(&inputs, "postgres", &|q| q.line == 1).unwrap();
+        assert_eq!(resp.queries[0].status, "FLAGGED");
+        assert_eq!(resp.queries[1].status, "BLOCKED");
+        assert_eq!(resp.exit_code, 1);
+    }
+
+    #[test]
+    fn schema_migration_rules_are_the_engines() {
+        for c in ["VERICTO-010", "VERICTO-015", "VERICTO-019", "VERICTO-094"] {
+            assert!(is_schema_migration_rule(c), "{c}");
+        }
+        for c in ["VERICTO-001", "VERICTO-011", "VERICTO-012", "CUSTOM-1"] {
+            assert!(!is_schema_migration_rule(c), "{c}");
+        }
+    }
+
+    /// Engine 5.1.0: a `WHERE` that keeps every row of its own table, and SQL
+    /// Server's `DELETE TOP (n)`.
+    #[test]
+    fn engine_5_1_catches_whole_table_predicates_and_delete_top() {
+        for (sql, dialect, code) in [
+            (
+                "DELETE FROM users WHERE id IN (SELECT id FROM users)",
+                "postgres",
+                "VERICTO-003",
+            ),
+            (
+                "DELETE FROM users WHERE email IS NOT NULL OR email IS NULL",
+                "mysql",
+                "VERICTO-003",
+            ),
+            (
+                "UPDATE users SET a = 1 WHERE id IN (SELECT id FROM users)",
+                "postgres",
+                "VERICTO-030",
+            ),
+            ("DELETE TOP (10) FROM users", "mssql", "VERICTO-001"),
+            ("UPDATE TOP (10) users SET a = 1", "mssql", "VERICTO-030"),
+        ] {
+            let r = one(sql, dialect);
+            assert_eq!(r.status, "BLOCKED", "{dialect}: {sql}");
+            assert_eq!(r.rule_code.as_deref(), Some(code), "{dialect}: {sql}");
+        }
+        let r = one("UPDATE TOP (10) users SET a = 1", "mssql");
+        assert_eq!(
+            r.suggested_fix.as_deref(),
+            Some("UPDATE users SET {col} = $1 WHERE id = $2")
+        );
+        for sql in [
+            "DELETE FROM users WHERE id IN (SELECT id FROM users WHERE banned)",
+            "DELETE FROM users WHERE id IN (SELECT user_id FROM orders)",
+        ] {
+            assert_eq!(one(sql, "postgres").status, "ALLOWED", "{sql}");
+        }
+        assert_eq!(
+            one("DELETE TOP (10) FROM users WHERE id = 1", "mssql").status,
+            "ALLOWED"
+        );
     }
 
     /// A capped DROP must not hide a blocking statement later in the file.
@@ -408,7 +567,7 @@ mod tests {
     /// the strongest resolved action, and this pins the same outcome.
     #[test]
     fn a_capped_ddl_does_not_hide_a_block_in_the_same_file() {
-        let r = one(
+        let r = migration(
             "DROP TABLE a;\nUPDATE accounts SET balance = 0;",
             "postgres",
         );
@@ -420,28 +579,30 @@ mod tests {
         let resp = check(
             &q("DROP TABLE a; UPDATE accounts SET balance = 0;"),
             "postgres",
+            &|_| true,
         )
         .unwrap();
         assert_eq!(resp.queries[0].status, "BLOCKED");
         assert_eq!(resp.queries[0].rule_code.as_deref(), Some("VERICTO-030"));
         assert_eq!((resp.summary.blocked, resp.summary.flagged), (1, 0));
         assert_eq!(resp.exit_code, 1);
-        let r = one("DROP TABLE a;\nINSERT INTO b SELECT * FROM c;", "postgres");
+        let r = migration("DROP TABLE a;\nINSERT INTO b SELECT * FROM c;", "postgres");
         assert_eq!(r.status, "BLOCKED");
         assert_eq!(r.rule_code.as_deref(), Some("VERICTO-040"));
         // Nothing stronger than the winner: unchanged.
-        let r = one("DROP TABLE a;\nSELECT * FROM t;", "postgres");
+        let r = migration("DROP TABLE a;\nSELECT * FROM t;", "postgres");
         assert_eq!(r.status, "FLAGGED");
         assert_eq!(r.rule_code.as_deref(), Some("VERICTO-010"));
     }
 
-    /// The runtime profile differs from CI only on the schema DDL cap: a DROP
-    /// TABLE blocks, a DELETE without WHERE blocks in both, and the decision
-    /// of a statement no DDL rule matches is the same.
+    /// The runtime profile differs from CI only on the schema DDL cap of
+    /// migrations: a DROP TABLE blocks (it is FLAGGED in a CI migration only),
+    /// a DELETE without WHERE blocks in both, and the decision of a statement
+    /// no DDL rule matches is the same. `is_migration` is not read.
     #[test]
     fn runtime_profile_blocks_ddl_and_matches_ci_otherwise() {
         let rt = |sql: &str| {
-            check_with(&q(sql), "postgres", Profile::Runtime)
+            check_with(&q(sql), "postgres", Profile::Runtime, &|_| true)
                 .unwrap()
                 .queries
                 .remove(0)
@@ -450,7 +611,9 @@ mod tests {
         assert_eq!(r.status, "BLOCKED");
         assert_eq!(r.rule_code.as_deref(), Some("VERICTO-010"));
         assert_eq!(r.action.as_deref(), Some("block"));
+        assert_eq!(migration("DROP TABLE users", "postgres").status, "FLAGGED");
         for sql in [
+            "DROP TABLE users",
             "DELETE FROM users",
             "SELECT * FROM t",
             "INSERT INTO t VALUES (1)",
@@ -486,7 +649,7 @@ mod tests {
 
     #[test]
     fn parse_error_is_reported_not_blocked() {
-        let resp = check(&q("SELEC broken FROM"), "postgres").unwrap();
+        let resp = check(&q("SELEC broken FROM"), "postgres", &|_| false).unwrap();
         assert_eq!(resp.queries[0].status, "PARSE_ERROR");
         assert_eq!(
             resp.queries[0].ast_node_path.as_deref(),
@@ -556,7 +719,7 @@ mod tests {
         assert_eq!(one("DELETE FROM `users`", "mysql").status, "BLOCKED");
         assert_eq!(one("DELETE FROM `users`", "postgres").status, "PARSE_ERROR");
         assert_eq!(
-            check(&q("SELECT 1"), "db2").err(),
+            check(&q("SELECT 1"), "db2", &|_| false).err(),
             Some(OfflineError::Dialect("db2".into()))
         );
     }
@@ -575,13 +738,14 @@ mod tests {
                 },
             ],
             "postgres",
+            &|_| false,
         )
         .unwrap();
         assert_eq!(resp.summary.total, 2);
         assert_eq!(resp.summary.blocked, 1);
         assert_eq!(resp.summary.allowed, 1);
         assert_eq!(resp.exit_code, 1);
-        assert_eq!(resp.summary.ruleset_version, "standard@engine-5.0.0");
+        assert_eq!(resp.summary.ruleset_version, "standard@engine-5.1.0");
         assert_eq!(
             resp.mode,
             RunMode::Offline {

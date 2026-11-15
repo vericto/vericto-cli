@@ -197,6 +197,15 @@ fn str_field<'a>(
     }
 }
 
+/// An optional boolean field: absent or `null` gives `false`.
+fn bool_field(obj: &Map<String, Value>, name: &str) -> Result<bool, String> {
+    match obj.get(name) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(format!("`{name}` must be a boolean")),
+    }
+}
+
 /// `op: check`: evaluates `sql` under `profile` with `offline::check_with`,
 /// as one input (one result for the whole text, its strongest finding, like a
 /// file given to `check --offline`).
@@ -228,6 +237,13 @@ fn check(id: &str, obj: &Map<String, Value>) -> Value {
         },
         Err(m) => return error(Some(id), code::INVALID_REQUEST, m),
     };
+    // Under `ci`, whether the SQL is a versioned migration (the schema DDL cap
+    // applies to migrations only, as in `check --offline`). Ignored under
+    // `runtime`.
+    let migration = match bool_field(obj, "migration") {
+        Ok(m) => m,
+        Err(m) => return error(Some(id), code::INVALID_REQUEST, m),
+    };
     let queries = [QueryInput {
         line: 1,
         sql: sql.to_string(),
@@ -235,7 +251,7 @@ fn check(id: &str, obj: &Map<String, Value>) -> Value {
     // A panic in the engine answers this request with INTERNAL and keeps the
     // server running; the panic hook installed by `run` logs no payload.
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        offline::check_with(&queries, dialect, profile)
+        offline::check_with(&queries, dialect, profile, &|_| migration)
     }));
     match outcome {
         Ok(Ok(resp)) => {
@@ -472,18 +488,41 @@ mod tests {
     }
 
     /// The `result` of a check is the `--format json` document of the same
-    /// input checked offline under the same profile.
+    /// input checked offline under the same profile: `--sql` (not a
+    /// migration) without `migration`, a migration file with it.
     #[test]
     fn result_is_the_check_json_document() {
-        let v = run_lines(
-            "{\"id\":\"1\",\"op\":\"check\",\"sql\":\"DROP TABLE users\",\"profile\":\"ci\"}\n",
-            1024,
-        );
         let q = [QueryInput {
             line: 1,
             sql: "DROP TABLE users".into(),
         }];
-        let doc = output::json_document(&offline::check(&q, "postgres").unwrap());
-        assert_eq!(v[1]["result"], doc);
+        for (line, migration, status) in [
+            ("", false, "BLOCKED"),
+            (",\"migration\":false", false, "BLOCKED"),
+            (",\"migration\":true", true, "FLAGGED"),
+        ] {
+            let v = run_lines(
+                &format!(
+                    "{{\"id\":\"1\",\"op\":\"check\",\"sql\":\"DROP TABLE users\",\"profile\":\"ci\"{line}}}\n"
+                ),
+                1024,
+            );
+            let doc =
+                output::json_document(&offline::check(&q, "postgres", &|_| migration).unwrap());
+            assert_eq!(v[1]["result"], doc, "{line}");
+            assert_eq!(v[1]["result"]["queries"][0]["status"], status, "{line}");
+        }
+        // `migration` means nothing under `runtime`: DROP TABLE blocks.
+        let v = run_lines(
+            "{\"id\":\"1\",\"op\":\"check\",\"sql\":\"DROP TABLE users\",\"migration\":true}\n",
+            1024,
+        );
+        assert_eq!(v[1]["result"]["queries"][0]["status"], "BLOCKED");
+        // Not a boolean: INVALID_REQUEST.
+        let v = run_lines(
+            "{\"id\":\"1\",\"op\":\"check\",\"sql\":\"SELECT 1\",\"migration\":\"yes\"}\n",
+            1024,
+        );
+        assert_eq!(v[1]["ok"], false);
     }
 }

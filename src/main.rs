@@ -14,6 +14,7 @@ mod baseline;
 mod browser_login;
 mod ci_env;
 mod config;
+mod migration;
 mod nudge;
 mod offline;
 mod oidc;
@@ -992,6 +993,15 @@ struct CheckArgs {
     #[arg(long, env = "VERICTO_ALLOW_UNSANITIZED", value_parser = EnvBool)]
     allow_unsanitized: bool,
 
+    /// Honour inline `-- vericto:ignore[RULE] reason` comments in `--sql` and
+    /// stdin input too. Files always honour them (they are reviewed in version
+    /// control); `--sql`/stdin text is not, and may come from the agent being
+    /// checked, so without this flag an ignore there is reported and the exit
+    /// code stays. Deliberately no environment variable: the opt-in is visible
+    /// in the command line.
+    #[arg(long)]
+    allow_inline_ignore: bool,
+
     /// Break-glass: if the backend is unreachable from the first request,
     /// exit 0 (don't fail the build) instead of the usual exit 4. Requires a
     /// reason, which is recorded locally for audit. Never bypasses a real
@@ -1497,6 +1507,22 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         (queries, file_name, files)
     };
 
+    // The text of the inputs that cannot be read again for inline
+    // suppressions (`--sql`, stdin), by input index, kept before any
+    // sanitizing: an inline `-- vericto:ignore[RULE] reason` in them is
+    // honoured exactly as in a file.
+    let inline_sources: InlineSources = queries
+        .iter()
+        .filter(|q| {
+            !args.sql.is_empty()
+                || files
+                    .get(q.line.saturating_sub(1) as usize)
+                    .map(String::as_str)
+                    == Some("-")
+        })
+        .map(|q| (q.line, q.sql.clone()))
+        .collect();
+
     // Offline: evaluate in-process and report exactly like an online run. No
     // config fetch, no sanitizing (nothing leaves the machine), no telemetry.
     if offline {
@@ -1507,14 +1533,26 @@ async fn run_check(args: CheckArgs) -> ExitCode {
             offline::STANDARD_RULE_COUNT,
             offline::ENGINE_VERSION
         );
-        let resp = match offline::check(&queries, &dialect) {
+        // The CI profile's schema DDL cap is for migration files only
+        // (`migration`): `--sql`, stdin and any other file are checked like
+        // runtime SQL.
+        let cwd = std::env::current_dir().ok();
+        let is_migration = |q: &QueryInput| {
+            args.sql.is_empty()
+                && files
+                    .get(q.line.saturating_sub(1) as usize)
+                    .is_some_and(|p| {
+                        migration::is_migration(p, &project.migration_paths, cwd.as_deref())
+                    })
+        };
+        let resp = match offline::check(&queries, &dialect, &is_migration) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("error: {e}");
                 return ExitCode::from(exit::USAGE);
             }
         };
-        let code = finish_check(&args, resp, files, baseline_path, fail_on);
+        let code = finish_check(&args, resp, files, &inline_sources, baseline_path, fail_on);
         if code == ExitCode::from(exit::OK) || code == ExitCode::from(exit::FINDING) {
             show_connect_nudge(&args, has_static_key, &file, &project);
         }
@@ -1616,7 +1654,7 @@ async fn run_check(args: CheckArgs) -> ExitCode {
         }
     }
 
-    finish_check(&args, resp, files, baseline_path, fail_on)
+    finish_check(&args, resp, files, &inline_sources, baseline_path, fail_on)
 }
 
 /// The one-time connect tip after an offline check that produced a result
@@ -1657,10 +1695,15 @@ fn show_connect_nudge(
 /// Renders a check's verdict and turns it into the exit code: output, receipt,
 /// plan and version nudges, `--monitor`, suppression and `--fail-on`. Shared
 /// by online and offline runs, so both produce the same shapes and codes.
+/// The text of `--sql` / stdin inputs by input index (`QueryInput::line`),
+/// for inline suppressions: they cannot be read again from a path.
+type InlineSources = std::collections::HashMap<u32, String>;
+
 fn finish_check(
     args: &CheckArgs,
     resp: CheckResponse,
     files: Vec<String>,
+    inline_sources: &InlineSources,
     baseline_path: Option<std::path::PathBuf>,
     fail_on: FailOn,
 ) -> ExitCode {
@@ -1736,7 +1779,13 @@ fn finish_check(
     // Suppression (§10): a finding does not fail the run if it is baselined or
     // carries an inline `-- vericto:ignore[RULE] reason`. Reporting still shows it;
     // only the exit code is affected.
-    let suppressed = suppressed_results(&resp, &files, baseline_path.as_deref());
+    let suppressed = suppressed_results(
+        &resp,
+        &files,
+        inline_sources,
+        args.allow_inline_ignore,
+        baseline_path.as_deref(),
+    );
     let suppressed = match suppressed {
         Ok(s) => s,
         Err(code) => return code,
@@ -1755,13 +1804,24 @@ fn finish_check(
         // suppresses the per-finding detail; the framing line still helps.
         if !args.quiet {
             let on_github = ci_env::Provider::detect() == ci_env::Provider::GitHub;
+            let inline = |q: &&api::QueryResult| {
+                !args.allow_inline_ignore
+                    && inline_sources.contains_key(&q.file_index.unwrap_or(q.line))
+            };
+            let hint = match (failing.iter().any(inline), failing.iter().all(inline)) {
+                (false, _) => output::IgnoreHint::Files,
+                (true, true) => output::IgnoreHint::Inline,
+                (true, false) => output::IgnoreHint::Both,
+            };
             output::render_ci_failure_summary(
                 &resp,
                 &failing,
                 &files,
                 on_github,
                 &fail_on_label(fail_on, args.fail_on.is_some()),
+                hint,
             );
+            schema_ddl_note(&resp, &failing);
         }
         ExitCode::from(exit::FINDING)
     } else {
@@ -1779,6 +1839,8 @@ fn finish_check(
 fn suppressed_results(
     resp: &CheckResponse,
     files: &[String],
+    inline_sources: &InlineSources,
+    allow_inline_ignore: bool,
     baseline_path: Option<&std::path::Path>,
 ) -> Result<std::collections::HashSet<usize>, ExitCode> {
     use std::collections::HashSet;
@@ -1832,23 +1894,46 @@ fn suppressed_results(
         }
     }
 
-    // 2) Inline `-- vericto:ignore[RULE] reason` in the source file: scoped to
-    //    the statement when the backend reports per statement, file-wide when
-    //    a result covers the whole file (older backend).
+    // 2) Inline `-- vericto:ignore[RULE] reason` in the source: scoped to the
+    //    statement when the backend reports per statement, input-wide when a
+    //    result covers the whole input (offline, `--sql`, older backends). A
+    //    file is read again and always honoured. `--sql` and stdin text was
+    //    kept (`inline_sources`) and is honoured only with
+    //    `--allow-inline-ignore`: nobody reviews it, and it may come from the
+    //    agent being checked. Without the flag a matching ignore is reported.
     let mut sources: std::collections::HashMap<String, Option<String>> = Default::default();
     for (i, q) in findings() {
         let Some(rule) = q.rule_code.as_deref() else {
             continue;
         };
-        let path = output::file_of(files, q);
-        if path == "<stdin>" {
-            continue; // can't re-read stdin
-        }
-        let Some(sql) = sources
-            .entry(path.clone())
-            .or_insert_with(|| text::read_file(&path).ok())
-            .as_deref()
-        else {
+        let input = q.file_index.unwrap_or(q.line);
+        let is_inline = inline_sources.contains_key(&input);
+        let (path, sql) = match inline_sources.get(&input) {
+            Some(sql) => {
+                let label = if files
+                    .get(input.saturating_sub(1) as usize)
+                    .map(String::as_str)
+                    == Some("-")
+                {
+                    "<stdin>"
+                } else {
+                    "<inline>"
+                };
+                (label.to_string(), Some(sql.as_str()))
+            }
+            None => {
+                let path = output::file_of(files, q);
+                if path == "<stdin>" || path == "<inline>" {
+                    continue; // nothing kept to read
+                }
+                let sql = sources
+                    .entry(path.clone())
+                    .or_insert_with(|| text::read_file(&path).ok())
+                    .as_deref();
+                (path, sql)
+            }
+        };
+        let Some(sql) = sql else {
             continue;
         };
         let reason = match q.file_index {
@@ -1864,6 +1949,14 @@ fn suppressed_results(
             None => baseline::inline_suppression(sql, rule),
         };
         if let Some(reason) = reason {
+            if is_inline && !allow_inline_ignore {
+                eprintln!(
+                    "note: {path}: inline ignores are not honoured for --sql/stdin; pass \
+                     --allow-inline-ignore or put the SQL in a reviewed file \
+                     ({rule} not suppressed: {reason})"
+                );
+                continue;
+            }
             suppressed.insert(i);
             let at = if q.file_index.is_some() {
                 format!("{path}:{}", q.line)
@@ -1875,6 +1968,29 @@ fn suppressed_results(
     }
 
     Ok(suppressed)
+}
+
+/// After an offline failure, when a failing finding is a schema DDL rule that
+/// a migration file would only have FLAGGED: say why it blocks here, and how
+/// a migration is recognised, so the change from 2.2.0 is not a surprise.
+fn schema_ddl_note(resp: &CheckResponse, failing: &[&api::QueryResult]) {
+    if !matches!(resp.mode, api::RunMode::Offline { .. }) {
+        return;
+    }
+    let Some(code) = failing
+        .iter()
+        .filter(|q| q.action.as_deref() == Some("block"))
+        .filter_map(|q| q.rule_code.as_deref())
+        .find(|c| offline::is_schema_migration_rule(c))
+    else {
+        return;
+    };
+    eprintln!(
+        "note: {code} is schema DDL. It is reported as FLAGGED only in a migration file (under a \
+         migrations/, migration/ or migrate/ directory, a Flyway V1__name.sql or a \
+         golang-migrate 1_name.up.sql file, or a path in .vericto.toml's migration_paths); \
+         --sql, stdin and other files are checked like SQL run against the database."
+    );
 }
 
 /// `vericto baseline` — run a check and record the current findings to a baseline

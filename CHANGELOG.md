@@ -6,6 +6,92 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-15
+
+Embeds **vericto-engine 5.1.0**. A minor release; read **Behaviour changes**
+first if you run `vericto check --offline` in CI or use `vericto serve`'s
+`ci` profile. Online checks are unchanged (your workspace's policy decides).
+
+### Behaviour changes
+- **Exit code `1` where 2.2.0 exited `0`, in offline checks and in `serve`'s
+  `ci` profile.** Nothing that 2.2.0 blocked passes now.
+  - **Schema DDL outside migration files blocks.** Offline mode reported
+    schema DDL (DROP TABLE, ALTER TABLE … DROP COLUMN / RENAME / DROP
+    CONSTRAINT / ALTER TYPE, DISABLE TRIGGER / RLS, DROP INDEX without
+    IF EXISTS, Snowflake `CREATE OR REPLACE` and retention changes, SQLite
+    safety pragmas) as FLAGGED in every input, so `vericto check --offline
+    --sql "DROP TABLE users"` exited `0`. The CI cap exists because a
+    versioned migration legitimately drops and alters tables, so it now
+    applies to migration files only. `--sql`, stdin and any other file are
+    checked like SQL that runs against the database, where those rules block.
+  - **TRUNCATE, DROP SCHEMA and DROP DATABASE block everywhere**, migration
+    files included (engine 5.1.0 no longer lets a CI cap soften VERICTO-011 /
+    012; VERICTO-012 now also covers DROP DATABASE).
+  - **A `WHERE` that keeps every row of its own table blocks** like no
+    `WHERE` (VERICTO-003 / 030 / 042): `id IN (SELECT id FROM users)` on
+    `users`, `= ANY (…)`, `EXISTS (SELECT 1 FROM users)`, `x IS NULL OR x IS
+    NOT NULL`.
+  - **SQL Server `DELETE TOP (n)` is evaluated** instead of being a parse
+    error (allowed and reported): `DELETE TOP (10) FROM t` without `WHERE`
+    blocks (VERICTO-001), as `DELETE … LIMIT 10` does.
+- **Escape hatches.**
+  - A file is a migration when one of its directories is `migrations`,
+    `migration` or `migrate` (any case), its name is a Flyway (`V2__x.sql`,
+    `U2__x.sql`, `B1__x.sql`, `R__x.sql`) or golang-migrate (`1_x.up.sql`,
+    `1_x.down.sql`) file name, or it is under a path listed in the new
+    `.vericto.toml` key **`migration_paths`** (relative to the repository
+    root), for example `migration_paths = ["drizzle", "sql/changes"]`.
+  - An inline `-- vericto:ignore[RULE] reason` on the statement in a file.
+  - `--fail-on`, `--monitor` and `--baseline`, as before.
+  - A failure on a schema DDL rule outside a migration adds a `note:` line on
+    stderr that says how a migration is recognised.
+
+### Added
+- **`.vericto.toml` `migration_paths`**: more paths whose files are versioned
+  migrations (above). Safe to commit; it is meant to be reviewed.
+- **`vericto serve`: `ci` requests take `"migration": true`** for the capped
+  reading of a migration file. Without it a `ci` request is checked like
+  `check --offline --sql`, exactly as `runtime`. A `migration` that is not a
+  boolean is `INVALID_REQUEST`. Protocol 1 is otherwise unchanged (older
+  servers ignore the field).
+- **`--allow-inline-ignore`** (`check`): honour inline `-- vericto:ignore[RULE]
+  reason` comments in `--sql` and stdin input too, exactly as in files (reason
+  required, rule code must match, each `--sql` entry is its own input, online
+  and offline). Off by default, with no environment variable: that text is
+  not reviewed in version control and may come from the agent being checked,
+  so an agent that writes the comment must not get past an exit-code gate.
+
+### Changed
+- **`--sql` / stdin and inline ignores.** Without `--allow-inline-ignore`, an
+  ignore comment that matches a failing finding in `--sql` or stdin input no
+  longer goes unnoticed: a `note:` says `inline ignores are not honoured for
+  --sql/stdin; pass --allow-inline-ignore or put the SQL in a reviewed file`,
+  and the exit code is unchanged. Files keep honouring ignores as before.
+- **The failure message suggests `vericto:ignore` only where it works.** For
+  a failure in a file it shows the comment, as before; for `--sql` / stdin
+  input it says inline ignores are not honoured there and points to a
+  reviewed file or `--allow-inline-ignore`. `serve`, the SDKs, MCP, the
+  Runtime API and the proxy never read these comments.
+
+### Security
+
+- **quinn-proto 0.11.19 and quinn-udp 0.5.16** (`Cargo.lock` only), for
+  RUSTSEC-2026-0523 and RUSTSEC-2026-0524 (QUIC stream limit and Retry token
+  handling) and the quinn-udp receive-loop advisory, all flagged by
+  cargo-audit. They are listed in the lockfile as optional dependencies of
+  reqwest (HTTP/3) and are not compiled into the CLI; the bump clears the audit.
+- **rustix 1.1.6** (`Cargo.lock` only), for RUSTSEC-2026-0486 (xattr functions
+  with a zero-length buffer).
+
+### Tests
+- `migration.rs` unit tests (directories, file names, `migration_paths`,
+  absolute paths, Windows separators); offline tests for the per-input cap,
+  TRUNCATE / DROP SCHEMA / DROP DATABASE and the engine 5.1.0 forms; CLI
+  integration tests for migration and non-migration files, `.vericto.toml`
+  `migration_paths`, and inline ignores in files, in `--sql` / stdin without
+  and with `--allow-inline-ignore` (offline and online); the failure hint per
+  input; serve tests for `migration`.
+
 ## [2.2.0] - 2026-11-10
 
 ### Added

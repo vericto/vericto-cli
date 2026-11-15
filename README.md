@@ -104,7 +104,7 @@ A manual install, with the checksum check (use
 `vericto-cli-aarch64-pc-windows-msvc.zip` on ARM64):
 
 ```powershell
-$v = "2.2.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
+$v = "2.3.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
 $base = "https://github.com/vericto/vericto-cli/releases/download/v$v"
 Invoke-WebRequest "$base/$zip" -OutFile $zip
 Invoke-WebRequest "$base/$zip.sha256" -OutFile "$zip.sha256"
@@ -246,6 +246,25 @@ DELETE FROM sessions; -- vericto:ignore[VERICTO-001] expired rows only, JIRA-43
 
 Against an older backend that reports one result per file, an inline ignore
 still applies to the whole file.
+
+In SQL passed with `--sql` or through stdin, an ignore comment is **not
+honoured by default**: nobody reviews that text, and it may come from the
+agent whose SQL is being checked, so writing the comment must not be enough to
+get past a gate that reads the exit code. The CLI says so in a `note:` and the
+exit code stays. Put the SQL in a reviewed file, or opt in explicitly with
+`--allow-inline-ignore` (no environment variable, so the choice is visible in
+the command line). With the flag, each `--sql` entry is one input and its
+ignore covers that entry only:
+
+```bash
+vericto check --allow-inline-ignore \
+  --sql "DELETE FROM scratch_events -- vericto:ignore[VERICTO-001] nightly reset, OPS-12"
+```
+
+An ignore changes the exit code of `vericto check` and nothing else: the
+finding is still reported as BLOCKED in every format, and `vericto serve`, the
+SDKs, MCP `check_sql`, the Runtime API and the proxy never read these
+comments, so SQL cannot approve itself where it is executed.
 
 ## Inspecting rules (`vericto rules`)
 
@@ -471,6 +490,9 @@ allowed here (use `vericto login` / env). Flags and env still override it.
 default_dialect = "postgres"
 fail_on = "flag"
 baseline = ".vericto-baseline.json"
+# Offline only: more paths whose files are versioned migrations (see
+# "Migrations and schema DDL" below). Relative to the repository root.
+migration_paths = ["drizzle", "sql/changes"]
 ```
 
 Resolution order (first wins): flags → env → `.vericto.toml` → `~/.config/vericto/config.toml`
@@ -591,7 +613,7 @@ hook repository. Add it to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vericto/vericto-cli
-    rev: v2.2.0 # the vericto-cli release; update it (or run `pre-commit autoupdate`)
+    rev: v2.3.0 # the vericto-cli release; update it (or run `pre-commit autoupdate`)
     hooks:
       - id: vericto-check
         # args: [--dialect, mysql]   # postgres (default), mysql, oracle, mssql, snowflake, sqlite
@@ -695,6 +717,7 @@ vericto check schema.sql --monitor
 | `--ca-bundle <path>` | — | Extra CA PEM to trust (`$VERICTO_CA_BUNDLE`, then `$SSL_CERT_FILE`) |
 | `--allow-degraded <reason>` | off | Exit 0 (not 4) if the backend is unreachable; reason required |
 | `--allow-unsanitized` | off | If the workspace config can't be read, send the SQL as-is instead of failing (`$VERICTO_ALLOW_UNSANITIZED`) |
+| `--allow-inline-ignore` | off | Honour `-- vericto:ignore[RULE] reason` in `--sql` and stdin input too (files always do). No environment variable |
 | `--api-key` | `$VERICTO_API_KEY` / config | Vericto API key (`vtro_...`) |
 | `--api-url` | `https://api.vericto.com` | Backend URL (`$VERICTO_API_URL` / config) |
 | `--oidc` | off | Authenticate via CI workload-identity (§ OIDC above); auto-enabled when no key + a token is present |
@@ -759,14 +782,46 @@ VERICTO_OFFLINE=1 vericto check db/migrate/
 ```
 
 `--offline` (or `VERICTO_OFFLINE=1`) evaluates on your machine with the engine
-built into the binary (`vericto-engine` 5.0.0) and its **42 standard rules at
+built into the binary (`vericto-engine` 5.1.0) and its **42 standard rules at
 their default severities**: Critical and High block, Medium flags, Low is
-monitored, and, as in every online CI check, schema changes (DROP, ALTER,
-TRUNCATE) are flagged rather than blocked. No request is made, to Vericto or
-anyone else, and the SQL never leaves the machine. `--dialect`, `--fail-on`,
-`--format`, `--output`, `--quiet`, `--monitor`, `--baseline`, inline
-`-- vericto:ignore[...]`, `--changed` and `--since` (a local git diff) all work
-as online, and the exit codes are the same.
+monitored, and in a **migration file** schema changes (DROP TABLE, ALTER
+TABLE…) are flagged rather than blocked (see below). No request is made, to
+Vericto or anyone else, and the SQL never leaves the machine. `--dialect`,
+`--fail-on`, `--format`, `--output`, `--quiet`, `--monitor`, `--baseline`,
+inline `-- vericto:ignore[...]`, `--changed` and `--since` (a local git diff)
+all work as online, and the exit codes are the same.
+
+### Migrations and schema DDL
+
+A versioned migration legitimately drops and alters tables, so in a migration
+file offline mode reports schema DDL (`DROP TABLE`, `ALTER TABLE … DROP
+COLUMN`, `RENAME`, `DROP INDEX`, `DROP TRIGGER`, the Snowflake and SQLite
+schema rules) as FLAGGED, and the default `--fail-on block` passes. Anywhere
+else (`--sql`, stdin, any other file) it is checked like SQL that runs against
+the database, where it is BLOCKED (exit `1`): an agent's or a script's
+`DROP TABLE users` is not a migration. A file is a migration when:
+
+- one of its directories is `migrations`, `migration` or `migrate` (any case):
+  Rails `db/migrate`, Flyway `db/migration`, Django, Prisma, Supabase,
+  Laravel, Knex, dbmate, golang-migrate, sqlx, Diesel;
+- its name is a Flyway (`V2__add_users.sql`, `U2__…`, `B1__…`, `R__…`) or a
+  golang-migrate (`0001_init.up.sql`, `0001_init.down.sql`) file name;
+- it is under a path listed in `.vericto.toml`'s `migration_paths` (relative
+  to the repository root), for other layouts (Drizzle's `drizzle/`, sqitch's
+  `deploy/`).
+
+`TRUNCATE` and `DROP SCHEMA` / `DROP DATABASE` block everywhere, migrations
+included (engine 5.1.0): they empty or destroy every table at once, like a
+`DELETE` without `WHERE`. A migration that really means it says so with an
+inline ignore, which a reviewer sees:
+
+```sql
+-- vericto:ignore[VERICTO-011] rebuilt from the source of truth in the next step, JIRA-77
+TRUNCATE lookup_countries;
+```
+
+Until 2.2.0 every offline input was capped, as online CI checks still are
+(there, your workspace's policy decides).
 
 It is a baseline gate: "is this SQL obviously dangerous?". It is not your
 workspace's policy and not evidence that a check took place. Log in for your
@@ -778,8 +833,9 @@ workspace's rules and for the record.
 |---|---|---|
 | Account, network | none; nothing leaves the machine | API key, login or OIDC; SQL goes to your workspace |
 | Rules | the 42 standard rules, at their default severities | your workspace's rules: standard rules with your overrides, plus custom rules |
-| Engine | the one in the binary (5.0.0 in 2.0.0) | the server's, always current |
-| Schema DDL (DROP, ALTER, TRUNCATE) | flagged, as in every CI check | your workspace's policy, with the same CI cap |
+| Engine | the one in the binary (5.1.0 in 2.3.0) | the server's, always current |
+| Schema DDL (DROP TABLE, ALTER) | flagged in migration files, blocked elsewhere | your workspace's policy, with the CI cap on every input |
+| TRUNCATE, DROP SCHEMA / DATABASE | blocked | blocked once the backend runs engine 5.1.0 |
 | Sensitive columns, masking, agent allowlists, observe mode | no | yes |
 | Parse errors | allowed and reported | your workspace's parse-error policy |
 | Granularity | one result per file, with its strongest finding | one result per statement, at its line |
@@ -815,8 +871,9 @@ ruleset version) in SARIF, a note on each finding in the GitLab reports, and
 `standard@engine-<version>`. Online JSON and SARIF carry `"mode": "online"`.
 
 A file with several statements reports the finding with the strongest action:
-in `DROP TABLE a; UPDATE accounts SET balance = 0;` the DROP is flagged, but
-the WHERE-less UPDATE blocks, so the file is BLOCKED and the run fails.
+in a migration with `DROP TABLE a; UPDATE accounts SET balance = 0;` the DROP
+is flagged, but the WHERE-less UPDATE blocks, so the file is BLOCKED and the
+run fails.
 
 ### Connect tip (and how to turn it off)
 
@@ -864,7 +921,7 @@ account, no config file. Each `check` result is the document that `vericto
 check --offline --format json` prints for the same SQL.
 
 ```text
-server: {"type":"hello","protocol":1,"cli_version":"…","engine_version":"5.0.0","profiles":["runtime","ci"],"max_line_bytes":1048576}
+server: {"type":"hello","protocol":1,"cli_version":"…","engine_version":"5.1.0","profiles":["runtime","ci"],"max_line_bytes":1048576}
 client: {"id":"1","op":"check","sql":"DROP TABLE users","dialect":"postgres","profile":"runtime"}
 server: {"id":"1","ok":true,"result":{"summary":{…},"queries":[{"status":"BLOCKED","rule_code":"VERICTO-010",…}],…}}
 client: {"id":"2","op":"ping"}
@@ -874,8 +931,9 @@ client: {"op":"shutdown"}
 
 - `profile` is `runtime` by default, as in the Runtime API, MCP `check_sql` and
   the proxy's local mode, where a DROP TABLE is BLOCKED. `ci` reproduces
-  `vericto check --offline`, where the DDL rules VERICTO-010..019 are capped at
-  FLAGGED.
+  `vericto check --offline`: with `"migration": true` the schema DDL rules
+  (DROP TABLE, ALTER TABLE…) are capped at FLAGGED, as in a migration file;
+  without it the SQL is checked like `--sql`, where they block.
 - Errors are `{"id":…,"ok":false,"error":{"code":…,"message":…}}`, with code
   `INVALID_REQUEST`, `UNSUPPORTED_DIALECT`, `TOO_LARGE` (a line over
   `--max-line-bytes`, 1 MiB by default) or `INTERNAL`. The server keeps
