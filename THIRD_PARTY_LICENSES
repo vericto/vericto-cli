@@ -140,8 +140,8 @@ Name, version and declared license (SPDX expression) of each crate:
   - prost-derive 0.13.5: Apache-2.0
   - psm 0.1.32: MIT OR Apache-2.0
   - quinn 0.11.11: MIT OR Apache-2.0
-  - quinn-proto 0.11.18: MIT OR Apache-2.0
-  - quinn-udp 0.5.15: MIT OR Apache-2.0
+  - quinn-proto 0.11.19: MIT OR Apache-2.0
+  - quinn-udp 0.5.16: MIT OR Apache-2.0
   - quote 1.0.46: MIT OR Apache-2.0
   - rand 0.10.2: MIT OR Apache-2.0
   - rand_core 0.10.1: MIT OR Apache-2.0
@@ -4265,8 +4265,8 @@ DEALINGS IN THE SOFTWARE.
 Used by:
   - lru-slab 0.1.2 (LICENSE-APACHE)
   - quinn 0.11.11 (LICENSE-APACHE)
-  - quinn-proto 0.11.18 (LICENSE-APACHE)
-  - quinn-udp 0.5.15 (LICENSE-APACHE)
+  - quinn-proto 0.11.19 (LICENSE-APACHE)
+  - quinn-udp 0.5.16 (LICENSE-APACHE)
   - tinyvec 1.11.0 (LICENSE-APACHE.md)
   - utf8_iter 1.0.4 (LICENSE-APACHE)
   - zeroize 1.9.0 (LICENSE-APACHE)
@@ -5353,8 +5353,8 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 ================================================================================
 Used by:
   - quinn 0.11.11 (LICENSE-MIT)
-  - quinn-proto 0.11.18 (LICENSE-MIT)
-  - quinn-udp 0.5.15 (LICENSE-MIT)
+  - quinn-proto 0.11.19 (LICENSE-MIT)
+  - quinn-udp 0.5.16 (LICENSE-MIT)
 
 Copyright (c) 2018 The quinn Developers
 

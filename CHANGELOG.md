@@ -73,6 +73,14 @@ first if you run `vericto check --offline` in CI or use `vericto serve`'s
   reviewed file or `--allow-inline-ignore`. `serve`, the SDKs, MCP, the
   Runtime API and the proxy never read these comments.
 
+### Security
+
+- **quinn-proto 0.11.19 and quinn-udp 0.5.16** (`Cargo.lock` only), for
+  RUSTSEC-2026-0523 and RUSTSEC-2026-0524 (QUIC stream limit and Retry token
+  handling) and the quinn-udp receive-loop advisory, all flagged by
+  cargo-audit. They are listed in the lockfile as optional dependencies of
+  reqwest (HTTP/3) and are not compiled into the CLI; the bump clears the audit.
+
 ### Tests
 - `migration.rs` unit tests (directories, file names, `migration_paths`,
   absolute paths, Windows separators); offline tests for the per-input cap,
