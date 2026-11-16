@@ -295,7 +295,7 @@ impl Decision {
             .iter()
             .filter(|a| a.verdict == self.verdict && a.verdict > Verdict::Allow)
             .collect();
-        v.sort_by(|a, b| b.finding.severity.cmp(&a.finding.severity));
+        v.sort_by_key(|a| std::cmp::Reverse(a.finding.severity));
         v
     }
 
