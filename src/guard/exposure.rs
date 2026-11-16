@@ -1130,8 +1130,9 @@ mod tests {
         write(
             &c.claude_json,
             &format!(
-                r#"{{"projects": {{"{}": {{"mcpServers": {{"local": {{"command": "x", "env": {{"DATABASE_URL": "mysql://root:{PW}@localhost:3306/app"}}}}}}}}, "/elsewhere": {{"mcpServers": {{"z": {{"args": ["postgres://z:{PW}@z/z"]}}}}}}}}}}"#,
-                c.root.display()
+                r#"{{"projects": {{{}: {{"mcpServers": {{"local": {{"command": "x", "env": {{"DATABASE_URL": "mysql://root:{PW}@localhost:3306/app"}}}}}}}}, "/elsewhere": {{"mcpServers": {{"z": {{"args": ["postgres://z:{PW}@z/z"]}}}}}}}}}}"#,
+                // A JSON string: Windows paths carry backslashes.
+                serde_json::to_string(&c.root.display().to_string()).unwrap()
             ),
         );
         write(
