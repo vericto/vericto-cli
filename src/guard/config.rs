@@ -12,6 +12,7 @@
 //! prod_hosts = ["*.rds.amazonaws.com"]
 //! local_hosts = ["devdb.internal"]
 //! log_sql = "redacted"      # redacted | hash | none
+//! hard = false              # hard mode's deny rules (VG-7xx); `install --hard` turns them on in the hook
 //!
 //! [guard.checks]
 //! sql = true
@@ -137,6 +138,10 @@ pub struct GuardConfig {
     pub log_path: Option<PathBuf>,
     pub checks: Checks,
     pub allow: Vec<AllowEntry>,
+    /// Hard mode's deny rules (`VG-7xx`): direct database clients, reading
+    /// credential files and the OS credential store, changing the keychain
+    /// entry or the guard. Also on when the hook runs with `--hard`.
+    pub hard: bool,
 }
 
 impl Default for GuardConfig {
@@ -154,6 +159,7 @@ impl Default for GuardConfig {
             log_path: None,
             checks: Checks::default(),
             allow: Vec::new(),
+            hard: false,
         }
     }
 }

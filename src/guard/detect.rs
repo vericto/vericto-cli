@@ -216,6 +216,9 @@ fn analyze_script(
             });
         }
         layers.extend(script_layers.iter().cloned());
+        if ctx.cfg.hard {
+            super::hard::writes(&cmd.writes, &target::redact(&cmd.argv.join(" ")), out);
+        }
         let exec = Exec {
             argv: cmd.argv.clone(),
             stdin: cmd.stdin.clone(),
@@ -482,12 +485,24 @@ const FIX_LOCAL_DB: &str =
     "Run it only against a disposable local database (check DATABASE_URL first), or ask the user to run it.";
 
 fn analyze_exec(ctx: &Ctx, mut e: Exec, depth: usize, out: &mut Vec<Finding>) {
+    // Hard mode looks at every launcher level (`sudo cat .env`, `dotenv -e
+    // .env -- …`), once per command.
+    let mut hard_done = !ctx.cfg.hard;
     // Unwrap launchers.
     for _ in 0..12 {
         if e.argv.is_empty() {
             return;
         }
         let name = prog(&e.argv[0]);
+        if !hard_done {
+            let before = out.len();
+            let stdin_file = match &e.stdin {
+                Some(Input::File(f)) => Some(f.as_str()),
+                _ => None,
+            };
+            super::hard::exec(&e.argv, stdin_file, &name, out);
+            hard_done = out.len() > before;
+        }
         let args: Vec<String> = e.argv[1..].to_vec();
         let next: Option<Vec<String>> = match name.as_str() {
             "sudo" | "doas" => {

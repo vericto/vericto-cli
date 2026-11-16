@@ -38,20 +38,20 @@ pub enum J {
 }
 
 impl J {
-    fn get(&self, k: &str) -> Option<&J> {
+    pub(super) fn get(&self, k: &str) -> Option<&J> {
         match self {
             J::Obj(m) => m.iter().find(|(x, _)| x == k).map(|(_, v)| v),
             _ => None,
         }
     }
-    fn get_mut(&mut self, k: &str) -> Option<&mut J> {
+    pub(super) fn get_mut(&mut self, k: &str) -> Option<&mut J> {
         match self {
             J::Obj(m) => m.iter_mut().find(|(x, _)| x == k).map(|(_, v)| v),
             _ => None,
         }
     }
     /// The object member `k`, created as `default` when missing.
-    fn entry(&mut self, k: &str, default: J) -> Result<&mut J, String> {
+    pub(super) fn entry(&mut self, k: &str, default: J) -> Result<&mut J, String> {
         let J::Obj(m) = self else {
             return Err("expected a JSON object".into());
         };
@@ -63,18 +63,18 @@ impl J {
             .map(|(_, v)| v)
             .expect("just inserted"))
     }
-    fn remove(&mut self, k: &str) {
+    pub(super) fn remove(&mut self, k: &str) {
         if let J::Obj(m) = self {
             m.retain(|(x, _)| x != k);
         }
     }
-    fn as_str(&self) -> Option<&str> {
+    pub(super) fn as_str(&self) -> Option<&str> {
         match self {
             J::Str(s) => Some(s),
             _ => None,
         }
     }
-    fn is_empty_container(&self) -> bool {
+    pub(super) fn is_empty_container(&self) -> bool {
         matches!(self, J::Arr(a) if a.is_empty()) || matches!(self, J::Obj(o) if o.is_empty())
     }
 }
@@ -156,10 +156,10 @@ impl<'de> Deserialize<'de> for J {
     }
 }
 
-fn obj(pairs: Vec<(&str, J)>) -> J {
+pub(super) fn obj(pairs: Vec<(&str, J)>) -> J {
     J::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
-fn st(s: &str) -> J {
+pub(super) fn st(s: &str) -> J {
     J::Str(s.to_string())
 }
 
@@ -272,7 +272,7 @@ pub struct Plan {
     pub changed: bool,
 }
 
-fn read_json(path: &Path) -> Result<(Option<String>, J), String> {
+pub(super) fn read_json(path: &Path) -> Result<(Option<String>, J), String> {
     match std::fs::read_to_string(path) {
         Ok(text) if text.trim().is_empty() => Ok((Some(text), J::Obj(Vec::new()))),
         Ok(text) => {
@@ -292,7 +292,7 @@ fn read_json(path: &Path) -> Result<(Option<String>, J), String> {
     }
 }
 
-fn to_text(j: &J) -> String {
+pub(super) fn to_text(j: &J) -> String {
     let mut s = serde_json::to_string_pretty(j).unwrap_or_else(|_| "{}".into());
     s.push('\n');
     s
@@ -353,20 +353,47 @@ fn strip_flat(arr: &mut Vec<J>) -> usize {
     n - arr.len()
 }
 
-/// The events the guard hooks per agent.
-fn events(agent: Agent) -> &'static [&'static str] {
+/// The events the guard hooks per agent. Hard mode adds Cursor's
+/// `beforeReadFile` (its agent reads files without a shell).
+fn events(agent: Agent, hard: bool) -> &'static [&'static str] {
     match agent {
         Agent::Claude | Agent::Codex => &["PreToolUse"],
+        Agent::Cursor if hard => &[
+            "beforeShellExecution",
+            "beforeMCPExecution",
+            "beforeReadFile",
+        ],
         Agent::Cursor => &["beforeShellExecution", "beforeMCPExecution"],
     }
 }
 
+/// Every event the guard may have written (what uninstall and status read).
+fn all_events(agent: Agent) -> &'static [&'static str] {
+    events(agent, true)
+}
+
+/// Whether a hook command is hard mode's (`… guard hook --agent X --hard`).
+pub fn is_hard(cmd: &str) -> bool {
+    is_ours(cmd) && cmd.split_whitespace().any(|w| w == "--hard")
+}
+
 /// Whether `j` already holds exactly the wanted entries.
-fn already(agent: Agent, j: &J, want: &J) -> bool {
+fn already(agent: Agent, j: &J, want: &J, hard: bool) -> bool {
     let Some(hooks) = j.get("hooks") else {
         return false;
     };
-    for ev in events(agent) {
+    // None of ours left in an event this install does not use.
+    for ev in all_events(agent) {
+        if events(agent, hard).contains(ev) {
+            continue;
+        }
+        if let Some(J::Arr(arr)) = hooks.get(ev) {
+            if arr.iter().any(|h| entry_cmd(h).is_some_and(is_ours)) {
+                return false;
+            }
+        }
+    }
+    for ev in events(agent, hard) {
         let Some(J::Arr(arr)) = hooks.get(ev) else {
             return false;
         };
@@ -405,8 +432,7 @@ fn already(agent: Agent, j: &J, want: &J) -> bool {
 
 pub fn plan_install(agent: Agent, path: &Path, cmd: &str, fail_open: bool) -> Result<Plan, String> {
     let (before, mut j) = read_json(path)?;
-    let want = our_entry(agent, cmd, fail_open);
-    if already(agent, &j, &want) {
+    if !merge_hook(agent, path, &mut j, cmd, fail_open)? {
         return Ok(Plan {
             path: path.to_path_buf(),
             after: before.clone().unwrap_or_default(),
@@ -414,8 +440,32 @@ pub fn plan_install(agent: Agent, path: &Path, cmd: &str, fail_open: bool) -> Re
             changed: false,
         });
     }
+    let after = to_text(&j);
+    Ok(Plan {
+        path: path.to_path_buf(),
+        changed: before.as_deref() != Some(after.as_str()),
+        before,
+        after,
+    })
+}
+
+/// Puts the guard's entry for `cmd` into a parsed hook file. Returns
+/// whether anything changed. A hard-mode command (`--hard`) also hooks
+/// Cursor's `beforeReadFile`; a plain one removes it.
+pub fn merge_hook(
+    agent: Agent,
+    path: &Path,
+    j: &mut J,
+    cmd: &str,
+    fail_open: bool,
+) -> Result<bool, String> {
+    let hard = is_hard(cmd);
+    let want = our_entry(agent, cmd, fail_open);
+    if already(agent, j, &want, hard) {
+        return Ok(false);
+    }
     if agent == Agent::Cursor && j.get("version").is_none() {
-        if let J::Obj(m) = &mut j {
+        if let J::Obj(m) = j {
             m.insert(0, ("version".into(), J::Num(1u64.into())));
         }
     }
@@ -426,7 +476,11 @@ pub fn plan_install(agent: Agent, path: &Path, cmd: &str, fail_open: bool) -> Re
             path.display()
         ));
     }
-    for ev in events(agent) {
+    for ev in all_events(agent) {
+        let wanted = events(agent, hard).contains(ev);
+        if !wanted && hooks.get(ev).is_none() {
+            continue;
+        }
         let arr = hooks.entry(ev, J::Arr(Vec::new()))?;
         let J::Arr(a) = arr else {
             return Err(format!(
@@ -437,24 +491,25 @@ pub fn plan_install(agent: Agent, path: &Path, cmd: &str, fail_open: bool) -> Re
         match agent {
             Agent::Cursor => {
                 strip_flat(a);
-                a.push(want.clone());
+                if wanted {
+                    a.push(want.clone());
+                }
             }
             _ => {
                 strip_grouped(a);
-                a.push(obj(vec![
-                    ("matcher", st(MATCHER)),
-                    ("hooks", J::Arr(vec![want.clone()])),
-                ]));
+                if wanted {
+                    a.push(obj(vec![
+                        ("matcher", st(MATCHER)),
+                        ("hooks", J::Arr(vec![want.clone()])),
+                    ]));
+                }
             }
         }
+        if !wanted && hooks.get(ev).is_some_and(J::is_empty_container) {
+            hooks.remove(ev);
+        }
     }
-    let after = to_text(&j);
-    Ok(Plan {
-        path: path.to_path_buf(),
-        changed: before.as_deref() != Some(after.as_str()),
-        before,
-        after,
-    })
+    Ok(true)
 }
 
 pub fn plan_uninstall(agent: Agent, path: &Path) -> Result<Plan, String> {
@@ -469,7 +524,7 @@ pub fn plan_uninstall(agent: Agent, path: &Path) -> Result<Plan, String> {
     };
     let mut removed = 0;
     if let Some(hooks) = j.get_mut("hooks") {
-        for ev in events(agent) {
+        for ev in all_events(agent) {
             if let Some(J::Arr(a)) = hooks.get_mut(ev) {
                 removed += match agent {
                     Agent::Cursor => strip_flat(a),
@@ -503,6 +558,13 @@ pub fn plan_uninstall(agent: Agent, path: &Path) -> Result<Plan, String> {
 
 /// Writes a plan: backup first, then an atomic replace. Returns the backup.
 pub fn apply(plan: &Plan) -> Result<Option<PathBuf>, String> {
+    apply_with(plan, None)
+}
+
+/// [`apply`], with the backup in `backup_dir` instead of next to the file
+/// (hard mode: a copy of a file that held a database URL must not sit in the
+/// project, where the agent and `git add` can reach it).
+pub fn apply_with(plan: &Plan, backup_dir: Option<&Path>) -> Result<Option<PathBuf>, String> {
     if !plan.changed {
         return Ok(None);
     }
@@ -514,11 +576,23 @@ pub fn apply(plan: &Plan) -> Result<Option<PathBuf>, String> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let mut b = plan.path.clone().into_os_string();
-        b.push(format!(".vericto-backup-{now}"));
-        let b = PathBuf::from(b);
+        let b = match backup_dir {
+            Some(d) => {
+                private_dir(d)?;
+                d.join(format!("{now}-{}", flat_name(&plan.path)))
+            }
+            None => {
+                let mut b = plan.path.clone().into_os_string();
+                b.push(format!(".vericto-backup-{now}"));
+                PathBuf::from(b)
+            }
+        };
+        let b = unused(b);
         std::fs::copy(&plan.path, &b)
             .map_err(|e| format!("cannot back up {}: {e}", plan.path.display()))?;
+        if backup_dir.is_some() {
+            restrict(&b);
+        }
         backup = Some(b);
     }
     let mut tmp = plan.path.clone().into_os_string();
@@ -526,11 +600,69 @@ pub fn apply(plan: &Plan) -> Result<Option<PathBuf>, String> {
     let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, &plan.after)
         .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    // Keep the file's permissions (`~/.pgpass` must stay 0600).
+    if let Ok(meta) = std::fs::metadata(&plan.path) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
     std::fs::rename(&tmp, &plan.path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("cannot replace {}: {e}", plan.path.display())
     })?;
     Ok(backup)
+}
+
+/// A path as one file name (`/Users/me/.env` → `Users_me_.env`).
+fn flat_name(p: &Path) -> String {
+    let s: String = p
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    s.trim_start_matches('_').to_string()
+}
+
+/// `p`, or `p.1`, `p.2`… when it exists (two writes in the same second).
+fn unused(p: PathBuf) -> PathBuf {
+    if !p.exists() {
+        return p;
+    }
+    (1..)
+        .map(|i| {
+            let mut s = p.clone().into_os_string();
+            s.push(format!(".{i}"));
+            PathBuf::from(s)
+        })
+        .find(|c| !c.exists())
+        .expect("an unused name")
+}
+
+/// Creates `d` readable by its owner only.
+pub fn private_dir(d: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(d).map_err(|e| format!("cannot create {}: {e}", d.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot restrict {}: {e}", d.display()))?;
+    }
+    Ok(())
+}
+
+/// Makes a file readable by its owner only (best effort).
+pub fn restrict(p: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = p;
 }
 
 /// What `status` reports for one file.
@@ -553,7 +685,7 @@ pub fn status(agent: Agent, path: &Path) -> Status {
     match read_json(path) {
         Ok((_, j)) => {
             if let Some(hooks) = j.get("hooks") {
-                for ev in events(agent) {
+                for ev in all_events(agent) {
                     if let Some(J::Arr(a)) = hooks.get(ev) {
                         for x in a {
                             let mut push = |h: &J| {
@@ -808,5 +940,87 @@ mod tests {
             command_program("\"/a b/vericto\" guard hook --agent claude").as_deref(),
             Some("/a b/vericto")
         );
+    }
+
+    #[test]
+    fn hard_hook_adds_and_removes_cursor_read_hook() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join(".cursor/hooks.json");
+        write(
+            &p,
+            r#"{"version": 1, "hooks": {"beforeReadFile": [{"command": "mine"}]}}"#,
+        );
+        let hard = "vericto guard hook --agent cursor --hard";
+        assert!(is_hard(hard) && !is_hard("vericto guard hook --agent cursor"));
+        apply(&plan_install(Agent::Cursor, &p, hard, false).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["beforeReadFile"][0]["command"], "mine");
+        assert_eq!(v["hooks"]["beforeReadFile"][1]["command"], hard);
+        assert_eq!(v["hooks"]["beforeShellExecution"][0]["command"], hard);
+        assert!(
+            !plan_install(Agent::Cursor, &p, hard, false)
+                .unwrap()
+                .changed
+        );
+        // Back to the plain hook: the read hook goes, the user's stays.
+        let plain = "vericto guard hook --agent cursor";
+        apply(&plan_install(Agent::Cursor, &p, plain, false).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(
+            v["hooks"]["beforeReadFile"],
+            serde_json::json!([{"command": "mine"}])
+        );
+        assert_eq!(v["hooks"]["beforeShellExecution"][0]["command"], plain);
+        assert!(
+            !plan_install(Agent::Cursor, &p, plain, false)
+                .unwrap()
+                .changed
+        );
+        // Uninstall removes ours from every event.
+        apply(&plan_install(Agent::Cursor, &p, hard, false).unwrap()).unwrap();
+        apply(&plan_uninstall(Agent::Cursor, &p).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"version": 1, "hooks": {"beforeReadFile": [{"command": "mine"}]}})
+        );
+    }
+
+    #[test]
+    fn private_backups_keep_permissions() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("proj/.pgpass");
+        write(&p, "h:5432:db:u:secret\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let plan = Plan {
+            path: p.clone(),
+            before: Some(std::fs::read_to_string(&p).unwrap()),
+            after: "# moved\n".into(),
+            changed: true,
+        };
+        let bdir = d.path().join("state/vericto/guard-backups");
+        let b = apply_with(&plan, Some(&bdir)).unwrap().unwrap();
+        assert!(b.starts_with(&bdir));
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "h:5432:db:u:secret\n");
+        assert!(!std::fs::read_dir(p.parent().unwrap()).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("vericto-backup")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |x: &Path| std::fs::metadata(x).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&p), 0o600);
+            assert_eq!(mode(&b), 0o600);
+            assert_eq!(mode(&bdir), 0o700);
+        }
     }
 }

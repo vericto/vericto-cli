@@ -104,7 +104,7 @@ A manual install, with the checksum check (use
 `vericto-cli-aarch64-pc-windows-msvc.zip` on ARM64):
 
 ```powershell
-$v = "2.3.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
+$v = "2.4.0"; $zip = "vericto-cli-x86_64-pc-windows-msvc.zip"
 $base = "https://github.com/vericto/vericto-cli/releases/download/v$v"
 Invoke-WebRequest "$base/$zip" -OutFile $zip
 Invoke-WebRequest "$base/$zip.sha256" -OutFile "$zip.sha256"
@@ -191,6 +191,7 @@ vericto completions <sh>   Print a shell completion script (bash|zsh|fish|powers
 vericto serve --stdio      Local evaluation server for the SDKs: JSON Lines on stdin/stdout, offline.
 vericto guard install      Guard a coding agent (Claude Code, Cursor, Codex): block destructive SQL and DB commands.
 vericto guard test "<cmd>" Show what the guard decides for a command (also: hook, uninstall, status, log).
+vericto guard install --hard  Hard mode: the database URL into the OS keychain, the agent on Vericto's MCP server.
 ```
 
 Enable completions by writing the script where your shell looks for them, e.g.:
@@ -230,10 +231,26 @@ patterns, and which checks are on. Decisions are logged locally with secrets
 removed; `vericto guard log` shows them.
 
 A hook is a guardrail, not a boundary: an agent can run a script the guard does
-not read. For a hard boundary, give the agent read-only credentials or
-Vericto's MCP server instead of the database credential. See
-**[docs/guard.md](docs/guard.md)** for the rules, the configuration, each
-agent's behaviour and the limits.
+not read. **Hard mode** goes further: the agent never holds the database
+credential.
+
+```sh
+vericto guard install --hard     # needs vericto-proxy 5.2.0+ (brew install vericto/tap/vericto-proxy)
+vericto guard status             # hard mode per agent, the read-only check, what is still exposed
+```
+
+It finds the database URLs an agent can read (`.env*`, the environment, the
+agents' MCP configuration, `~/.pgpass`, `~/.my.cnf`; shown redacted). With your
+confirmation it moves them into the OS keychain through `vericto-proxy mcp
+credential set` (the URL on stdin only) and checks that the role is read-only.
+It then points each agent at `vericto-proxy mcp --database-url-keychain <name>
+--require-read-only`, and denies direct database clients, credential-file reads
+and keychain reads (rules `VG-701`…`VG-704`). Only with your consent does it take
+the plaintext URLs out of their files. It is not an OS boundary: the server runs
+as your user, and on Windows and Linux the user's processes can read the
+keychain entry without a prompt. For strict isolation, run the server as another
+OS user or in a container. See **[docs/guard.md](docs/guard.md)** for the rules,
+the configuration, hard mode, each agent's behaviour and the limits.
 
 ## Baseline & suppression
 
@@ -649,7 +666,7 @@ hook repository. Add it to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/vericto/vericto-cli
-    rev: v2.3.0 # the vericto-cli release; update it (or run `pre-commit autoupdate`)
+    rev: v2.4.0 # the vericto-cli release; update it (or run `pre-commit autoupdate`)
     hooks:
       - id: vericto-check
         # args: [--dialect, mysql]   # postgres (default), mysql, oracle, mssql, snowflake, sqlite
@@ -1013,6 +1030,9 @@ vericto-check:
 - `vericto guard` is a hook inside the agent's tool loop, not a security
   boundary: scripts, application code and agents or subagents that skip hooks
   are not covered (see [docs/guard.md](docs/guard.md#limits-read-this)).
+  Hard mode (`install --hard`) is not an OS boundary either: the MCP server runs
+  as the agent's OS user (see
+  [docs/guard.md](docs/guard.md#threat-model-and-honest-limits)).
 
 - Workspace checks require network access to the Vericto backend; offline mode
   covers the standard rules only (see above). The API key

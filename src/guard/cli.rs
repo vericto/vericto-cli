@@ -83,6 +83,10 @@ pub struct HookArgs {
     /// Which agent's hook protocol to speak.
     #[arg(long, value_enum)]
     pub agent: AgentArg,
+    /// Hard mode's deny rules too (VG-7xx), whatever `.vericto.toml` says
+    /// (what `vericto guard install --hard` writes).
+    #[arg(long)]
+    pub hard: bool,
 }
 
 #[derive(Parser)]
@@ -123,12 +127,48 @@ pub struct InstallArgs {
     /// hook lets the command run (Cursor's default) instead of blocking it.
     #[arg(long)]
     pub fail_open: bool,
+    /// Hard mode: move the database URL into the OS keychain (through
+    /// vericto-proxy 5.2.0+), give the agent the Vericto MCP server instead,
+    /// and deny direct database clients and credential reads. With
+    /// `uninstall`: turn hard mode off again (the plain hook stays).
+    #[arg(long)]
+    pub hard: bool,
+    /// Keychain entry name (default: the database name). With no credential
+    /// found, an entry you stored yourself with `vericto-proxy mcp
+    /// credential set <name>`.
+    #[arg(long, value_name = "NAME", requires = "hard")]
+    pub name: Option<String>,
+    /// Do not ask: store and configure every credential found.
+    #[arg(long, short = 'y', requires = "hard")]
+    pub yes: bool,
+    /// Also take the plaintext URLs out of `.env*`, MCP configs,
+    /// `~/.pgpass` and `~/.my.cnf` without asking (a backup is kept).
+    #[arg(long, requires = "hard")]
+    pub remove_plaintext: bool,
+    /// Configure a credential whose role can write (or cannot be verified),
+    /// without `--require-read-only`. That is not hard mode.
+    #[arg(long, requires = "hard")]
+    pub allow_write_role: bool,
+    /// Configure a credential whose database cannot be reached now (the
+    /// server checks the role when it starts).
+    #[arg(long, requires = "hard")]
+    pub allow_unreachable: bool,
+    /// `uninstall --hard`: also delete the keychain entries without asking.
+    #[arg(long, requires = "hard")]
+    pub delete_credential: bool,
+    /// The vericto-proxy binary (default: PATH, then Homebrew's and Cargo's
+    /// bin directories).
+    #[arg(long, value_name = "PATH", requires = "hard")]
+    pub proxy: Option<PathBuf>,
 }
 
 #[derive(Parser)]
 pub struct StatusArgs {
     #[arg(long, value_enum, default_value_t = FormatArg::Text)]
     pub format: FormatArg,
+    /// Do not connect to the database to check hard mode's credentials.
+    #[arg(long)]
+    pub no_test: bool,
 }
 
 #[derive(Parser)]
@@ -142,7 +182,7 @@ pub struct LogArgs {
 
 pub fn run(args: GuardArgs) -> ExitCode {
     match args.command {
-        GuardCommand::Hook(a) => run_hook(a.agent.into()),
+        GuardCommand::Hook(a) => run_hook(a.agent.into(), a.hard),
         GuardCommand::Test(a) => run_test(a),
         GuardCommand::Install(a) => run_install(a, false),
         GuardCommand::Uninstall(a) => run_install(a, true),
@@ -184,7 +224,7 @@ fn resolve_cwd(input_cwd: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn run_hook(agent: Agent) -> ExitCode {
+fn run_hook(agent: Agent, hard: bool) -> ExitCode {
     let mut raw = String::new();
     if let Err(e) = std::io::stdin().take(MAX_INPUT).read_to_string(&mut raw) {
         let (out, _) = hook::render_unreadable(agent, &raw, &format!("stdin: {e}"));
@@ -220,7 +260,8 @@ fn run_hook(agent: Agent) -> ExitCode {
         return emit(&out);
     };
     let cwd = resolve_cwd(input.cwd.as_deref());
-    let loaded = config::load(&cwd);
+    let mut loaded = config::load(&cwd);
+    loaded.config.hard |= hard;
     // A bug in a detector must not let a destructive command through, nor
     // block everything: fall back to the keyword reading of the raw input.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -232,6 +273,20 @@ fn run_hook(agent: Agent) -> ExitCode {
     };
     let eff = hook::effective(agent, d.verdict, &input);
     let mut out = hook::render(agent, &d, eff, d.verdict);
+    if agent == Agent::Cursor && input.event == "beforeReadFile" {
+        // That event's answer has `permission` and `user_message` only.
+        if let Some(v) = out
+            .stdout
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        {
+            let mut o = json!({"permission": if eff >= Verdict::Ask { "deny" } else { "allow" }});
+            if let Some(m) = v.get("user_message") {
+                o["user_message"] = m.clone();
+            }
+            out.stdout = Some(o.to_string());
+        }
+    }
     if let Some(e) = &loaded.error {
         let note = format!("vericto guard: {e}; using the default policy");
         out.stderr = Some(match out.stderr.take() {
@@ -490,6 +545,24 @@ fn run_install(a: InstallArgs, remove: bool) -> ExitCode {
         .bin
         .clone()
         .unwrap_or_else(|| install::default_bin(&env_lookup));
+    if a.hard {
+        let opts = super::hardcli::Opts {
+            name: a.name.clone(),
+            yes: a.yes,
+            dry_run: a.dry_run,
+            remove_plaintext: a.remove_plaintext,
+            allow_write_role: a.allow_write_role,
+            allow_unreachable: a.allow_unreachable,
+            delete_credential: a.delete_credential,
+            proxy: a.proxy.clone(),
+            fail_open: a.fail_open,
+        };
+        return if remove {
+            super::hardcli::uninstall(&agents, scope, &root, &home, &opts)
+        } else {
+            super::hardcli::install(&agents, scope, &cwd, &root, &home, &bin, &opts)
+        };
+    }
     let mut failed = false;
     for agent in agents {
         let path = install::config_path(agent, scope, &root, &home, &env_lookup);
@@ -598,6 +671,9 @@ fn run_status(a: StatusArgs) -> ExitCode {
     // Hard-mode hint: a production-looking database URL the agent can see.
     let ctx_findings = prod_urls_visible(&cwd, &loaded);
     let log_path = log::path(&loaded.config);
+    let (hard_lines, hard_json) =
+        super::hardcli::status(&cwd, &loaded.root, &home, loaded.config.hard, !a.no_test);
+    let hard_on = hard_json["configured"].as_bool().unwrap_or(false);
     if a.format == FormatArg::Json {
         let v = json!({
             "cli_version": env!("CARGO_PKG_VERSION"),
@@ -613,6 +689,7 @@ fn run_status(a: StatusArgs) -> ExitCode {
                 "binaries_found": progs.iter().all(|(_, ok)| *ok),
             })).collect::<Vec<_>>(),
             "production_urls_visible": ctx_findings,
+            "hard": hard_json,
         });
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
         return ExitCode::SUCCESS;
@@ -681,7 +758,10 @@ fn run_status(a: StatusArgs) -> ExitCode {
         Some(p) if loaded.config.log => println!("log: {}", p.display()),
         _ => println!("log: off"),
     }
-    for u in &ctx_findings {
+    for l in &hard_lines {
+        println!("{l}");
+    }
+    for u in ctx_findings.iter().filter(|_| !hard_on) {
         println!("note: the agent can see a production-looking database URL ({u}). Hooks are a guardrail, not a boundary: see \"hard mode\" in docs/guard.md (read-only credentials, the Vericto MCP server or proxy, no production credentials in the agent's environment).");
     }
     ExitCode::SUCCESS

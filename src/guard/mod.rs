@@ -23,9 +23,14 @@
 pub mod cli;
 pub mod config;
 pub mod detect;
+pub mod exposure;
+pub mod hard;
+pub mod hardcli;
 pub mod hook;
 pub mod install;
 pub mod log;
+pub mod mcpconf;
+pub mod proxy;
 pub mod shell;
 pub mod sql;
 pub mod target;
@@ -67,6 +72,8 @@ pub enum Kind {
     Orm,
     Platform,
     Mcp,
+    /// Hard mode's rules (`VG-7xx`): denied in every mode.
+    Hard,
     Internal,
 }
 
@@ -77,6 +84,7 @@ impl Kind {
             Kind::Orm => "orm",
             Kind::Platform => "platform",
             Kind::Mcp => "mcp",
+            Kind::Hard => "hard",
             Kind::Internal => "internal",
         }
     }
@@ -150,6 +158,9 @@ pub enum Action {
         tool: String,
         input: Value,
     },
+    /// The agent's file-read tool is about to open a file (Cursor
+    /// `beforeReadFile`); only hard mode checks it.
+    ReadFile(String),
 }
 
 impl Action {
@@ -162,6 +173,7 @@ impl Action {
                 tool,
                 input,
             } => format!("mcp:{server}/{tool} {input}"),
+            Action::ReadFile(p) => format!("read {p}"),
         }
     }
 }
@@ -204,7 +216,20 @@ pub fn analyze(
             server,
             tool,
             input,
-        } => detect::mcp(&ctx, server, tool, input),
+        } => {
+            let mut out = detect::mcp(&ctx, server, tool, input);
+            if loaded.config.hard {
+                hard::mcp(server, tool, input, &mut out);
+            }
+            out
+        }
+        Action::ReadFile(p) => {
+            let mut out = Vec::new();
+            if loaded.config.hard {
+                hard::read(p, &mut out);
+            }
+            out
+        }
     }
 }
 
@@ -228,7 +253,10 @@ pub fn decide(findings: Vec<Finding>, cfg: &GuardConfig, action_text: &str) -> D
         // Production: anything that can lose data is denied whatever the
         // mode; what only matters on production is asked.
         let floor = prod && f.severity >= Severity::Medium;
-        if prod {
+        if f.kind == Kind::Hard {
+            // Hard mode's rules: denied in every mode, never downgraded.
+            v = Verdict::Deny;
+        } else if prod {
             v = if floor {
                 Verdict::Deny
             } else {
@@ -237,7 +265,7 @@ pub fn decide(findings: Vec<Finding>, cfg: &GuardConfig, action_text: &str) -> D
         } else if cfg.allow_local && all_local && v >= Verdict::Ask {
             v = Verdict::Warn;
         }
-        if !floor {
+        if !floor && f.kind != Kind::Hard {
             v = match (cfg.mode, v) {
                 (Mode::Ask, Verdict::Deny) => Verdict::Ask,
                 (Mode::Warn, Verdict::Deny | Verdict::Ask) => Verdict::Warn,
