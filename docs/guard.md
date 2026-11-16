@@ -204,6 +204,7 @@ default_prod_patterns = true   # `prod`, `production`, `prd`, `live` (or prod2�
 log = true
 log_sql = "redacted"      # redacted | hash | none
 # log_path = "/var/log/vericto-guard.jsonl"
+hard = false              # hard mode's deny rules (VG-7xx) for this project; see "Hard mode"
 
 [guard.checks]            # turn a pack off
 sql = true
@@ -294,7 +295,23 @@ apply to SQL. The guard's own rules:
 | VG-405 | medium | `docker compose down -v`, `docker volume rm <db volume>`, `docker volume prune`, `docker system prune --volumes` |
 | VG-501 | sensitive | apply migrations or schema changes (`prisma migrate deploy`, `db push`, `drizzle-kit push|migrate`, `rails db:migrate`, `alembic upgrade`, `manage.py migrate`, `artisan migrate`, `flyway migrate`, `supabase db push`…) |
 | VG-601 / 602 | critical / medium | MCP tools that drop or delete by name / delete a branch, an index, pause a project |
+| VG-701 | hard | a direct database client: `psql`, `pg_dump`, `pg_dumpall`, `pg_restore`, `pg_basebackup`, `pgcli`, `mysql`, `mariadb`, `mysqldump`, `mariadb-dump`, `mysqlpump`, `mysqlsh`, `mysqlimport`, `mysqladmin`, `mycli`, `sqlcmd`, `usql` (also behind `sudo`, `docker exec`, `ssh`, `bash -c`…; `--version` / `--help` alone are allowed) |
+| VG-702 | hard | reading a credential file: `.env`, `.env.*` (not `.example`, `.sample`, `.template`, `.dist`, `.defaults`, `.schema`), `.envrc`, `~/.pgpass`, `pgpass.conf`, `~/.my.cnf`, `~/.mylogin.cnf`, `~/.config/vericto/**`, `/run/secrets/**`, `*.vericto-backup-*` and the hard-mode backup directory; by any program but listing, permission, deletion and env-loading launchers (`ls`, `test`, `chmod`, `rm`, `echo`, `dotenv`, `docker --env-file`…), as `< file`, `source`, an MCP tool argument, or Cursor's file reads |
+| VG-703 | hard | the OS credential store: `security find-*-password`, `dump-keychain`, `set-*-partition-list`, `export`; `secret-tool`; `cmdkey`, `vaultcmd`; `kwallet-query`; `keyring get|set|del`; PowerShell `Get-StoredCredential`, `PasswordVault`, `CredRead`, `Get-Secret` |
+| VG-704 | hard | `vericto-proxy mcp credential set|delete`, `vericto guard uninstall`, and shell writes (`>`, `tee`, `cp`, `mv`, `rm`, `sed -i`…) to `.vericto.toml`, `.claude/settings*.json`, `.claude.json`, `.mcp.json`, `.cursor/hooks.json`, `.cursor/mcp.json`, `.codex/hooks.json`, `.codex/config.toml` |
 | VG-901 | critical | hook input that cannot be read but contains a destructive operation |
+
+The `VG-7xx` rules apply only in hard mode (`[guard] hard = true`, or the hook
+run with `--hard`, which `install --hard` writes). They are denied in every
+`mode` (`ask` and `warn` do not soften them, `allow_local` does not apply); only
+a `[[guard.allow]]` entry with a reason opens one, for example:
+
+```toml
+[[guard.allow]]
+rule = "VG-701"
+command = "docker compose exec db psql*"
+reason = "the throwaway compose database; the real one is only reachable through vericto-db"
+```
 
 ## Limits (read this)
 
@@ -327,23 +344,156 @@ A hook is a guardrail, not a security boundary.
 
 ### Hard mode: a boundary the agent cannot step over
 
-For a real boundary, take the destructive capability away from the agent's
-process instead of watching what it types:
+For a real boundary, take the capability away from the agent's process instead
+of watching what it types:
 
 1. **Read-only credentials.** Give the agent a database role that can only
    `SELECT` (or connect it to a read replica). Keep the owner or migration role
    out of its environment.
-2. **Remove production credentials from the agent's environment.** No
-   production `DATABASE_URL` in the shell the agent runs in, and none in the
-   project's `.env`. Use per-developer branches (Neon, Supabase, PlanetScale) or
-   a local database. `vericto guard status` warns when it can see a
-   production-looking URL.
-3. **Give the agent Vericto's MCP server or proxy instead of the credential.**
-   `vericto-proxy mcp` holds the credential and runs every statement through the
-   same engine before it reaches the database, outside the agent's process. The
-   agent never sees the credential, so a script cannot get around it.
+2. **No credentials where the agent looks.** No `DATABASE_URL` in the shell the
+   agent runs in, in the project's `.env`, in `~/.pgpass` or in an MCP server's
+   arguments.
+3. **Vericto's MCP server holds the credential.** `vericto-proxy mcp` reads the
+   URL from the OS keychain and runs every statement through the same engine,
+   read-only, before it reaches the database.
 
-The guard is the fast, zero-setup layer. Hard mode is what you rely on.
+`vericto guard install --hard` sets this up. See the next section.
+
+## Hard mode (`vericto guard install --hard`)
+
+Needs **vericto-proxy 5.2.0 or later** (the release with
+`--database-url-keychain` and `vericto-proxy mcp credential`). The CLI looks on
+`PATH`, then in Homebrew's (`/opt/homebrew/bin`, `/usr/local/bin`,
+`/home/linuxbrew/.linuxbrew/bin`) and Cargo's bin directories, or takes
+`--proxy PATH`. When it is missing or older, it prints the install or upgrade
+command (`brew install vericto/tap/vericto-proxy`, `brew upgrade vericto-proxy`,
+or the release installer) and stops. It never installs anything itself.
+
+```sh
+vericto guard install --hard                      # every agent found; asks before each step
+vericto guard install --hard --agent claude --scope project --dry-run
+vericto guard install --hard --yes --remove-plaintext   # no questions (CI images, scripts)
+vericto guard install --hard --name shop          # an entry you stored yourself
+vericto guard status                              # hard mode per agent, the role check, what is still exposed
+vericto guard uninstall --hard [--delete-credential]
+```
+
+What `install --hard` does, in order:
+
+1. **Finds the credentials an agent can read**: PostgreSQL, MySQL and MariaDB
+   URLs in the project's `.env`, `.env.*` and `.envrc` (templates such as
+   `.env.example` are skipped), in the environment, in the agents' MCP servers
+   (Claude Code `.mcp.json` and `~/.claude.json`, including this project's
+   entry; Cursor `.cursor/mcp.json` and `~/.cursor/mcp.json`; Codex
+   `~/.codex/config.toml` and `.codex/config.toml`), in the URL files of
+   `vericto-proxy mcp --database-url-file` servers, in `~/.pgpass` (or
+   `PGPASSFILE`) and in `~/.my.cnf`. It also reports `~/.mylogin.cnf` and older
+   `*.vericto-backup-*` copies that hold a URL. Only redacted forms are shown:
+   `postgresql://app:***@db.acme.io:5432/shop?sslmode=require`. The query string
+   shows only known-safe keys (`sslmode`, `connect_timeout`…), never a password.
+2. **Moves the chosen ones into the OS keychain.** With your confirmation (or
+   `--yes`), the URL is written to the stdin of `vericto-proxy mcp credential set
+   <name>`, never to a command line, a file or a log. The name defaults to the
+   database name (`--name` to choose). Then `vericto-proxy mcp credential test
+   <name> --require-read-only` connects and checks the role:
+   - **read-only**: continue;
+   - **can write, or not verified** (exit 3): the reasons and the SQL for a
+     read-only role (PostgreSQL or MySQL) are printed, the entry this run created
+     is deleted again, and nothing is configured for it. `--allow-write-role`
+     configures it anyway, without `--require-read-only`. **That is not hard
+     mode**, and `status` says so;
+   - **unreachable or login refused** (exit 4): the run stops and deletes what it
+     stored. `--allow-unreachable` configures it anyway: the server keeps
+     `--require-read-only`, so it checks the role when it starts and refuses to
+     run otherwise.
+3. **Configures each agent**: an MCP server `vericto-db` (`vericto-db-<name>`
+   with several credentials) that runs
+   `<absolute path>/vericto-proxy mcp --database-url-keychain <name> --require-read-only`,
+   in `~/.claude.json` / `.mcp.json`, `~/.cursor/mcp.json` / `.cursor/mcp.json`,
+   or `config.toml` (`[mcp_servers.vericto-db]`). The guard hook is installed with
+   `--hard` (Cursor also gets `beforeReadFile`, so its file reads are checked),
+   and Claude Code gets `permissions.deny` rules: the database clients
+   (`Bash(psql:*)`…), the credential files (`Read(**/.env)`, `Read(**/.env.*)`,
+   `Read(~/.pgpass)`…), the keychain commands, `vericto-proxy mcp credential
+   set|delete`, `vericto guard uninstall`, `Edit`/`Write` of `.vericto.toml`, and
+   the backup directory. Merges keep other servers, settings and key order; a
+   second run changes nothing; files that are not valid JSON or TOML are left
+   alone.
+4. **Offers to take the plaintext out**, one file at a time, only with your
+   consent (`--remove-plaintext` when nothing can be asked): the `.env` line, the
+   `~/.pgpass` line or the `~/.my.cnf` `password` line becomes a comment that
+   points here, and an MCP server entry that embeds the URL is removed (JSON has
+   no comments). Programs that read the URL from those files (your app, Prisma,
+   `psql` through `~/.pgpass`) stop finding it. Give them the URL another way,
+   outside the agent's reach. A URL in the environment, a URL file and
+   `~/.mylogin.cnf` are listed for you to remove; the CLI does not change them.
+
+**Backups.** In hard mode every file is copied before it changes into
+`<state dir>/vericto/guard-backups` (`~/.local/state` on Linux,
+`~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows;
+`VERICTO_GUARD_BACKUP_DIR` overrides it). The directory is `0700` and the copies
+are `0600`. They are never next to the file: a `.env.vericto-backup-…` in the
+project would be one more copy the agent and `git add` can reach. File
+permissions are kept (`~/.pgpass` stays `0600`).
+
+**`status`** shows, per agent and scope: the MCP entry and the keychain entry it
+reads, whether it requires a read-only role, whether the proxy binary exists,
+whether the hook runs with `--hard`, and how many of the deny rules are in place.
+It then runs `credential test <name> --require-read-only` with the entry's own
+binary (20 s timeout; `--no-test` skips it), and shows **read-only (verified)**,
+**can write**, **unverified**, **unreachable** or **no such keychain entry**.
+Last, it lists what is still exposed (redacted).
+
+**`uninstall --hard`** removes the `vericto-db` entries and the deny rules, and
+puts the hook back without `--hard`. The plain guard stays: `vericto guard
+uninstall` removes it. It asks before it deletes each keychain entry
+(`--delete-credential` when nothing can be asked). It does **not** write the
+plaintext URLs back: the backups hold them, and you copy back what you need.
+A deny rule identical to one of hard mode's is removed even if you had added it
+yourself; the diff shows it.
+
+**After install**: restart the agent; in Codex, run `/hooks` and trust the
+changed hook. Claude Code asks you to approve a project's `.mcp.json` server the
+first time. A project-scope install writes this machine's proxy path into
+`.mcp.json`, so teammates on other machines need their own install. Linked mode
+(`VERICTO_API_KEY`, `VERICTO_DATABASE_ID`) goes in the entry's `env`, which
+install keeps.
+
+### Threat model and honest limits
+
+Hard mode defends against an agent, or a prompt injection steering it, that
+looks for a credential where agents find one (`.env`, `DATABASE_URL`,
+`~/.pgpass`, `~/.my.cnf`, the MCP configuration, a URL file, the keychain CLI)
+and runs SQL around Vericto with `psql`, `mysql` or `pg_dump`. It also defends
+against a write that gets past the statement-class check and the read-only
+transaction, because the role cannot write.
+
+It is **not an OS security boundary**. In stdio mode the server runs as your OS
+user, and so does the agent:
+
+| Platform | Who can read the keychain entry without a prompt |
+|---|---|
+| macOS Keychain | The `vericto-proxy` binary that created it. Another program of the same user (`security find-generic-password -w`, a script) gets a system prompt you must approve; clicking *Always Allow* removes that barrier. After a proxy upgrade the new binary prompts once. |
+| Windows Credential Manager | Any process of the same user, without a prompt. It keeps the URL out of files and the environment, not out of your processes. |
+| Linux Secret Service (GNOME Keyring, KWallet) | Any process of the same user while the keyring is unlocked (normally the whole desktop session), without a prompt. Needs `secret-tool` (`libsecret-tools` on Debian and Ubuntu, `libsecret` on Fedora and Arch). Servers and containers have no Secret Service: use `vericto-proxy mcp --database-url-file` (0600) there. |
+
+Also:
+
+- The deny rules name the common clients and the obvious reads. A determined
+  agent with a shell can still write a script, use another client or a language
+  driver, or read the keychain through an API (Windows and Linux, no prompt).
+  The guard does not read script contents.
+- Programs that load `.env` themselves (your app, Prisma, Next.js, `dotenv --`)
+  still can. That is why install offers to take the URL out of the file.
+- The agent can run `vericto-proxy mcp --database-url-keychain <name>` itself.
+  It gets nothing more than `execute_sql`.
+- Claude Code's `Read(**/.env.*)` rule also hides `.env.example` from Claude's
+  Read tool. Claude rules have no exceptions. `cat .env.example` is allowed.
+- Hooks can be skipped (see "Limits"). The read-only role is what holds then.
+- **For strict isolation**, run the server as a different OS user (the agent's
+  user cannot read that user's keychain or files), in a container, or on another
+  host over Streamable HTTP, with the database's network open to the server
+  only. See vericto-proxy's docs/MCP.md, "Set up Streamable HTTP for a team".
 
 ## Sources (checked 2026-11-15)
 

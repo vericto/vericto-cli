@@ -1377,3 +1377,276 @@ fn analysis_is_fast() {
     // Generous for debug builds on a loaded CI machine; release is ~100x under.
     assert!(p95 < std::time::Duration::from_millis(200), "p95 {p95:?}");
 }
+
+/// Hard mode's table: `[guard] hard = true`.
+fn check_hard_table(toml: &str, rows: &[(&str, Verdict, &str)]) {
+    let p = Project::new();
+    let l = p.loaded(toml);
+    let env = HashMap::new();
+    let mut failures = Vec::new();
+    for (cmd, want, code) in rows {
+        let d = run_with(&p, &l, &env, cmd);
+        let cs = codes(&d);
+        let code_ok = code.is_empty() || cs.iter().any(|c| c.starts_with(code));
+        if d.verdict != *want || !code_ok {
+            failures.push(format!(
+                "{cmd:?}: got {:?} {cs:?}, want {want:?} {code}",
+                d.verdict
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn hard_mode_denies_the_bypasses() {
+    check_hard_table(
+        "[guard]\nhard = true\n",
+        &[
+            // Direct database clients, whatever they run.
+            ("psql -c 'SELECT 1'", Deny, "VG-701"),
+            ("psql \"$DATABASE_URL\"", Deny, "VG-701"),
+            ("mysql -u root -e 'SHOW TABLES'", Deny, "VG-701"),
+            ("mariadb shop", Deny, "VG-701"),
+            ("pg_dump -Fc shop > shop.dump", Deny, "VG-701"),
+            ("mysqldump shop", Deny, "VG-701"),
+            ("sqlcmd -S db -Q 'SELECT 1'", Deny, "VG-701"),
+            ("sudo -u postgres psql", Deny, "VG-701"),
+            ("docker compose exec db psql -U app", Deny, "VG-701"),
+            ("ssh bastion 'psql -h db.internal'", Deny, "VG-701"),
+            ("bash -c 'mysql -e \"select 1\"'", Deny, "VG-701"),
+            ("/opt/homebrew/opt/libpq/bin/psql -l", Deny, "VG-701"),
+            ("npx pgcli postgres://u@h/db", Deny, "VG-701"),
+            // Credential files.
+            ("cat .env", Deny, "VG-702"),
+            ("cat ./.env.local", Deny, "VG-702"),
+            ("grep DATABASE_URL .env.production", Deny, "VG-702"),
+            ("head -n 5 ~/.pgpass", Deny, "VG-702"),
+            ("less $HOME/.my.cnf", Deny, "VG-702"),
+            ("cat < .env", Deny, "VG-702"),
+            ("source .env && echo $DATABASE_URL", Deny, "VG-702"),
+            (". ./.envrc", Deny, "VG-702"),
+            ("cp .env /tmp/x", Deny, "VG-702"),
+            ("base64 .env", Deny, "VG-702"),
+            ("cat .env*", Deny, "VG-702"),
+            ("cat ~/.config/vericto/shop.url", Deny, "VG-702"),
+            ("cat .mcp.json.vericto-backup-1731700000", Deny, "VG-702"),
+            ("awk -F= '/URL/ {print $2}' .env", Deny, "VG-702"),
+            ("git show HEAD:.env", Deny, "VG-702"),
+            ("sudo cat /home/app/.pgpass", Deny, "VG-702"),
+            // OS credential stores.
+            (
+                "security find-generic-password -s vericto-proxy -a shop -w",
+                Deny,
+                "VG-703",
+            ),
+            ("security dump-keychain -d", Deny, "VG-703"),
+            (
+                "security set-generic-password-partition-list -s vericto-proxy",
+                Deny,
+                "VG-703",
+            ),
+            (
+                "secret-tool lookup service vericto-proxy account shop",
+                Deny,
+                "VG-703",
+            ),
+            (
+                "secret-tool search --all application vericto-proxy",
+                Deny,
+                "VG-703",
+            ),
+            ("cmdkey /list", Deny, "VG-703"),
+            (
+                "powershell -Command \"Get-StoredCredential -Target vericto-proxy\"",
+                Deny,
+                "VG-703",
+            ),
+            (
+                "pwsh -c '[Windows.Security.Credentials.PasswordVault]::new().RetrieveAll()'",
+                Deny,
+                "VG-703",
+            ),
+            ("keyring get vericto-proxy shop", Deny, "VG-703"),
+            // The keychain entry and the guard.
+            ("vericto-proxy mcp credential set shop", Deny, "VG-704"),
+            (
+                "echo postgres://x | vericto-proxy mcp credential set shop",
+                Deny,
+                "VG-704",
+            ),
+            (
+                "~/.cargo/bin/vericto-proxy mcp credential delete shop",
+                Deny,
+                "VG-704",
+            ),
+            ("vericto guard uninstall --hard", Deny, "VG-704"),
+            ("vericto guard uninstall", Deny, "VG-704"),
+            ("echo 'hard = false' >> .vericto.toml", Deny, "VG-704"),
+            (
+                "sed -i '' 's/hard = true/hard = false/' .vericto.toml",
+                Deny,
+                "VG-704",
+            ),
+            ("rm .vericto.toml", Deny, "VG-704"),
+            ("cat x.json > ~/.claude/settings.json", Deny, "VG-704"),
+            ("tee .mcp.json < new.json", Deny, "VG-704"),
+            ("cp hooks.json ~/.cursor/hooks.json", Deny, "VG-704"),
+        ],
+    );
+}
+
+#[test]
+fn hard_mode_false_positive_traps() {
+    check_hard_table(
+        "[guard]\nhard = true\n",
+        &[
+            ("npm test", Allow, ""),
+            ("cat README.md", Allow, ""),
+            ("cat .env.example", Allow, ""),
+            ("cp .env.example .env.sample", Allow, ""),
+            ("cat .env.local.template", Allow, ""),
+            ("ls -la .env", Allow, ""),
+            ("test -f .env && echo yes", Allow, ""),
+            ("echo .env >> .gitignore", Allow, ""),
+            ("grep -q '^.env$' .gitignore", Allow, ""),
+            ("git check-ignore .env", Allow, ""),
+            ("git status", Allow, ""),
+            ("chmod 600 ~/.pgpass", Allow, ""),
+            ("rm .env.vericto-backup-1", Allow, ""),
+            ("dotenv -e .env -- next dev", Allow, ""),
+            ("docker compose --env-file .env up -d", Allow, ""),
+            ("cat src/env.ts", Allow, ""),
+            ("cat .environment", Allow, ""),
+            ("grep -r DATABASE_URL src/", Allow, ""),
+            ("which psql", Allow, ""),
+            ("psql --version", Allow, ""),
+            ("mysql --help", Allow, ""),
+            ("brew install postgresql@17", Allow, ""),
+            ("echo 'psql is denied in hard mode'", Allow, ""),
+            ("grep -rn security src/", Allow, ""),
+            ("security list-keychains", Allow, ""),
+            (
+                "vericto-proxy mcp credential test shop --require-read-only",
+                Allow,
+                "",
+            ),
+            ("vericto-proxy mcp --database-url-keychain shop", Allow, ""),
+            ("vericto guard status", Allow, ""),
+            ("vericto check --offline --sql 'SELECT 1'", Allow, ""),
+            ("cat .vericto.toml", Allow, ""),
+            ("cat ~/.claude/settings.json", Allow, ""),
+            ("prisma migrate dev", Allow, ""),
+            ("cargo test", Allow, ""),
+            ("sed 's/a/b/' .vericto.toml", Allow, ""),
+        ],
+    );
+}
+
+#[test]
+fn hard_mode_is_off_by_default_and_on_with_the_hook_flag() {
+    let p = Project::new();
+    let l = p.loaded("");
+    let env = HashMap::new();
+    assert_eq!(run_with(&p, &l, &env, "psql -c 'SELECT 1'").verdict, Allow);
+    assert_eq!(run_with(&p, &l, &env, "cat .env").verdict, Allow);
+    let mut hard = l.clone();
+    hard.config.hard = true;
+    assert_eq!(
+        run_with(&p, &hard, &env, "psql -c 'SELECT 1'").verdict,
+        Deny
+    );
+}
+
+#[test]
+fn hard_mode_ignores_mode_but_honours_allow_entries() {
+    // `mode = "warn"` does not soften hard mode's rules.
+    check_hard_table(
+        "[guard]\nhard = true\nmode = \"warn\"\nallow_local = true\n",
+        &[
+            ("psql -h localhost -c 'SELECT 1'", Deny, "VG-701"),
+            ("cat .env", Deny, "VG-702"),
+        ],
+    );
+    // An allow entry with a reason opens one rule for one command.
+    check_hard_table(
+        "[guard]\nhard = true\n[[guard.allow]]\nrule = \"VG-701\"\ncommand = \"docker compose exec db psql*\"\nreason = \"the local compose database\"\n",
+        &[
+            ("docker compose exec db psql -U app -c 'SELECT 1'", Allow, ""),
+            ("psql -h db.prod.acme.io", Deny, "VG-701"),
+            ("docker compose exec db psql -c 'DROP TABLE users'", Deny, ""),
+        ],
+    );
+}
+
+#[test]
+fn hard_mode_checks_mcp_and_file_reads() {
+    let p = Project::new();
+    let mut l = p.loaded("");
+    l.config.hard = true;
+    let d = evaluate(
+        &Action::Mcp {
+            server: "filesystem".into(),
+            tool: "read_file".into(),
+            input: json!({"path": "/repo/.env.local"}),
+        },
+        p.path(),
+        &l,
+        &|_| None,
+    );
+    assert_eq!(d.verdict, Deny);
+    assert_eq!(codes(&d), vec!["VG-702"]);
+    let ok = evaluate(
+        &Action::Mcp {
+            server: "filesystem".into(),
+            tool: "read_file".into(),
+            input: json!({"path": "/repo/README.md"}),
+        },
+        p.path(),
+        &l,
+        &|_| None,
+    );
+    assert_eq!(ok.verdict, Allow);
+    let r = evaluate(
+        &Action::ReadFile("/repo/.env".into()),
+        p.path(),
+        &l,
+        &|_| None,
+    );
+    assert_eq!(r.verdict, Deny);
+    let r = evaluate(
+        &Action::ReadFile("/repo/.env.example".into()),
+        p.path(),
+        &l,
+        &|_| None,
+    );
+    assert_eq!(r.verdict, Allow);
+    l.config.hard = false;
+    let r = evaluate(
+        &Action::ReadFile("/repo/.env".into()),
+        p.path(),
+        &l,
+        &|_| None,
+    );
+    assert_eq!(r.verdict, Allow);
+}
+
+#[test]
+fn cursor_before_read_file_is_parsed_without_the_content() {
+    let input = json!({
+        "hook_event_name": "beforeReadFile",
+        "conversation_id": "c1",
+        "workspace_roots": ["/repo"],
+        "file_path": "/repo/.env",
+        "content": "DATABASE_URL=postgres://u:hunter2@h/db",
+        "attachments": []
+    });
+    let i = hook::parse_input(Agent::Cursor, &input).unwrap();
+    assert!(matches!(&i.action, Some(Action::ReadFile(p)) if p == "/repo/.env"));
+    assert!(!format!("{:?}", i.action).contains("hunter2"));
+}

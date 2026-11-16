@@ -14,7 +14,8 @@
 //! - **Cursor** `beforeShellExecution` / `beforeMCPExecution`: `command` /
 //!   `tool_name` + `tool_input` (a JSON string) + `mcp_server_name`. Always
 //!   answers `{"permission": …}` with `agent_message` / `user_message`, exit 0
-//!   (Cursor reads no output as a failure).
+//!   (Cursor reads no output as a failure). `beforeReadFile` (hard mode
+//!   only): `file_path`; answered with `permission` and `user_message`.
 //! - **Codex** `PreToolUse` (matcher `Bash|mcp__.*`): like Claude's input.
 //!   Deny: the reason on stderr, exit 2. Codex does not support `ask` in
 //!   PreToolUse yet (it treats it as a failed hook and runs the tool), so an
@@ -154,6 +155,11 @@ pub fn parse_input(agent: Agent, v: &Value) -> Result<HookInput, String> {
                         tool: tool.clone(),
                         input,
                     });
+                }
+                "beforeReadFile" => {
+                    // `content` (the whole file) is never kept.
+                    let path = s(v, "file_path").ok_or("beforeReadFile input has no file_path")?;
+                    out.action = Some(Action::ReadFile(path));
                 }
                 "preToolUse" => {
                     let input = v.get("tool_input").cloned().unwrap_or(Value::Null);

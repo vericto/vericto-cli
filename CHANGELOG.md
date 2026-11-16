@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-16
+
+Adds **`vericto guard`** for Claude Code, Cursor and Codex, with its **hard mode**
+(`vericto guard install --hard`, which needs vericto-proxy 5.2.0 or later). Still
+embeds vericto-engine 5.1.0; `check`, `serve` and CI behaviour are unchanged.
+
 ### Added
 - **`vericto guard`: database guardrails for coding agents** (Claude Code,
   Cursor, Codex). It checks the shell commands and MCP tool calls an agent is
@@ -70,6 +76,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `/plugin marketplace add vericto/vericto-cli`, then `/plugin install
     vericto-guard@vericto`. If the CLI is missing, the plugin warns on every
     checked call and does not block (`VERICTO_GUARD_REQUIRE_CLI=1` blocks).
+- **Hard mode: `vericto guard install --hard`**. The agent never holds the
+  database credential. Needs vericto-proxy 5.2.0 or later. The CLI looks on
+  PATH, Homebrew and Cargo's bin directories, or takes `--proxy`; when the
+  proxy is missing or older it prints the install or upgrade command and stops.
+  See docs/guard.md, "Hard mode".
+  - **Finds the credentials an agent can read**: PostgreSQL, MySQL and MariaDB
+    URLs in the project's `.env*` and `.envrc`, the environment, Claude Code /
+    Cursor / Codex MCP servers (and `--database-url-file` URL files),
+    `~/.pgpass` and `~/.my.cnf`. It also reports `~/.mylogin.cnf` and backups
+    that hold a URL. Everything is shown redacted.
+  - **Moves them into the OS keychain**, with confirmation (`--yes`): the URL
+    goes to the stdin of `vericto-proxy mcp credential set <name>`, never to a
+    command line. Then `credential test <name> --require-read-only` runs. A
+    role that can write, or cannot be verified, is refused: the reasons and
+    the read-only role SQL are shown, and the entry is deleted again.
+    `--allow-write-role` (documented as not hard mode) and
+    `--allow-unreachable` override that.
+  - **Configures each agent**: a `vericto-db` MCP server running
+    `vericto-proxy mcp --database-url-keychain <name> --require-read-only`,
+    the hook with `--hard`, Cursor's `beforeReadFile`, and Claude Code
+    `permissions.deny` rules. Merges are idempotent and keep other servers
+    and settings.
+  - **Takes the plaintext URL out**, only with consent (`--remove-plaintext`):
+    a `.env`, `~/.pgpass` or `~/.my.cnf` line becomes a comment, and an MCP
+    entry that embeds the URL is removed.
+  - **Backups** go to a private `0700` directory
+    (`<state dir>/vericto/guard-backups`, `VERICTO_GUARD_BACKUP_DIR`), never
+    next to the file.
+  - **`vericto guard status`** shows hard mode per agent: the MCP entry, the
+    hook, the deny rules, the role check (read-only verified / can write /
+    unverified / unreachable; `--no-test` skips it), and what is still exposed.
+  - **`vericto guard uninstall --hard`** removes the entries and the rules,
+    puts the plain hook back and offers to delete the keychain entry
+    (`--delete-credential`). It never writes a plaintext URL back.
+- **Hard mode's deny rules** (`[guard] hard = true` in `.vericto.toml`, or
+  `vericto guard hook --hard`), denied in every mode; only a
+  `[[guard.allow]]` entry with a reason opens one:
+  - `VG-701`: direct database clients (`psql`, `pg_dump`, `mysql`, `mariadb`,
+    `mysqldump`, `mysqlsh`, `sqlcmd`, `usql`…).
+  - `VG-702`: reading `.env*`, `~/.pgpass`, `~/.my.cnf`, `~/.config/vericto/**`
+    and the guard's backups (by shell, `source`, `< file`, MCP tool arguments
+    and Cursor file reads; templates such as `.env.example` excluded).
+  - `VG-703`: the OS credential store (`security find-generic-password`,
+    `secret-tool`, `cmdkey`, PowerShell credential cmdlets).
+  - `VG-704`: `vericto-proxy mcp credential set|delete`, `vericto guard
+    uninstall`, and shell writes to `.vericto.toml` and to the agents' hook
+    and MCP files.
 
 ### Tests
 - 300 table-driven detector cases (about 100 of them false-positive traps),
@@ -78,6 +131,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uninstall idempotency on temporary files; the shell reader; and an
   end-to-end suite that pipes hook JSON into the built binary on a temporary
   `HOME` and measures the hook's latency.
+- Hard mode:
+  - the credential scanners on fixtures with fake URLs (every place, and that
+    no output carries the password);
+  - MCP-entry, deny-rule and plaintext-removal merges for each agent's format
+    (JSON and Codex TOML), with idempotency and exact removal;
+  - 50 VG-7xx deny cases and 33 false-positive traps;
+  - private backups that keep file permissions;
+  - `tests/guard_hard.rs`, end to end against a stand-in `vericto-proxy`
+    (`tests/fixtures/guard/fake-vericto-proxy.sh`, the `credential`
+    JSON / exit-code contract) on a temporary HOME: install, the hook,
+    status, a second run, uninstall, a role that can write, an unverified
+    role, unreachable, an old or missing proxy, several credentials;
+  - optionally the same flow against a real vericto-proxy debug build
+    (`VERICTO_TEST_REAL_PROXY`).
 
 ## [2.3.0] - 2026-11-15
 
