@@ -6,6 +6,79 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`vericto guard`: database guardrails for coding agents** (Claude Code,
+  Cursor, Codex). It checks the shell commands and MCP tool calls an agent is
+  about to run, and blocks the destructive database ones before they run.
+  Offline, no account, nothing leaves the machine. See `docs/guard.md`.
+  - **SQL** sent to `psql`, `mysql`/`mariadb`, `sqlite3`, `sqlcmd`, `duckdb`,
+    `clickhouse-client`, `cockroach sql`, `wrangler d1 execute`, `turso db
+    shell`, `heroku pg:psql`, `prisma db execute`, `manage.py dbshell` and
+    `rails dbconsole` (`-c`/`-e`/`-Q`, `-f file`, heredocs, here-strings,
+    pipes, `< file`), and SQL in MCP tool arguments (`sql`, `query` on
+    database servers…). It is evaluated by the embedded engine with the
+    runtime profile, like `check --offline --sql`. A migration file's schema
+    DDL is asked about instead of denied.
+  - **ORM, migration and database commands**: Prisma, Drizzle, Rails,
+    Alembic / Flask-Migrate, Django, Laravel, Knex, Sequelize, TypeORM,
+    MikroORM, Ecto, Flyway, Liquibase, Doctrine, EF Core, sqlx, Diesel,
+    dbmate, goose, golang-migrate, Atlas, Sqitch, the Supabase CLI and
+    SQLAlchemy `drop_all`. Also `dropdb`, `mysqladmin drop`, `redis-cli
+    FLUSHALL`, `mongosh` drops, `pg_restore --clean`, `mongorestore --drop`,
+    and the platform commands that delete a database (`heroku pg:reset`,
+    `neonctl projects delete`, `aws rds delete-db-instance`, `docker compose
+    down -v`…). Stable rule codes `VG-1xx`…`VG-6xx`.
+  - **Shell reading**: commands are read the way the shell runs them. That
+    covers quotes, operators, subshells, `$(…)`, `bash -c`, `eval`, env
+    prefixes, and launchers such as `sudo`, `npx`, `pnpm`/`yarn`/`bun`,
+    `npm run` (from `package.json`), `dotenv`, `uv run`, `bundle exec`,
+    `docker exec`, `docker compose exec`, `kubectl exec`, `ssh` and
+    `heroku run`. So `grep DROP`, `echo "DELETE FROM"`, comments, `prisma
+    migrate dev`, `rails db:migrate` and `alembic upgrade head` are allowed.
+  - **Production context**: production is read from the command, its
+    environment, the agent's environment and the project's `.env` /
+    `.env.local` (`-h db.prod…`, `RAILS_ENV=production`, `dotenv -e
+    .env.production`, a production `DATABASE_URL`). On production anything
+    that can lose data is denied in every mode, and applying migrations is
+    asked about. Credentials are never kept, shown or logged.
+  - **Policy** in `.vericto.toml` `[guard]`: `mode` (`block` / `ask` /
+    `warn`), `[[guard.allow]]` entries (a reason is required; they never
+    open production unless `prod = true`), `prod_hosts`, `local_hosts`,
+    `allow_local`, `high_sql`, `unverified_sql`, `[guard.checks]`. Unknown
+    keys are an error.
+  - **`vericto guard hook --agent claude|cursor|codex`** speaks each agent's
+    hook protocol:
+    - Claude Code: a `PreToolUse` deny is the JSON decision plus exit 2, and
+      an ask stays an ask except in `bypassPermissions` / `dontAsk`.
+    - Cursor: `permission` with `agent_message` / `user_message`.
+    - Codex: exit 2 with the reason. Codex has no ask yet, so an ask is a
+      deny that says a human must run the command.
+    - An allow prints nothing (Claude, Codex), so the agent's own permission
+      rules still apply.
+  - **`vericto guard install | uninstall [--agent …] [--scope user|project]
+    [--dry-run]`** merges the hook into `~/.claude/settings.json`,
+    `~/.cursor/hooks.json` (with `failClosed`) or `~/.codex/hooks.json`, or
+    into the project's copies. It keeps the other hooks and the key order,
+    saves a backup before writing, never rewrites invalid JSON, and is
+    idempotent.
+  - **`vericto guard status`, `vericto guard test "<command>"` (or `--mcp
+    SERVER/TOOL '<json>'`) and `vericto guard log`.** Decisions go to a local
+    JSONL log with secrets and string literals removed (`log_sql =
+    "redacted" | "hash" | "none"`), rotated at 10 MiB.
+  - **Claude Code plugin and marketplace** in this repository
+    (`.claude-plugin/marketplace.json`, `plugins/vericto-guard`):
+    `/plugin marketplace add vericto/vericto-cli`, then `/plugin install
+    vericto-guard@vericto`. If the CLI is missing, the plugin warns on every
+    checked call and does not block (`VERICTO_GUARD_REQUIRE_CLI=1` blocks).
+
+### Tests
+- 300 table-driven detector cases (about 100 of them false-positive traps),
+  plus production-context, policy and MCP cases; golden tests of each
+  agent's hook input and output (fixtures from the agents' docs); install /
+  uninstall idempotency on temporary files; the shell reader; and an
+  end-to-end suite that pipes hook JSON into the built binary on a temporary
+  `HOME` and measures the hook's latency.
+
 ## [2.3.0] - 2026-11-15
 
 Embeds **vericto-engine 5.1.0**. A minor release; read **Behaviour changes**

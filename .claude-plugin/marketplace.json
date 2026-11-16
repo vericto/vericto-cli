@@ -1,0 +1,17 @@
+{
+  "name": "vericto",
+  "description": "Vericto plugins for Claude Code: database guardrails for AI agents.",
+  "owner": {
+    "name": "Vericto"
+  },
+  "plugins": [
+    {
+      "name": "vericto-guard",
+      "source": "./plugins/vericto-guard",
+      "description": "Checks the SQL and the destructive database commands Claude runs (psql -c, prisma migrate reset, rails db:drop, SQL in database MCP tools) and blocks them before they run. Offline, uses the vericto CLI.",
+      "version": "2.4.0",
+      "category": "security",
+      "tags": ["database", "sql", "safety", "postgres", "mysql", "prisma", "hooks"]
+    }
+  ]
+}

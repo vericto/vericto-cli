@@ -1,0 +1,15 @@
+{
+  "conversation_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+  "generation_id": "490b90b7-a2ce-4c2c-bb76-cb77b125df2f",
+  "model": "claude-sonnet-4",
+  "model_id": "claude-sonnet-4",
+  "model_params": [],
+  "hook_event_name": "beforeShellExecution",
+  "cursor_version": "2.1.0",
+  "workspace_roots": ["/Users/dev/my-project"],
+  "user_email": null,
+  "transcript_path": null,
+  "command": "npm test",
+  "cwd": "",
+  "sandbox": false
+}

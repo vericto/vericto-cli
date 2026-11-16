@@ -14,6 +14,7 @@ mod baseline;
 mod browser_login;
 mod ci_env;
 mod config;
+mod guard;
 mod migration;
 mod nudge;
 mod offline;
@@ -229,6 +230,9 @@ enum Command {
     /// Run a local evaluation server for the SDKs: JSON Lines over stdin/stdout,
     /// offline, no network (see docs/serve-protocol.md).
     Serve(ServeArgs),
+    /// Protect coding agents (Claude Code, Cursor, Codex): check the SQL and
+    /// destructive database commands they run, offline (see docs/guard.md).
+    Guard(guard::cli::GuardArgs),
 }
 
 /// `vericto serve --stdio`. The long help is the protocol summary the SDKs
@@ -1305,6 +1309,7 @@ async fn main() -> ExitCode {
         }
         Command::Completions(args) => run_completions(args),
         Command::Serve(args) => run_serve(args),
+        Command::Guard(args) => guard::cli::run(args),
     }
 }
 

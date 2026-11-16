@@ -1,0 +1,14 @@
+{
+  "session_id": "0199a213-81c0-7800-8aa1-bbab2a035a53",
+  "turn_id": "0199a213-81c0-7800-8aa1-bbab2a035a54",
+  "transcript_path": "/home/user/.codex/sessions/2026/11/15/rollout.jsonl",
+  "cwd": "/home/user/my-project",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5-codex",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_use_id": "call_abc123",
+  "tool_input": {
+    "command": "npm test"
+  }
+}
