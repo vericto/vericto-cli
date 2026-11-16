@@ -1,0 +1,14 @@
+{
+  "name": "vericto-guard",
+  "displayName": "Vericto Guard",
+  "version": "2.4.0",
+  "description": "Database guardrails for Claude Code: checks every SQL statement and destructive database command (psql, mysql, sqlite3, Prisma, Drizzle, Rails, Django, Alembic, Laravel, Supabase CLI, database MCP tools) before it runs, and blocks the destructive ones. Offline; needs the vericto CLI.",
+  "author": {
+    "name": "Vericto",
+    "url": "https://vericto.com"
+  },
+  "homepage": "https://github.com/vericto/vericto-cli/blob/main/docs/guard.md",
+  "repository": "https://github.com/vericto/vericto-cli",
+  "license": "AGPL-3.0-only",
+  "keywords": ["database", "sql", "guardrails", "postgres", "mysql", "prisma", "migrations", "safety"]
+}

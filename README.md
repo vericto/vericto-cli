@@ -189,6 +189,8 @@ vericto verify-receipt <f> Verify a signed run receipt offline (no network/accou
 vericto version            Print the CLI version.
 vericto completions <sh>   Print a shell completion script (bash|zsh|fish|powershell|elvish).
 vericto serve --stdio      Local evaluation server for the SDKs: JSON Lines on stdin/stdout, offline.
+vericto guard install      Guard a coding agent (Claude Code, Cursor, Codex): block destructive SQL and DB commands.
+vericto guard test "<cmd>" Show what the guard decides for a command (also: hook, uninstall, status, log).
 ```
 
 Enable completions by writing the script where your shell looks for them, e.g.:
@@ -198,6 +200,40 @@ vericto completions bash > ~/.local/share/bash-completion/completions/vericto
 vericto completions zsh  > "${fpath[1]}/_vericto"   # zsh
 vericto completions fish > ~/.config/fish/completions/vericto.fish
 ```
+
+## Guard coding agents (`vericto guard`)
+
+`vericto guard` checks the commands and MCP tool calls a coding agent is about to
+run, and blocks the destructive database ones before they run: `psql -c "DROP
+TABLE …"`, a `DELETE` without `WHERE` in a heredoc or in Supabase's
+`execute_sql`, `prisma migrate reset`, `rails db:drop`, `php artisan
+migrate:fresh`, `alembic downgrade base`, `redis-cli FLUSHALL`, `aws rds
+delete-db-instance`… SQL is parsed by the embedded engine, so `grep DROP` and
+`SELECT 'DROP TABLE x'` are not findings. Anything that can lose data on a
+production-looking target (`-h db.prod…`, `RAILS_ENV=production`, a production
+`DATABASE_URL` in `.env`) is denied in every mode. The agent gets the rule code
+and a fix so it can correct itself. It is offline and needs no account.
+
+```sh
+# Claude Code (inside Claude Code):
+/plugin marketplace add vericto/vericto-cli
+/plugin install vericto-guard@vericto
+
+# Cursor / Codex / Claude Code without the plugin (in a terminal):
+vericto guard install --agent cursor     # or: codex, claude, all
+vericto guard test "npx prisma migrate reset --force"   # DENY VG-101
+```
+
+The policy goes in `.vericto.toml` under `[guard]`: the mode
+(`block`/`ask`/`warn`), allow entries with a required reason, production host
+patterns, and which checks are on. Decisions are logged locally with secrets
+removed; `vericto guard log` shows them.
+
+A hook is a guardrail, not a boundary: an agent can run a script the guard does
+not read. For a hard boundary, give the agent read-only credentials or
+Vericto's MCP server instead of the database credential. See
+**[docs/guard.md](docs/guard.md)** for the rules, the configuration, each
+agent's behaviour and the limits.
 
 ## Baseline & suppression
 
@@ -973,6 +1009,10 @@ vericto-check:
 ```
 
 ## Known limitations
+
+- `vericto guard` is a hook inside the agent's tool loop, not a security
+  boundary: scripts, application code and agents or subagents that skip hooks
+  are not covered (see [docs/guard.md](docs/guard.md#limits-read-this)).
 
 - Workspace checks require network access to the Vericto backend; offline mode
   covers the standard rules only (see above). The API key
